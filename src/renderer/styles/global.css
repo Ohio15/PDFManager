@@ -617,3 +617,125 @@ body {
   background-color: rgba(37, 99, 235, 0.15);
   outline: 1px dashed var(--primary-color);
 }
+
+
+/* Update Notification Styles */
+.update-notification {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  background-color: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 12px 16px;
+  min-width: 300px;
+  max-width: 400px;
+  z-index: 1000;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.update-notification-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.update-notification-content.error {
+  color: var(--danger-color);
+}
+
+.update-notification-content svg {
+  flex-shrink: 0;
+  color: var(--primary-color);
+}
+
+.update-notification-content.error svg {
+  color: var(--danger-color);
+}
+
+.update-notification-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  justify-content: flex-end;
+}
+
+.update-btn {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 0.2s;
+}
+
+.update-btn.primary {
+  background-color: var(--primary-color);
+  color: white;
+}
+
+.update-btn.primary:hover {
+  background-color: var(--primary-hover);
+}
+
+.update-btn.secondary {
+  background-color: transparent;
+  color: var(--text-secondary);
+  padding: 6px;
+}
+
+.update-btn.secondary:hover {
+  background-color: var(--background-color);
+}
+
+.update-progress-bar {
+  height: 4px;
+  background-color: var(--border-color);
+  border-radius: 2px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background-color: var(--primary-color);
+  transition: width 0.3s ease;
+}
+
+.update-progress-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  text-align: right;
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

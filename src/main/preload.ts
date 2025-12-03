@@ -18,6 +18,18 @@ export interface SaveResult {
   canceled?: boolean;
 }
 
+export interface UpdateInfo {
+  version: string;
+  releaseNotes?: string;
+}
+
+export interface UpdateProgress {
+  percent: number;
+  bytesPerSecond: number;
+  transferred: number;
+  total: number;
+}
+
 export interface ElectronAPI {
   openFileDialog: () => Promise<FileData | null>;
   readFileByPath: (filePath: string) => Promise<FileData | null>;
@@ -29,6 +41,17 @@ export interface ElectronAPI {
   onFileOpened: (callback: (data: FileData) => void) => void;
   onMenuAction: (action: string, callback: () => void) => void;
   removeMenuListener: (action: string) => void;
+  // Auto-update methods
+  checkForUpdates: () => Promise<{ success: boolean; updateInfo?: unknown; error?: string }>;
+  downloadUpdate: () => Promise<{ success: boolean; error?: string }>;
+  installUpdate: () => void;
+  getAppVersion: () => Promise<string>;
+  onUpdateAvailable: (callback: (info: UpdateInfo) => void) => void;
+  onUpdateNotAvailable: (callback: (info: { version: string }) => void) => void;
+  onUpdateDownloadProgress: (callback: (progress: UpdateProgress) => void) => void;
+  onUpdateDownloaded: (callback: (info: UpdateInfo) => void) => void;
+  onUpdateError: (callback: (error: { message: string }) => void) => void;
+  removeUpdateListeners: () => void;
 }
 
 const electronAPI: ElectronAPI = {
@@ -50,6 +73,33 @@ const electronAPI: ElectronAPI = {
   },
   removeMenuListener: (action: string) => {
     ipcRenderer.removeAllListeners(`menu-${action}`);
+  },
+  // Auto-update methods
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  onUpdateAvailable: (callback: (info: UpdateInfo) => void) => {
+    ipcRenderer.on('update-available', (_event, info) => callback(info));
+  },
+  onUpdateNotAvailable: (callback: (info: { version: string }) => void) => {
+    ipcRenderer.on('update-not-available', (_event, info) => callback(info));
+  },
+  onUpdateDownloadProgress: (callback: (progress: UpdateProgress) => void) => {
+    ipcRenderer.on('update-download-progress', (_event, progress) => callback(progress));
+  },
+  onUpdateDownloaded: (callback: (info: UpdateInfo) => void) => {
+    ipcRenderer.on('update-downloaded', (_event, info) => callback(info));
+  },
+  onUpdateError: (callback: (error: { message: string }) => void) => {
+    ipcRenderer.on('update-error', (_event, error) => callback(error));
+  },
+  removeUpdateListeners: () => {
+    ipcRenderer.removeAllListeners('update-available');
+    ipcRenderer.removeAllListeners('update-not-available');
+    ipcRenderer.removeAllListeners('update-download-progress');
+    ipcRenderer.removeAllListeners('update-downloaded');
+    ipcRenderer.removeAllListeners('update-error');
   },
 };
 

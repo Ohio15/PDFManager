@@ -1,10 +1,73 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
 import Store from 'electron-store';
 
 const store = new Store();
 let mainWindow: BrowserWindow | null = null;
+
+// Auto-updater configuration
+autoUpdater.autoDownload = false; // User must confirm download
+autoUpdater.autoInstallOnAppQuit = true;
+
+function setupAutoUpdater(): void {
+  // Only check for updates in production
+  if (!app.isPackaged) {
+    console.log('Skipping auto-update check in development mode');
+    return;
+  }
+
+  // Check for updates on startup
+  autoUpdater.checkForUpdates().catch((err) => {
+    console.log('Update check failed:', err);
+  });
+
+  // Update available - notify renderer
+  autoUpdater.on('update-available', (info) => {
+    console.log('Update available:', info.version);
+    mainWindow?.webContents.send('update-available', {
+      version: info.version,
+      releaseNotes: info.releaseNotes,
+    });
+  });
+
+  // No update available
+  autoUpdater.on('update-not-available', (info) => {
+    console.log('No update available:', info.version);
+    mainWindow?.webContents.send('update-not-available', {
+      version: info.version,
+    });
+  });
+
+  // Download progress
+  autoUpdater.on('download-progress', (progress) => {
+    console.log('Download progress:', progress.percent);
+    mainWindow?.webContents.send('update-download-progress', {
+      percent: progress.percent,
+      bytesPerSecond: progress.bytesPerSecond,
+      transferred: progress.transferred,
+      total: progress.total,
+    });
+  });
+
+  // Update downloaded - ready to install
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('Update downloaded:', info.version);
+    mainWindow?.webContents.send('update-downloaded', {
+      version: info.version,
+      releaseNotes: info.releaseNotes,
+    });
+  });
+
+  // Error handling
+  autoUpdater.on('error', (err) => {
+    console.error('Auto-updater error:', err);
+    mainWindow?.webContents.send('update-error', {
+      message: err.message,
+    });
+  });
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -34,6 +97,9 @@ function createWindow(): void {
   });
 
   createMenu();
+
+  // Setup auto-updater after window is created
+  setupAutoUpdater();
 }
 
 function createMenu(): void {
@@ -162,12 +228,29 @@ function createMenu(): void {
       label: 'Help',
       submenu: [
         {
+          label: 'Check for Updates',
+          click: () => {
+            if (app.isPackaged) {
+              autoUpdater.checkForUpdates().catch((err) => {
+                dialog.showErrorBox('Update Error', 'Failed to check for updates: ' + err.message);
+              });
+            } else {
+              dialog.showMessageBox(mainWindow!, {
+                type: 'info',
+                title: 'Development Mode',
+                message: 'Auto-updates are disabled in development mode.',
+              });
+            }
+          },
+        },
+        { type: 'separator' },
+        {
           label: 'About',
           click: () => {
             dialog.showMessageBox(mainWindow!, {
               type: 'info',
               title: 'About PDF Editor',
-              message: 'PDF Editor v1.0.0',
+              message: 'PDF Editor v' + app.getVersion(),
               detail: 'A powerful desktop PDF editor built with Electron.',
             });
           },
@@ -282,6 +365,33 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   } catch (error) {
     return null;
   }
+});
+
+// Auto-updater IPC handlers
+ipcMain.handle('check-for-updates', async () => {
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { success: true, updateInfo: result?.updateInfo };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+ipcMain.handle('download-update', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+ipcMain.handle('install-update', () => {
+  autoUpdater.quitAndInstall(false, true);
+});
+
+ipcMain.handle('get-app-version', () => {
+  return app.getVersion();
 });
 
 app.whenReady().then(createWindow);

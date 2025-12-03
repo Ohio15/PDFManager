@@ -4,6 +4,7 @@ import Sidebar from './components/Sidebar';
 import PDFViewer from './components/PDFViewer';
 import WelcomeScreen from './components/WelcomeScreen';
 import StatusBar from './components/StatusBar';
+import UpdateNotification from './components/UpdateNotification';
 import { PDFDocument } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 
@@ -18,6 +19,17 @@ declare global {
       onFileOpened: (callback: (data: { path: string; data: string }) => void) => void;
       onMenuAction: (action: string, callback: () => void) => void;
       removeMenuListener: (action: string) => void;
+      // Auto-update methods
+      checkForUpdates: () => Promise<{ success: boolean; updateInfo?: unknown; error?: string }>;
+      downloadUpdate: () => Promise<{ success: boolean; error?: string }>;
+      installUpdate: () => void;
+      getAppVersion: () => Promise<string>;
+      onUpdateAvailable: (callback: (info: { version: string; releaseNotes?: string }) => void) => void;
+      onUpdateNotAvailable: (callback: (info: { version: string }) => void) => void;
+      onUpdateDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => void;
+      onUpdateDownloaded: (callback: (info: { version: string; releaseNotes?: string }) => void) => void;
+      onUpdateError: (callback: (error: { message: string }) => void) => void;
+      removeUpdateListeners: () => void;
     };
   }
 }
@@ -180,6 +192,7 @@ const App: React.FC = () => {
 
   return (
     <div className="app-container">
+      <UpdateNotification />
       <Toolbar
         currentTool={currentTool}
         onToolChange={setCurrentTool}

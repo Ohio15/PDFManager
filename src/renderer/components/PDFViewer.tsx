@@ -12,7 +12,7 @@ interface TextEditDialogState {
 
 
 // Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 
 interface PDFViewerProps {
   document: PDFDocument;

@@ -5,8 +5,10 @@ import { PDFDocument, Annotation, Position, TextAnnotation, ImageAnnotation, PDF
 
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
-// Configure PDF.js worker - use local copy to avoid CSP issues
-pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+
+// Configure PDF.js worker - use relative path that works in both dev and production
+// The worker file is copied to public directory and bundled with the app
+pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 
 // Helper function to convert Uint8Array to base64 without stack overflow
 function uint8ArrayToBase64(bytes: Uint8Array): string {

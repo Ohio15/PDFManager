@@ -62,7 +62,7 @@
       "repo": "PDFEditor"
     },
     "nsis": {
-      "artifactName": "${productName}-Setup-${version}.${ext}"
+      "artifactName": "PDF-Editor-Setup-${version}.${ext}"
     }
   },
   "repository": {

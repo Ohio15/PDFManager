@@ -1316,3 +1316,36 @@ input:focus:not(:focus-visible) {
 .pdf-page-container.highlight-mode .highlight-rect {
   pointer-events: none;
 }
+
+
+/* Eraser tool mode styles */
+.pdf-page-container.erase-mode {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23e53935' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 5H9l-7 7 7 7h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Z'/%3E%3Cline x1='18' y1='9' x2='12' y2='15'/%3E%3Cline x1='12' y1='9' x2='18' y2='15'/%3E%3C/svg%3E") 12 12, crosshair;
+}
+
+.pdf-page-container.erase-mode .editable-text,
+.pdf-page-container.erase-mode .editable-image,
+.pdf-page-container.erase-mode .highlight-rect {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23e53935' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 5H9l-7 7 7 7h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2Z'/%3E%3Cline x1='18' y1='9' x2='12' y2='15'/%3E%3Cline x1='12' y1='9' x2='18' y2='15'/%3E%3C/svg%3E") 12 12, pointer !important;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.pdf-page-container.erase-mode .editable-text:hover,
+.pdf-page-container.erase-mode .editable-image:hover,
+.pdf-page-container.erase-mode .highlight-rect:hover {
+  opacity: 0.6;
+  outline: 2px dashed #e53935;
+  outline-offset: 2px;
+}
+
+/* Selection indicator when annotation is selected */
+.editable-text.selected,
+.editable-image.selected {
+  outline: 2px solid #2196f3;
+  outline-offset: 2px;
+}
+
+/* Make sure text-layer doesn't interfere with eraser on annotations */
+.pdf-page-container.erase-mode .text-layer {
+  pointer-events: none;
+}

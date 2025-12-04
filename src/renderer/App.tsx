@@ -137,6 +137,23 @@ const App: React.FC = () => {
     setSelectedAnnotationId(annotationId);
   }, []);
 
+  // Handle tool activation on existing selection
+  // When eraser is selected with something already selected, delete it
+  // When highlighter is selected with something already selected, it stays selected (ready for highlight interaction)
+  const handleToolChange = useCallback((newTool: Tool) => {
+    if (newTool === 'erase' && selectedAnnotationId && document) {
+      // Find which page has this annotation and delete it
+      const pageIndex = document.pages.findIndex((p) =>
+        p.annotations.some((a) => a.id === selectedAnnotationId)
+      );
+      if (pageIndex !== -1) {
+        deleteAnnotation(pageIndex + 1, selectedAnnotationId);
+        setSelectedAnnotationId(null);
+      }
+    }
+    setCurrentTool(newTool);
+  }, [selectedAnnotationId, document, deleteAnnotation]);
+
   // Menu event handlers
   useEffect(() => {
     const menuActions: Record<string, () => void> = {
@@ -205,7 +222,7 @@ const App: React.FC = () => {
       <UpdateNotification />
       <Toolbar
         currentTool={currentTool}
-        onToolChange={setCurrentTool}
+        onToolChange={handleToolChange}
         zoom={zoom}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}

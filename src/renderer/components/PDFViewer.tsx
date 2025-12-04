@@ -475,10 +475,12 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Don't handle delete if we're editing text
-      if (editingAnnotation) return;
+      // Don't handle delete if we're editing text or if text edit dialog is open
+      if (editingAnnotation || textEditDialog.isOpen) return;
 
-      if (e.key === 'Delete' && selectedAnnotation) {
+      // Delete key works regardless of current tool when something is selected
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAnnotation) {
+        e.preventDefault();
         const pageIndex = document.pages.findIndex((p) =>
           p.annotations.some((a) => a.id === selectedAnnotation)
         );
@@ -493,7 +495,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         setContextMenu(prev => ({ ...prev, isOpen: false }));
       }
     },
-    [selectedAnnotation, editingAnnotation, document.pages, onDeleteAnnotation]
+    [selectedAnnotation, editingAnnotation, textEditDialog.isOpen, document.pages, onDeleteAnnotation]
   );
 
   useEffect(() => {
@@ -734,7 +736,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         return (
           <div
             key={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''}`}
             style={{
               width: canvas.width,
               height: canvas.height,

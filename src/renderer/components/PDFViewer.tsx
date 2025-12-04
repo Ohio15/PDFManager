@@ -48,6 +48,7 @@ interface PDFViewerProps {
   onUpdateAnnotation: (pageIndex: number, annotationId: string, updates: Partial<Annotation>) => void;
   onDeleteAnnotation: (pageIndex: number, annotationId: string) => void;
   onUpdateTextItem: (pageIndex: number, textItemId: string, newText: string) => void;
+  onMarkTextDeleted?: (pageIndex: number, textItemId: string, isDeleted: boolean) => void;
   onDuplicateAnnotation?: (pageIndex: number, annotationId: string) => void;
   onBringToFront?: (pageIndex: number, annotationId: string) => void;
   onSelectionChange?: (annotationId: string | null) => void;
@@ -64,6 +65,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onUpdateAnnotation,
   onDeleteAnnotation,
   onUpdateTextItem,
+  onMarkTextDeleted,
   onDuplicateAnnotation,
   onBringToFront,
   onSelectionChange,
@@ -642,7 +644,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       e.stopPropagation();
       e.preventDefault();
       // "Delete" the text by setting it to empty string
-      onUpdateTextItem(pageNum, textItem.id, '');
+      if (onMarkTextDeleted) { onMarkTextDeleted(pageNum, textItem.id, true); }
       return;
     }
   };
@@ -655,7 +657,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     return (
       <div
         key={textItem.id}
-        className={`pdf-text-item ${textItem.isEdited ? 'edited' : ''} ${isEditable ? 'editable' : ''}`}
+        className={`pdf-text-item ${textItem.isEdited ? 'edited' : ''} ${isEditable ? 'editable' : ''} ${textItem.isDeleted ? 'deleted' : ''}`}
         style={{
           left: textItem.x * scale,
           top: textItem.y * scale,

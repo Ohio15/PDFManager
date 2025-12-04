@@ -62,6 +62,7 @@ const App: React.FC = () => {
     updateAnnotation,
     deleteAnnotation,
     updateTextItem,
+    markTextDeleted,
   } = usePDFDocument();
 
   const handleOpenFile = useCallback(async () => {
@@ -259,6 +260,7 @@ const App: React.FC = () => {
             onUpdateAnnotation={updateAnnotation}
             onDeleteAnnotation={deleteAnnotation}
             onUpdateTextItem={updateTextItem}
+            onMarkTextDeleted={markTextDeleted}
             onSelectionChange={handleSelectionChange}
             onAddHighlight={addHighlight}
             loading={loading}

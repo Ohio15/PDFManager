@@ -271,6 +271,13 @@ export function usePDFDocument() {
 
         // Handle text edits - try content stream modification first, then overlay fallback
         console.log('Processing page', page.index, 'textEdits:', page.textEdits?.length || 0);
+        // Handle deleted text items - blank them in the content stream
+        const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
+        for (const deletedItem of deletedItems) {
+          console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
+          await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+        }
+
         if (page.textEdits && page.textEdits.length > 0) {
           const fontCache = new Map<string, PDFFont>();
 
@@ -482,6 +489,13 @@ export function usePDFDocument() {
         const { height } = pdfPage.getSize();
 
         // Handle text edits - try content stream modification first, then overlay fallback
+        // Handle deleted text items - blank them in the content stream
+        const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
+        for (const deletedItem of deletedItems) {
+          console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
+          await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+        }
+
         if (page.textEdits && page.textEdits.length > 0) {
           const fontCache = new Map<string, PDFFont>();
 
@@ -968,6 +982,7 @@ export function usePDFDocument() {
     [document, addToHistory]
   );
 
+const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, isDeleted: boolean) => {      if (!document) return;      const page = document.pages[pageIndex - 1];      const textItem = page.textItems?.find((t) => t.id === textItemId);      if (!textItem) return;      const wasDeleted = textItem.isDeleted || false;      setDocument((prev) => {        if (!prev) return null;        const newPages = [...prev.pages];        const newTextItems = newPages[pageIndex - 1].textItems?.map((t) =>          t.id === textItemId ? { ...t, isDeleted, isEdited: true } : t        );        newPages[pageIndex - 1] = {          ...newPages[pageIndex - 1],          textItems: newTextItems,        };        return { ...prev, pages: newPages };      });      addToHistory({        type: 'markTextDeleted',        undo: () => {          setDocument((prev) => {            if (!prev) return null;            const newPages = [...prev.pages];            const newTextItems = newPages[pageIndex - 1].textItems?.map((t) =>              t.id === textItemId ? { ...t, isDeleted: wasDeleted, isEdited: textItem.isEdited } : t            );            newPages[pageIndex - 1] = {              ...newPages[pageIndex - 1],              textItems: newTextItems,            };            return { ...prev, pages: newPages };          });        },        redo: () => {          setDocument((prev) => {            if (!prev) return null;            const newPages = [...prev.pages];            const newTextItems = newPages[pageIndex - 1].textItems?.map((t) =>              t.id === textItemId ? { ...t, isDeleted, isEdited: true } : t            );            newPages[pageIndex - 1] = {              ...newPages[pageIndex - 1],              textItems: newTextItems,            };            return { ...prev, pages: newPages };          });        },      });    },    [document, addToHistory]  );
   const deleteAnnotation = useCallback(
     (pageIndex: number, annotationId: string) => {
       if (!document) return;
@@ -1145,6 +1160,7 @@ export function usePDFDocument() {
     updateAnnotation,
     deleteAnnotation,
     updateTextItem,
+    markTextDeleted,
   };
 }
 

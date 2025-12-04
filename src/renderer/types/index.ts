@@ -66,6 +66,7 @@ export interface PDFTextItem {
   fontSize: number;
   transform: number[];
   isEdited: boolean;
+  isDeleted?: boolean;
   backgroundColor?: { r: number; g: number; b: number };
   textColor?: { r: number; g: number; b: number };
 }

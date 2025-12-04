@@ -1,14 +1,14 @@
 import { useState, useCallback } from 'react';
 import { PDFDocument as PDFLib, rgb, StandardFonts, PDFFont } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, Position, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem } from '../types';
 
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
 
-// Configure PDF.js worker - use relative path that works in both dev and production
-// The worker file is copied to public directory and bundled with the app
-pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
+// Configure PDF.js worker - imported with ?url suffix for proper bundling
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 // Helper function to convert Uint8Array to base64 without stack overflow
 function uint8ArrayToBase64(bytes: Uint8Array): string {

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem, Size } from '../types';
 import { Tool } from '../App';
 
@@ -33,8 +34,8 @@ interface ContextMenuState {
   pageIndex: number;
 }
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
+// Configure PDF.js worker - imported with ?url suffix for proper bundling
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 // Minimum size for annotations
 const MIN_SIZE = 20;

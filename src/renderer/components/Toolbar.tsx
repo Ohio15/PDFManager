@@ -15,6 +15,9 @@ import {
   RotateCw,
   RotateCcw,
   Trash2,
+  PanelLeftClose,
+  PanelLeft,
+  FileX,
 } from 'lucide-react';
 
 interface ToolbarProps {
@@ -35,7 +38,11 @@ interface ToolbarProps {
   onRotateCW: () => void;
   onRotateCCW: () => void;
   onDeleteSelected: () => void;
+  onDeletePage?: () => void;
+  onToggleSidebar?: () => void;
+  sidebarVisible?: boolean;
   disabled: boolean;
+  pageCount?: number;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({
@@ -56,20 +63,37 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onRotateCW,
   onRotateCCW,
   onDeleteSelected,
+  onDeletePage,
+  onToggleSidebar,
+  sidebarVisible = true,
   disabled,
+  pageCount = 0,
 }) => {
   const tools: Array<{ id: Tool; icon: React.ReactNode; title: string }> = [
     { id: 'select', icon: <MousePointer />, title: 'Select (V)' },
-    { id: 'text', icon: <Type />, title: 'Add Text (T)' },
-    { id: 'highlight', icon: <Highlighter />, title: 'Highlight (H)' },
+    { id: 'text', icon: <Type />, title: 'Text - Click to place (T)' },
+    { id: 'highlight', icon: <Highlighter />, title: 'Highlight - Drag to select (H)' },
     { id: 'image', icon: <Image />, title: 'Add Image (I)' },
-    { id: 'erase', icon: <Eraser />, title: 'Eraser - Click to delete annotations (E)' },
+    { id: 'erase', icon: <Eraser />, title: 'Eraser - Click to delete (E)' },
   ];
 
   const zoomOptions = [25, 50, 75, 100, 125, 150, 200, 300, 400];
 
   return (
     <div className="toolbar">
+      {/* Sidebar Toggle */}
+      {onToggleSidebar && (
+        <div className="toolbar-group">
+          <button
+            className="toolbar-btn"
+            onClick={onToggleSidebar}
+            title={sidebarVisible ? "Hide Sidebar (Ctrl+B)" : "Show Sidebar (Ctrl+B)"}
+          >
+            {sidebarVisible ? <PanelLeftClose /> : <PanelLeft />}
+          </button>
+        </div>
+      )}
+
       {/* File Operations */}
       <div className="toolbar-group">
         <button
@@ -116,10 +140,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
             key={tool.id}
             className={`toolbar-btn ${currentTool === tool.id ? 'active' : ''}`}
             onClick={() => {
-              if (tool.id === 'text') {
-                onAddText();
-                onToolChange('select');
-              } else if (tool.id === 'image') {
+              if (tool.id === 'image') {
                 onAddImage();
                 onToolChange('select');
               } else {
@@ -164,6 +185,16 @@ const Toolbar: React.FC<ToolbarProps> = ({
         >
           <RotateCw />
         </button>
+        {onDeletePage && (
+          <button
+            className="toolbar-btn"
+            onClick={onDeletePage}
+            disabled={disabled || pageCount <= 1}
+            title="Delete Current Page"
+          >
+            <FileX />
+          </button>
+        )}
       </div>
 
       {/* Zoom */}

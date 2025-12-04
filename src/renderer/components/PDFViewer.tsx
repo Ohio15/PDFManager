@@ -45,6 +45,7 @@ interface PDFViewerProps {
   currentPage: number;
   onPageChange: (page: number) => void;
   currentTool: Tool;
+  onToolChange?: (tool: Tool) => void;
   onUpdateAnnotation: (pageIndex: number, annotationId: string, updates: Partial<Annotation>) => void;
   onDeleteAnnotation: (pageIndex: number, annotationId: string) => void;
   onUpdateTextItem: (pageIndex: number, textItemId: string, newText: string) => void;
@@ -53,6 +54,7 @@ interface PDFViewerProps {
   onBringToFront?: (pageIndex: number, annotationId: string) => void;
   onSelectionChange?: (annotationId: string | null) => void;
   onAddHighlight?: (pageIndex: number, rects: Array<{ x: number; y: number; width: number; height: number }>) => void;
+  onAddText?: (pageIndex: number, position: { x: number; y: number }) => string | void;
   loading: boolean;
 }
 
@@ -62,6 +64,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   currentPage,
   onPageChange,
   currentTool,
+  onToolChange,
   onUpdateAnnotation,
   onDeleteAnnotation,
   onUpdateTextItem,
@@ -70,6 +73,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onBringToFront,
   onSelectionChange,
   onAddHighlight,
+  onAddText,
   loading,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -216,7 +220,22 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     const x = (e.clientX - rect.left) / scale;
     const y = (e.clientY - rect.top) / scale;
 
-    if (currentTool === 'highlight') {
+    if (currentTool === 'text') {
+      // Click-to-place text at this position
+      if (onAddText) {
+        const newAnnotationId = onAddText(pageNum, { x, y });
+        // If we got an ID back, select it and start editing
+        if (newAnnotationId) {
+          setSelectedAnnotation(newAnnotationId);
+          // Delay to let the annotation render, then start editing
+          setTimeout(() => {
+            setEditingAnnotation(newAnnotationId);
+          }, 50);
+        }
+        // Switch back to select tool
+        onToolChange?.('select');
+      }
+    } else if (currentTool === 'highlight') {
       setHighlightStart({ pageNum, x, y });
       setHighlightPreview(null);
     } else if (currentTool === 'erase') {
@@ -808,7 +827,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         return (
           <div
             key={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''}`}
             style={{
               width: canvas.width,
               height: canvas.height,

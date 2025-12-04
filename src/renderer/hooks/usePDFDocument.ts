@@ -729,8 +729,8 @@ export function usePDFDocument() {
   }, [document]);
 
   const addText = useCallback(
-    (pageIndex: number, position: Position, content: string) => {
-      if (!document) return;
+    (pageIndex: number, position: Position, content: string): string | undefined => {
+      if (!document) return undefined;
 
       const annotation: TextAnnotation = {
         id: `text-${Date.now()}`,
@@ -780,6 +780,8 @@ export function usePDFDocument() {
           });
         },
       });
+
+      return annotation.id;
     },
     [document, addToHistory]
   );

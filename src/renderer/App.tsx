@@ -5,6 +5,7 @@ import PDFViewer from './components/PDFViewer';
 import WelcomeScreen from './components/WelcomeScreen';
 import StatusBar from './components/StatusBar';
 import UpdateNotification from './components/UpdateNotification';
+import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 
@@ -42,6 +43,7 @@ const App: React.FC = () => {
   const [zoom, setZoom] = useState(100);
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  const toast = useToast();
 
   const {
     document,
@@ -80,12 +82,21 @@ const App: React.FC = () => {
   }, [openFile]);
 
   const handleSave = useCallback(async () => {
-    if (document?.filePath) {
-      await saveFile();
-    } else {
-      await saveFileAs();
+    try {
+      if (document?.filePath) {
+        await saveFile();
+        toast.success('Document saved successfully');
+      } else {
+        const result = await saveFileAs();
+        if (result) {
+          toast.success('Document saved successfully');
+        }
+      }
+    } catch (error) {
+      toast.error('Failed to save document');
+      console.error('Save error:', error);
     }
-  }, [document, saveFile, saveFileAs]);
+  }, [document, saveFile, saveFileAs, toast]);
 
   const handleZoomIn = useCallback(() => {
     setZoom((prev) => Math.min(prev + 25, 400));
@@ -202,6 +213,122 @@ const App: React.FC = () => {
   ]);
 
 
+  // Keyboard shortcuts for tools
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore shortcuts when typing in input fields
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+        return;
+      }
+
+      // Don't handle if modifier keys are pressed (except for Ctrl combos)
+      if (e.altKey || e.metaKey) return;
+
+      // Tool shortcuts (no modifiers)
+      if (!e.ctrlKey && !e.shiftKey) {
+        switch (e.key.toLowerCase()) {
+          case 'v':
+            handleToolChange('select');
+            break;
+          case 't':
+            handleToolChange('text');
+            break;
+          case 'h':
+            handleToolChange('highlight');
+            break;
+          case 'i':
+            if (document) handleAddImage();
+            break;
+          case 'e':
+            handleToolChange('erase');
+            break;
+          case 'delete':
+          case 'backspace':
+            if (selectedAnnotationId) {
+              handleDeleteSelected();
+            }
+            break;
+          case 'escape':
+            setSelectedAnnotationId(null);
+            handleToolChange('select');
+            break;
+        }
+      }
+
+      // Ctrl shortcuts
+      if (e.ctrlKey && !e.shiftKey) {
+        switch (e.key.toLowerCase()) {
+          case 'o':
+            e.preventDefault();
+            handleOpenFile();
+            break;
+          case 's':
+            e.preventDefault();
+            handleSave();
+            break;
+          case 'z':
+            e.preventDefault();
+            if (canUndo) undo();
+            break;
+          case 'y':
+            e.preventDefault();
+            if (canRedo) redo();
+            break;
+          case '=':
+          case '+':
+            e.preventDefault();
+            handleZoomIn();
+            break;
+          case '-':
+            e.preventDefault();
+            handleZoomOut();
+            break;
+          case '0':
+            e.preventDefault();
+            setZoom(100);
+            break;
+          case 'b':
+            e.preventDefault();
+            setSidebarVisible(prev => !prev);
+            break;
+        }
+      }
+
+      // Ctrl+Shift shortcuts
+      if (e.ctrlKey && e.shiftKey) {
+        switch (e.key.toLowerCase()) {
+          case 's':
+            e.preventDefault();
+            saveFileAs();
+            break;
+          case 'z':
+            e.preventDefault();
+            if (canRedo) redo();
+            break;
+        }
+      }
+    };
+
+    window.document.addEventListener('keydown', handleKeyDown);
+    return () => window.document.removeEventListener('keydown', handleKeyDown);
+  }, [
+    document,
+    handleToolChange,
+    handleAddImage,
+    handleDeleteSelected,
+    selectedAnnotationId,
+    handleOpenFile,
+    handleSave,
+    canUndo,
+    canRedo,
+    undo,
+    redo,
+    handleZoomIn,
+    handleZoomOut,
+    saveFileAs,
+  ]);
+
   // Prevent default drag behavior that opens files in Explorer
   useEffect(() => {
     const preventDefaultDrag = (e: DragEvent) => {
@@ -239,6 +366,10 @@ const App: React.FC = () => {
         onRotateCW={() => handleRotatePage(true)}
         onRotateCCW={() => handleRotatePage(false)}
         onDeleteSelected={handleDeleteSelected}
+        onDeletePage={() => document && deletePage(currentPage)}
+        onToggleSidebar={() => setSidebarVisible(prev => !prev)}
+        sidebarVisible={sidebarVisible}
+        pageCount={document?.pageCount}
         disabled={!document}
       />
 
@@ -257,12 +388,14 @@ const App: React.FC = () => {
             currentPage={currentPage}
             onPageChange={setCurrentPage}
             currentTool={currentTool}
+            onToolChange={setCurrentTool}
             onUpdateAnnotation={updateAnnotation}
             onDeleteAnnotation={deleteAnnotation}
             onUpdateTextItem={updateTextItem}
             onMarkTextDeleted={markTextDeleted}
             onSelectionChange={handleSelectionChange}
             onAddHighlight={addHighlight}
+            onAddText={(pageIndex, position) => addText(pageIndex, position, 'New Text')}
             loading={loading}
           />
         ) : (
@@ -276,6 +409,8 @@ const App: React.FC = () => {
         zoom={zoom}
         modified={modified}
       />
+
+      <ToastContainer toasts={toast.toasts} onDismiss={toast.dismissToast} />
     </div>
   );
 };

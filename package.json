@@ -1,6 +1,6 @@
 {
   "name": "pdf-editor",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "A desktop PDF editor with full editing capabilities",
   "main": "dist/main/main.js",
   "scripts": {
@@ -60,6 +60,9 @@
       "provider": "github",
       "owner": "Ohio15",
       "repo": "PDFEditor"
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     }
   },
   "repository": {

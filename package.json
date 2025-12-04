@@ -1,6 +1,6 @@
 {
   "name": "pdf-editor",
-  "version": "1.4.7",
+  "version": "1.4.8",
   "description": "A desktop PDF editor with full editing capabilities",
   "main": "dist/main/main.js",
   "scripts": {

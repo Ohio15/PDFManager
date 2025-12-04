@@ -271,11 +271,26 @@ export function usePDFDocument() {
 
         // Handle text edits - try content stream modification first, then overlay fallback
         console.log('Processing page', page.index, 'textEdits:', page.textEdits?.length || 0);
-        // Handle deleted text items - blank them in the content stream
+        // Handle deleted text items - blank them in the content stream, with overlay fallback
         const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
         for (const deletedItem of deletedItems) {
           console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
-          await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+          const blanked = await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+
+          // Always draw a background-colored rectangle to cover the text as fallback
+          // This ensures deletion works even if content stream modification fails
+          const textHeight = deletedItem.fontSize;
+          const baselineY = deletedItem.transform ? deletedItem.transform[5] : (height - deletedItem.y - textHeight);
+          const bgColor = deletedItem.backgroundColor || { r: 1, g: 1, b: 1 };
+
+          console.log('[SAVE] Drawing cover rectangle for deleted text:', deletedItem.originalStr, 'blanked:', blanked);
+          pdfPage.drawRectangle({
+            x: deletedItem.x - 1,
+            y: baselineY - (textHeight * 0.25),
+            width: deletedItem.width + 2,
+            height: textHeight * 1.3,
+            color: rgb(bgColor.r, bgColor.g, bgColor.b),
+          });
         }
 
         if (page.textEdits && page.textEdits.length > 0) {
@@ -489,11 +504,26 @@ export function usePDFDocument() {
         const { height } = pdfPage.getSize();
 
         // Handle text edits - try content stream modification first, then overlay fallback
-        // Handle deleted text items - blank them in the content stream
+        // Handle deleted text items - blank them in the content stream, with overlay fallback
         const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
         for (const deletedItem of deletedItems) {
           console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
-          await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+          const blanked = await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
+
+          // Always draw a background-colored rectangle to cover the text as fallback
+          // This ensures deletion works even if content stream modification fails
+          const textHeight = deletedItem.fontSize;
+          const baselineY = deletedItem.transform ? deletedItem.transform[5] : (height - deletedItem.y - textHeight);
+          const bgColor = deletedItem.backgroundColor || { r: 1, g: 1, b: 1 };
+
+          console.log('[SAVE] Drawing cover rectangle for deleted text:', deletedItem.originalStr, 'blanked:', blanked);
+          pdfPage.drawRectangle({
+            x: deletedItem.x - 1,
+            y: baselineY - (textHeight * 0.25),
+            width: deletedItem.width + 2,
+            height: textHeight * 1.3,
+            color: rgb(bgColor.r, bgColor.g, bgColor.b),
+          });
         }
 
         if (page.textEdits && page.textEdits.length > 0) {

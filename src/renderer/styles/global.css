@@ -1,30 +1,124 @@
+/* ============================================
+   PDF Editor - Global Styles
+   Industry-leading UI/UX Design System
+   ============================================ */
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
+/* ============================================
+   CSS Custom Properties - Design Tokens
+   ============================================ */
 :root {
+  /* Primary Colors */
   --primary-color: #2563eb;
   --primary-hover: #1d4ed8;
+  --primary-light: #dbeafe;
+  --primary-glow: rgba(37, 99, 235, 0.15);
+
+  /* Secondary Colors */
   --secondary-color: #64748b;
+  --secondary-hover: #475569;
+
+  /* Surface Colors */
   --background-color: #f8fafc;
   --surface-color: #ffffff;
+  --surface-elevated: #ffffff;
+
+  /* Border Colors */
   --border-color: #e2e8f0;
+  --border-hover: #cbd5e1;
+
+  /* Text Colors */
   --text-primary: #1e293b;
   --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+
+  /* Semantic Colors */
   --danger-color: #ef4444;
+  --danger-hover: #dc2626;
   --success-color: #22c55e;
+  --success-light: #dcfce7;
+  --warning-color: #f59e0b;
+  --info-color: #3b82f6;
+
+  /* Layout */
   --sidebar-width: 200px;
-  --toolbar-height: 48px;
+  --toolbar-height: 52px;
+  --status-bar-height: 28px;
+
+  /* Shadows - Layered depth system */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.04);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.03);
+  --shadow-glow: 0 0 20px rgba(37, 99, 235, 0.15);
+  --shadow-page: 0 4px 20px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.02);
+
+  /* Border Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* Transitions */
+  --transition-fast: 0.1s ease;
+  --transition-base: 0.15s ease;
+  --transition-slow: 0.25s ease;
+  --transition-spring: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Z-index layers */
+  --z-dropdown: 100;
+  --z-modal: 1000;
+  --z-tooltip: 1100;
+  --z-notification: 1200;
 }
 
+/* Dark Mode Support */
+:root.dark {
+  --primary-color: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-light: #1e3a5f;
+  --primary-glow: rgba(59, 130, 246, 0.2);
+
+  --secondary-color: #94a3b8;
+  --secondary-hover: #cbd5e1;
+
+  --background-color: #0f172a;
+  --surface-color: #1e293b;
+  --surface-elevated: #334155;
+
+  --border-color: #334155;
+  --border-hover: #475569;
+
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.4);
+  --shadow-page: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* ============================================
+   Base Styles
+   ============================================ */
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background-color: var(--background-color);
   color: var(--text-primary);
   overflow: hidden;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
@@ -37,25 +131,32 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: var(--background-color);
 }
 
-/* Toolbar Styles */
+/* ============================================
+   Toolbar Styles - Enhanced
+   ============================================ */
 .toolbar {
   height: var(--toolbar-height);
   background-color: var(--surface-color);
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
-  padding: 0 16px;
-  gap: 8px;
+  padding: 0 12px;
+  gap: 4px;
+  box-shadow: var(--shadow-xs);
+  position: relative;
+  z-index: 50;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   padding: 0 8px;
   border-right: 1px solid var(--border-color);
+  height: 32px;
 }
 
 .toolbar-group:last-child {
@@ -70,58 +171,112 @@ body {
   height: 36px;
   border: none;
   background: transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   color: var(--text-secondary);
-  transition: all 0.15s ease;
+  transition: all var(--transition-base);
+  position: relative;
 }
 
 .toolbar-btn:hover {
   background-color: var(--background-color);
   color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.toolbar-btn:active {
+  transform: translateY(0);
 }
 
 .toolbar-btn.active {
   background-color: var(--primary-color);
   color: white;
+  box-shadow: var(--shadow-sm), 0 0 0 2px var(--primary-glow);
+}
+
+.toolbar-btn.active:hover {
+  background-color: var(--primary-hover);
+  transform: none;
 }
 
 .toolbar-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  transform: none;
+}
+
+.toolbar-btn:disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 .toolbar-btn svg {
   width: 20px;
   height: 20px;
+  transition: transform var(--transition-fast);
+}
+
+.toolbar-btn:hover svg {
+  transform: scale(1.05);
 }
 
 .toolbar-input {
   width: 60px;
   height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   text-align: center;
-  font-size: 14px;
+  font-size: 13px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  transition: all var(--transition-base);
+}
+
+.toolbar-input:hover {
+  border-color: var(--border-hover);
+}
+
+.toolbar-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
 .toolbar-select {
   height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 0 8px;
-  font-size: 14px;
+  border-radius: var(--radius-sm);
+  padding: 0 28px 0 10px;
+  font-size: 13px;
   background-color: var(--surface-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition-base);
+  appearance: none;
 }
 
-/* Main Content Area */
+.toolbar-select:hover {
+  border-color: var(--border-hover);
+}
+
+.toolbar-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+/* ============================================
+   Main Content Area
+   ============================================ */
 .main-content {
   display: flex;
   flex: 1;
   overflow: hidden;
 }
 
-/* Sidebar Styles */
+/* ============================================
+   Sidebar Styles - Enhanced
+   ============================================ */
 .sidebar {
   width: var(--sidebar-width);
   background-color: var(--surface-color);
@@ -129,36 +284,55 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: width var(--transition-slow), opacity var(--transition-slow);
 }
 
 .sidebar.hidden {
-  display: none;
+  width: 0;
+  opacity: 0;
+  overflow: hidden;
 }
 
 .sidebar-header {
-  padding: 12px 16px;
+  padding: 14px 16px;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(to bottom, var(--surface-color), var(--background-color));
 }
 
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .page-thumbnail {
   position: relative;
-  margin-bottom: 8px;
   cursor: pointer;
   border: 2px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   overflow: hidden;
+  transition: all var(--transition-base);
+  background: var(--surface-color);
+  box-shadow: var(--shadow-sm);
+}
+
+.page-thumbnail:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
 }
 
 .page-thumbnail.active {
   border-color: var(--primary-color);
+  box-shadow: var(--shadow-md), 0 0 0 2px var(--primary-glow);
 }
 
 .page-thumbnail img,
@@ -169,17 +343,21 @@ body {
 
 .page-number {
   position: absolute;
-  bottom: 4px;
+  bottom: 6px;
   left: 50%;
   transform: translateX(-50%);
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: rgba(0, 0, 0, 0.75);
   color: white;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 500;
+  backdrop-filter: blur(4px);
 }
 
-/* PDF Viewer Styles */
+/* ============================================
+   PDF Viewer Styles - Enhanced
+   ============================================ */
 .pdf-viewer {
   flex: 1;
   overflow: auto;
@@ -187,23 +365,31 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 24px;
+  padding: 32px;
+  scroll-behavior: smooth;
 }
 
 .pdf-page-container {
   position: relative;
-  margin-bottom: 16px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-page);
   background-color: white;
+  border-radius: 2px;
+  transition: box-shadow var(--transition-base);
+}
+
+.pdf-page-container:hover {
+  box-shadow: var(--shadow-lg);
 }
 
 .pdf-page-canvas {
   display: block;
+  border-radius: 2px;
 }
 
-/* Text Layer - Updated for inline editing */
-
-/* PDF Text Item Editing */
+/* ============================================
+   Text Layer - Enhanced
+   ============================================ */
 .text-layer {
   position: absolute;
   top: 0;
@@ -225,37 +411,45 @@ body {
   background: transparent;
   border: none;
   outline: none;
-  transition: all 0.15s ease;
+  transition: all var(--transition-base);
   pointer-events: auto;
   overflow: hidden;
+  border-radius: 2px;
 }
 
 .pdf-text-item:hover {
-  background-color: rgba(37, 99, 235, 0.1);
+  background-color: var(--primary-glow);
   color: transparent;
 }
 
 .pdf-text-item.edited {
   color: #000000;
   background-color: #ffffff;
+  box-shadow: var(--shadow-xs);
 }
 
 .pdf-text-item.editing {
-  color: #1e293b;
-  background-color: rgba(255, 255, 255, 0.95);
-  border: 1px solid var(--primary-color);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.98);
+  border: 2px solid var(--primary-color);
+  box-shadow: var(--shadow-md), var(--shadow-glow);
   z-index: 100;
   min-width: 20px;
 }
 
 .pdf-text-item.editing:focus {
-  outline: 2px solid var(--primary-color);
+  outline: none;
+}
+
+.pdf-text-item.editable:hover {
+  background-color: rgba(37, 99, 235, 0.12);
+  outline: 2px dashed var(--primary-color);
   outline-offset: 1px;
 }
 
-
-/* Annotation Layer */
+/* ============================================
+   Annotation Layer - Enhanced
+   ============================================ */
 .annotation-layer {
   position: absolute;
   top: 0;
@@ -269,46 +463,88 @@ body {
   pointer-events: auto;
 }
 
-/* Editable Elements */
+/* Editable Text Annotations */
 .editable-text {
   position: absolute;
-  border: 1px dashed var(--primary-color);
-  padding: 4px;
+  border: 2px dashed var(--primary-color);
+  padding: 6px 8px;
   min-width: 50px;
-  min-height: 20px;
+  min-height: 24px;
   cursor: move;
-  background-color: rgba(255, 255, 255, 0.9);
+  background-color: rgba(255, 255, 255, 0.95);
+  border-radius: var(--radius-xs);
+  transition: all var(--transition-base);
 }
 
-.editable-text:hover {  border-color: var(--primary-color);  background-color: rgba(255, 255, 255, 0.5);}.editable-text.selected {  border: 2px solid var(--primary-color);  background-color: rgba(255, 255, 255, 0.9);}.editable-text.editing {  border: 2px solid var(--success-color);  background-color: rgba(255, 255, 255, 0.95);  cursor: text;}
+.editable-text:hover {
+  border-color: var(--primary-hover);
+  background-color: rgba(255, 255, 255, 0.98);
+  box-shadow: var(--shadow-sm);
+}
+
+.editable-text.selected {
+  border: 2px solid var(--primary-color);
+  background-color: white;
+  box-shadow: var(--shadow-md), var(--shadow-glow);
+}
+
+.editable-text.editing {
+  border: 2px solid var(--success-color);
+  background-color: white;
+  cursor: text;
+  box-shadow: var(--shadow-md), 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+
 .editable-text:focus {
-  outline: 2px solid var(--primary-color);
-  outline-offset: 2px;
+  outline: none;
 }
 
+/* Editable Image Annotations */
 .editable-image {
   position: absolute;
-  border: 1px dashed var(--primary-color);
+  border: 2px dashed var(--primary-color);
   cursor: move;
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  transition: all var(--transition-base);
+}
+
+.editable-image:hover {
+  border-color: var(--primary-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.editable-image.selected {
+  border: 2px solid var(--primary-color);
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
 }
 
 .editable-image img {
   max-width: 100%;
   display: block;
+  pointer-events: none;
 }
 
+/* Resize Handles */
 .resize-handle {
   position: absolute;
-  width: 10px;
-  height: 10px;
+  width: 12px;
+  height: 12px;
   background-color: var(--primary-color);
-  border: 1px solid white;
+  border: 2px solid white;
+  border-radius: 2px;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast);
 }
 
-.resize-handle.nw { top: -5px; left: -5px; cursor: nwse-resize; }
-.resize-handle.ne { top: -5px; right: -5px; cursor: nesw-resize; }
-.resize-handle.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
-.resize-handle.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+.resize-handle:hover {
+  transform: scale(1.2);
+}
+
+.resize-handle.nw { top: -6px; left: -6px; cursor: nwse-resize; }
+.resize-handle.ne { top: -6px; right: -6px; cursor: nesw-resize; }
+.resize-handle.sw { bottom: -6px; left: -6px; cursor: nesw-resize; }
+.resize-handle.se { bottom: -6px; right: -6px; cursor: nwse-resize; }
 
 /* Drawing Canvas */
 .drawing-canvas {
@@ -318,7 +554,9 @@ body {
   cursor: crosshair;
 }
 
-/* Welcome Screen */
+/* ============================================
+   Welcome Screen - Enhanced
+   ============================================ */
 .welcome-screen {
   display: flex;
   flex-direction: column;
@@ -327,51 +565,78 @@ body {
   height: 100%;
   gap: 24px;
   color: var(--text-secondary);
+  padding: 40px;
+  text-align: center;
 }
 
 .welcome-icon {
-  width: 80px;
-  height: 80px;
-  color: var(--secondary-color);
+  width: 96px;
+  height: 96px;
+  color: var(--primary-color);
+  opacity: 0.8;
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
 }
 
 .welcome-title {
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 28px;
+  font-weight: 700;
   color: var(--text-primary);
+  letter-spacing: -0.5px;
 }
 
 .welcome-text {
-  font-size: 16px;
-  text-align: center;
-  max-width: 400px;
+  font-size: 15px;
+  max-width: 420px;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }
 
 .welcome-btn {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 24px;
-  font-size: 16px;
-  font-weight: 500;
+  gap: 10px;
+  padding: 14px 28px;
+  font-size: 15px;
+  font-weight: 600;
   color: white;
-  background-color: var(--primary-color);
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  transition: all var(--transition-base);
+  box-shadow: var(--shadow-md), 0 0 0 0 var(--primary-glow);
 }
 
 .welcome-btn:hover {
-  background-color: var(--primary-hover);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg), 0 0 20px var(--primary-glow);
 }
 
-/* Properties Panel */
+.welcome-btn:active {
+  transform: translateY(0);
+}
+
+.welcome-btn svg {
+  transition: transform var(--transition-base);
+}
+
+.welcome-btn:hover svg {
+  transform: scale(1.1);
+}
+
+/* ============================================
+   Properties Panel
+   ============================================ */
 .properties-panel {
-  width: 250px;
+  width: 260px;
   background-color: var(--surface-color);
   border-left: 1px solid var(--border-color);
-  padding: 16px;
+  padding: 20px;
   overflow-y: auto;
 }
 
@@ -380,23 +645,38 @@ body {
 }
 
 .property-group {
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .property-label {
   display: block;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
   color: var(--text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .property-input {
   width: 100%;
-  padding: 8px;
+  padding: 10px 12px;
   border: 1px solid var(--border-color);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 14px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  transition: all var(--transition-base);
+}
+
+.property-input:hover {
+  border-color: var(--border-hover);
+}
+
+.property-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
 .color-picker {
@@ -406,20 +686,28 @@ body {
 }
 
 .color-swatch {
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
   border: 2px solid transparent;
   cursor: pointer;
+  transition: all var(--transition-base);
+}
+
+.color-swatch:hover {
+  transform: scale(1.1);
 }
 
 .color-swatch.active {
   border-color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
 }
 
-/* Status Bar */
+/* ============================================
+   Status Bar - Enhanced
+   ============================================ */
 .status-bar {
-  height: 24px;
+  height: var(--status-bar-height);
   background-color: var(--surface-color);
   border-top: 1px solid var(--border-color);
   display: flex;
@@ -427,29 +715,52 @@ body {
   padding: 0 16px;
   font-size: 12px;
   color: var(--text-secondary);
-  gap: 16px;
+  gap: 20px;
 }
 
-/* Loading Spinner */
+.status-bar > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-bar .modified-indicator {
+  width: 8px;
+  height: 8px;
+  background-color: var(--warning-color);
+  border-radius: var(--radius-full);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* ============================================
+   Loading Spinner - Enhanced
+   ============================================ */
 .loading-overlay {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(255, 255, 255, 0.8);
+  background-color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: var(--z-modal);
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
+  width: 48px;
+  height: 48px;
   border: 3px solid var(--border-color);
   border-top-color: var(--primary-color);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
+  border-radius: var(--radius-full);
+  animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
@@ -458,186 +769,245 @@ body {
   }
 }
 
-/* Scrollbar Styles */
+/* ============================================
+   Scrollbar Styles - Enhanced
+   ============================================ */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--background-color);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
   background: var(--border-color);
-  border-radius: 4px;
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--secondary-color);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
-/* Drag and Drop */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ============================================
+   Drag and Drop - Enhanced
+   ============================================ */
 .pdf-viewer.dragging {
-  background-color: rgba(37, 99, 235, 0.05);
+  background-color: var(--primary-light);
   outline: 3px dashed var(--primary-color);
-  outline-offset: -12px;
+  outline-offset: -16px;
 }
 
 .pdf-viewer.dragging .welcome-screen {
   pointer-events: none;
+  opacity: 0.3;
 }
 
-
-/* Text Edit Dialog */
+/* ============================================
+   Text Edit Dialog - Enhanced
+   ============================================ */
 .text-edit-dialog-overlay {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .text-edit-dialog {
-  background: white;
-  border-radius: 8px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-  min-width: 350px;
-  max-width: 500px;
+  background: var(--surface-color);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  min-width: 380px;
+  max-width: 520px;
+  animation: slideUp 0.25s ease;
+  overflow: hidden;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .text-edit-dialog-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 16px 20px;
+  padding: 18px 24px;
   border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(to bottom, var(--surface-color), var(--background-color));
 }
 
 .text-edit-dialog-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
+  color: var(--text-primary);
 }
 
 .dialog-close-btn {
   background: none;
   border: none;
-  font-size: 24px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
   cursor: pointer;
   color: var(--text-secondary);
-  line-height: 1;
-  padding: 0;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-base);
 }
 
 .dialog-close-btn:hover {
+  background-color: var(--background-color);
   color: var(--text-primary);
 }
 
 .text-edit-dialog-body {
-  padding: 20px;
+  padding: 24px;
 }
 
 .text-edit-dialog-body label {
   display: block;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
   color: var(--text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .original-text {
-  padding: 8px 12px;
+  padding: 12px 16px;
   background-color: var(--background-color);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   font-size: 14px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  font-family: inherit;
 }
 
 .text-edit-input {
   width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
+  padding: 12px 16px;
+  border: 2px solid var(--border-color);
+  border-radius: var(--radius-md);
   font-size: 14px;
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: all var(--transition-base);
+  background: var(--surface-color);
+  color: var(--text-primary);
+}
+
+.text-edit-input:hover {
+  border-color: var(--border-hover);
 }
 
 .text-edit-input:focus {
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  box-shadow: 0 0 0 4px var(--primary-glow);
 }
 
 .text-edit-dialog-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 16px 20px;
+  gap: 12px;
+  padding: 18px 24px;
   border-top: 1px solid var(--border-color);
+  background: var(--background-color);
 }
 
 .dialog-btn {
-  padding: 8px 16px;
-  border-radius: 6px;
+  padding: 10px 20px;
+  border-radius: var(--radius-md);
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--transition-base);
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .dialog-btn.cancel {
-  background: white;
+  background: var(--surface-color);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
 }
 
 .dialog-btn.cancel:hover {
   background: var(--background-color);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
 }
 
 .dialog-btn.save {
-  background: var(--primary-color);
-  border: 1px solid var(--primary-color);
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
+  border: none;
   color: white;
+  box-shadow: var(--shadow-sm);
 }
 
 .dialog-btn.save:hover {
-  background: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
 }
 
-/* Update editable text items */
-.pdf-text-item.editable:hover {
-  background-color: rgba(37, 99, 235, 0.15);
-  outline: 1px dashed var(--primary-color);
+.dialog-btn.save:active {
+  transform: translateY(0);
 }
 
-
-/* Update Notification Styles */
+/* ============================================
+   Update Notification - Enhanced
+   ============================================ */
 .update-notification {
   position: fixed;
-  top: 60px;
-  right: 16px;
+  top: 68px;
+  right: 20px;
   background-color: var(--surface-color);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-  padding: 12px 16px;
-  min-width: 300px;
-  max-width: 400px;
-  z-index: 1000;
-  animation: slideIn 0.3s ease-out;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: 16px 20px;
+  min-width: 320px;
+  max-width: 420px;
+  z-index: var(--z-notification);
+  animation: slideInRight 0.35s ease-out;
 }
 
-@keyframes slideIn {
+@keyframes slideInRight {
   from {
-    transform: translateX(100%);
+    transform: translateX(120%);
     opacity: 0;
   }
   to {
@@ -649,9 +1019,10 @@ body {
 .update-notification-content {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   color: var(--text-primary);
   font-size: 14px;
+  line-height: 1.5;
 }
 
 .update-notification-content.error {
@@ -670,60 +1041,65 @@ body {
 .update-notification-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 12px;
+  gap: 10px;
+  margin-top: 14px;
   justify-content: flex-end;
 }
 
 .update-btn {
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 8px 16px;
+  border-radius: var(--radius-md);
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   border: none;
   display: flex;
   align-items: center;
-  gap: 4px;
-  transition: background-color 0.2s;
+  gap: 6px;
+  transition: all var(--transition-base);
 }
 
 .update-btn.primary {
-  background-color: var(--primary-color);
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-hover) 100%);
   color: white;
+  box-shadow: var(--shadow-sm);
 }
 
 .update-btn.primary:hover {
-  background-color: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
 }
 
 .update-btn.secondary {
   background-color: transparent;
   color: var(--text-secondary);
-  padding: 6px;
+  padding: 8px;
 }
 
 .update-btn.secondary:hover {
   background-color: var(--background-color);
+  color: var(--text-primary);
 }
 
 .update-progress-bar {
-  height: 4px;
+  height: 6px;
   background-color: var(--border-color);
-  border-radius: 2px;
-  margin-top: 10px;
+  border-radius: var(--radius-full);
+  margin-top: 12px;
   overflow: hidden;
 }
 
 .update-progress-fill {
   height: 100%;
-  background-color: var(--primary-color);
+  background: linear-gradient(90deg, var(--primary-color) 0%, var(--info-color) 100%);
   transition: width 0.3s ease;
+  border-radius: var(--radius-full);
 }
 
 .update-progress-info {
   font-size: 11px;
-  color: var(--text-secondary);
-  margin-top: 6px;
+  color: var(--text-muted);
+  margin-top: 8px;
   text-align: right;
 }
 
@@ -731,11 +1107,65 @@ body {
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
+/* ============================================
+   Focus Visible - Accessibility
+   ============================================ */
+:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ============================================
+   Reduced Motion - Accessibility
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
-  to {
-    transform: rotate(360deg);
+}
+
+/* ============================================
+   High Contrast Mode - Accessibility
+   ============================================ */
+@media (prefers-contrast: high) {
+  :root {
+    --border-color: #475569;
+    --text-secondary: #475569;
+  }
+
+  .toolbar-btn.active {
+    outline: 2px solid white;
+  }
+}
+
+/* ============================================
+   Print Styles
+   ============================================ */
+@media print {
+  .toolbar,
+  .sidebar,
+  .status-bar,
+  .update-notification {
+    display: none !important;
+  }
+
+  .pdf-viewer {
+    padding: 0;
+    overflow: visible;
+  }
+
+  .pdf-page-container {
+    box-shadow: none;
+    margin: 0;
+    page-break-after: always;
   }
 }

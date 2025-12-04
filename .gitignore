@@ -21,6 +21,9 @@ npm-debug.log*
 .env
 .env.local
 
+# Update config with GitHub token (contains secrets)
+update-config.json
+
 # Editor directories
 *.swp
 *.swo

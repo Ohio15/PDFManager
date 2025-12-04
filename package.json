@@ -47,6 +47,13 @@
     "files": [
       "dist/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "update-config.json",
+        "to": "update-config.json",
+        "filter": ["**/*"]
+      }
+    ],
     "win": {
       "target": "nsis"
     },

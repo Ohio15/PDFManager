@@ -11,6 +11,44 @@ let mainWindow: BrowserWindow | null = null;
 autoUpdater.autoDownload = false; // User must confirm download
 autoUpdater.autoInstallOnAppQuit = true;
 
+// GitHub token for private repo access
+// This token needs 'repo' scope for private repos
+// Priority: 1) Environment variable, 2) Config file, 3) Hardcoded fallback
+function getGitHubToken(): string {
+  // Check environment variables first
+  if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+
+  // Check for config file in app directory (for production)
+  try {
+    const configPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'update-config.json')
+      : path.join(__dirname, '../../update-config.json');
+
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      if (config.githubToken) return config.githubToken;
+    }
+  } catch (e) {
+    // Config file doesn't exist or is invalid
+  }
+
+  // Hardcoded fallback for private distribution (replace with your token)
+  // WARNING: Only use this for private/internal distribution
+  return '';
+}
+
+const GITHUB_TOKEN = getGitHubToken();
+
+if (GITHUB_TOKEN) {
+  autoUpdater.requestHeaders = {
+    Authorization: `token ${GITHUB_TOKEN}`,
+  };
+  console.log('GitHub token configured for auto-updates');
+} else {
+  console.log('No GitHub token - updates will only work for public repos');
+}
+
 function setupAutoUpdater(): void {
   // Only check for updates in production
   if (!app.isPackaged) {

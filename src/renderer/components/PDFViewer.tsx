@@ -581,8 +581,25 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     setEditingTextItem(null);
   };
 
+  const handleTextItemClick = (
+    e: React.MouseEvent,
+    pageNum: number,
+    textItem: PDFTextItem
+  ) => {
+    // Handle eraser tool - delete/hide text item on click
+    if (currentTool === 'erase') {
+      e.stopPropagation();
+      e.preventDefault();
+      // "Delete" the text by setting it to empty string
+      onUpdateTextItem(pageNum, textItem.id, '');
+      return;
+    }
+  };
+
   const renderTextItem = (pageNum: number, textItem: PDFTextItem) => {
     const isEditable = true;
+    // Don't render if text is empty (was "deleted")
+    if (!textItem.str || textItem.str.trim() === '') return null;
 
     return (
       <div
@@ -594,8 +611,10 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           fontSize: textItem.fontSize * scale,
           width: textItem.width * scale,
           height: textItem.height * scale,
-          cursor: currentTool === 'select' && isEditable ? 'pointer' : 'default',
+          cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' && isEditable ? 'pointer' : 'default'),
+          pointerEvents: currentTool === 'erase' ? 'auto' : undefined,
         }}
+        onClick={(e) => handleTextItemClick(e, pageNum, textItem)}
         onDoubleClick={(e) => handleTextItemDoubleClick(e, pageNum, textItem)}
       >
         {textItem.str}

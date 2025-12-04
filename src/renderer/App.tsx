@@ -34,13 +34,14 @@ declare global {
   }
 }
 
-export type Tool = 'select' | 'text' | 'draw' | 'highlight' | 'image' | 'erase';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase';
 
 const App: React.FC = () => {
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [currentTool, setCurrentTool] = useState<Tool>('select');
   const [zoom, setZoom] = useState(100);
   const [currentPage, setCurrentPage] = useState(1);
+  const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
 
   const {
     document,
@@ -51,6 +52,7 @@ const App: React.FC = () => {
     saveFileAs,
     addText,
     addImage,
+    addHighlight,
     deletePage,
     rotatePage,
     undo,
@@ -118,14 +120,22 @@ const App: React.FC = () => {
     [document, currentPage, rotatePage]
   );
 
-  const handleDeletePage = useCallback(() => {
-    if (document && document.pageCount > 1) {
-      deletePage(currentPage);
-      if (currentPage > document.pageCount - 1) {
-        setCurrentPage(document.pageCount - 1);
+  const handleDeleteSelected = useCallback(() => {
+    if (document && selectedAnnotationId) {
+      // Find which page has this annotation
+      const pageIndex = document.pages.findIndex((p) =>
+        p.annotations.some((a) => a.id === selectedAnnotationId)
+      );
+      if (pageIndex !== -1) {
+        deleteAnnotation(pageIndex + 1, selectedAnnotationId);
+        setSelectedAnnotationId(null);
       }
     }
-  }, [document, currentPage, deletePage]);
+  }, [document, selectedAnnotationId, deleteAnnotation]);
+
+  const handleSelectionChange = useCallback((annotationId: string | null) => {
+    setSelectedAnnotationId(annotationId);
+  }, []);
 
   // Menu event handlers
   useEffect(() => {
@@ -142,7 +152,7 @@ const App: React.FC = () => {
       'toggle-sidebar': () => setSidebarVisible((prev) => !prev),
       'rotate-cw': () => handleRotatePage(true),
       'rotate-ccw': () => handleRotatePage(false),
-      'delete-page': handleDeletePage,
+      'delete-selected': handleDeleteSelected,
     };
 
     Object.entries(menuActions).forEach(([action, handler]) => {
@@ -169,7 +179,7 @@ const App: React.FC = () => {
     handleZoomOut,
     handleFitWidth,
     handleRotatePage,
-    handleDeletePage,
+    handleDeleteSelected,
     openFile,
   ]);
 
@@ -210,7 +220,7 @@ const App: React.FC = () => {
         onAddImage={handleAddImage}
         onRotateCW={() => handleRotatePage(true)}
         onRotateCCW={() => handleRotatePage(false)}
-        onDeletePage={handleDeletePage}
+        onDeleteSelected={handleDeleteSelected}
         disabled={!document}
       />
 
@@ -232,6 +242,8 @@ const App: React.FC = () => {
             onUpdateAnnotation={updateAnnotation}
             onDeleteAnnotation={deleteAnnotation}
             onUpdateTextItem={updateTextItem}
+            onSelectionChange={handleSelectionChange}
+            onAddHighlight={addHighlight}
             loading={loading}
           />
         ) : (

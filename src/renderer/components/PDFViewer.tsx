@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, PDFTextItem, Size } from '../types';
+import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem, Size } from '../types';
 import { Tool } from '../App';
 
 interface TextEditDialogState {
@@ -50,6 +50,8 @@ interface PDFViewerProps {
   onUpdateTextItem: (pageIndex: number, textItemId: string, newText: string) => void;
   onDuplicateAnnotation?: (pageIndex: number, annotationId: string) => void;
   onBringToFront?: (pageIndex: number, annotationId: string) => void;
+  onSelectionChange?: (annotationId: string | null) => void;
+  onAddHighlight?: (pageIndex: number, rects: Array<{ x: number; y: number; width: number; height: number }>) => void;
   loading: boolean;
 }
 
@@ -64,9 +66,12 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onUpdateTextItem,
   onDuplicateAnnotation,
   onBringToFront,
+  onSelectionChange,
+  onAddHighlight,
   loading,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const editableTextRef = useRef<HTMLDivElement>(null);
   const [renderedPages, setRenderedPages] = useState<Map<number, HTMLCanvasElement>>(new Map());
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
@@ -87,8 +92,28 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     originalText: '',
     editedText: '',
   });
+  const [highlightStart, setHighlightStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
+  const [highlightPreview, setHighlightPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
   const scale = zoom / 100;
+
+  // Notify parent when selection changes
+  useEffect(() => {
+    onSelectionChange?.(selectedAnnotation);
+  }, [selectedAnnotation, onSelectionChange]);
+
+  // Focus editable text when entering edit mode
+  useEffect(() => {
+    if (editingAnnotation && editableTextRef.current) {
+      editableTextRef.current.focus();
+      // Select all text for easy editing
+      const selection = window.getSelection();
+      const range = window.document.createRange();
+      range.selectNodeContents(editableTextRef.current);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+  }, [editingAnnotation]);
 
   useEffect(() => {
     const renderPages = async () => {
@@ -179,13 +204,68 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     return () => window.removeEventListener('click', handleClickOutside);
   }, [contextMenu.isOpen]);
 
+  const handlePageMouseDown = (
+    e: React.MouseEvent,
+    pageNum: number
+  ) => {
+    if (currentTool !== 'highlight') return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / scale;
+    const y = (e.clientY - rect.top) / scale;
+
+    setHighlightStart({ pageNum, x, y });
+    setHighlightPreview(null);
+  };
+
+  const handlePageMouseMove = (
+    e: React.MouseEvent,
+    pageNum: number
+  ) => {
+    if (!highlightStart || highlightStart.pageNum !== pageNum) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const currentX = (e.clientX - rect.left) / scale;
+    const currentY = (e.clientY - rect.top) / scale;
+
+    const x = Math.min(highlightStart.x, currentX);
+    const y = Math.min(highlightStart.y, currentY);
+    const width = Math.abs(currentX - highlightStart.x);
+    const height = Math.abs(currentY - highlightStart.y);
+
+    setHighlightPreview({ x, y, width, height });
+  };
+
+  const handlePageMouseUp = (pageNum: number) => {
+    if (!highlightStart || highlightStart.pageNum !== pageNum || !highlightPreview) {
+      setHighlightStart(null);
+      setHighlightPreview(null);
+      return;
+    }
+
+    // Only create highlight if it's big enough
+    if (highlightPreview.width > 5 && highlightPreview.height > 5) {
+      onAddHighlight?.(pageNum, [highlightPreview]);
+    }
+
+    setHighlightStart(null);
+    setHighlightPreview(null);
+  };
+
   const handleAnnotationMouseDown = (
     e: React.MouseEvent,
     pageIndex: number,
     annotation: Annotation
   ) => {
-    if (currentTool !== 'select') return;
     e.stopPropagation();
+
+    // Handle eraser tool - delete annotation on click
+    if (currentTool === 'erase') {
+      onDeleteAnnotation(pageIndex, annotation.id);
+      return;
+    }
+
+    if (currentTool !== 'select') return;
 
     if (contextMenu.isOpen) {
       setContextMenu(prev => ({ ...prev, isOpen: false }));
@@ -395,6 +475,9 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      // Don't handle delete if we're editing text
+      if (editingAnnotation) return;
+
       if (e.key === 'Delete' && selectedAnnotation) {
         const pageIndex = document.pages.findIndex((p) =>
           p.annotations.some((a) => a.id === selectedAnnotation)
@@ -410,7 +493,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         setContextMenu(prev => ({ ...prev, isOpen: false }));
       }
     },
-    [selectedAnnotation, document.pages, onDeleteAnnotation]
+    [selectedAnnotation, editingAnnotation, document.pages, onDeleteAnnotation]
   );
 
   useEffect(() => {
@@ -543,6 +626,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       return (
         <div
           key={annotation.id}
+          ref={isEditing ? editableTextRef : undefined}
           className={`editable-text ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${isDraggingThis ? 'dragging' : ''} ${isResizingThis ? 'resizing' : ''}`}
           style={{
             left: textAnnotation.position.x * scale,
@@ -550,7 +634,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             fontSize: textAnnotation.fontSize * scale,
             fontFamily: textAnnotation.fontFamily,
             color: textAnnotation.color,
-            cursor: isEditing ? 'text' : (currentTool === 'select' ? 'move' : 'default'),
+            cursor: currentTool === 'erase' ? 'pointer' : (isEditing ? 'text' : (currentTool === 'select' ? 'move' : 'default')),
             ...(hasSize ? {
               width: textAnnotation.size!.width * scale,
               height: textAnnotation.size!.height * scale,
@@ -561,9 +645,21 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
           contentEditable={isEditing}
           suppressContentEditableWarning
-          onBlur={(e) =>
-            handleTextChange(pageIndex, annotation.id, e.currentTarget.textContent || '')
-          }
+          onBlur={(e) => {
+            if (isEditing) {
+              handleTextChange(pageIndex, annotation.id, e.currentTarget.textContent || '');
+            }
+          }}
+          onKeyDown={(e) => {
+            if (isEditing && e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              e.currentTarget.blur();
+            }
+            if (isEditing && e.key === 'Escape') {
+              e.preventDefault();
+              setEditingAnnotation(null);
+            }
+          }}
         >
           {textAnnotation.content}
           {isSelected && !isEditing && renderResizeHandles(annotation)}
@@ -582,7 +678,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             top: imageAnnotation.position.y * scale,
             width: imageAnnotation.size.width * scale,
             height: imageAnnotation.size.height * scale,
-            cursor: currentTool === 'select' ? 'move' : 'default',
+            cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' ? 'move' : 'default'),
           }}
           onMouseDown={(e) => handleAnnotationMouseDown(e, pageIndex, annotation)}
           onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
@@ -594,6 +690,30 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             draggable={false}
           />
           {isSelected && renderResizeHandles(annotation)}
+        </div>
+      );
+    }
+
+    if (annotation.type === 'highlight') {
+      const highlightAnnotation = annotation as HighlightAnnotation;
+      return (
+        <div key={annotation.id} className="highlight-annotation-container">
+          {highlightAnnotation.rects.map((rect, idx) => (
+            <div
+              key={`${annotation.id}-${idx}`}
+              className={`highlight-rect ${isSelected ? 'selected' : ''}`}
+              style={{
+                left: rect.x * scale,
+                top: rect.y * scale,
+                width: rect.width * scale,
+                height: rect.height * scale,
+                backgroundColor: highlightAnnotation.color,
+                cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' ? 'pointer' : 'default'),
+              }}
+              onMouseDown={(e) => handleAnnotationMouseDown(e, pageIndex, annotation)}
+              onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
+            />
+          ))}
         </div>
       );
     }
@@ -614,12 +734,16 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         return (
           <div
             key={pageNum}
-            className="pdf-page-container"
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''}`}
             style={{
               width: canvas.width,
               height: canvas.height,
             }}
             onClick={() => { setSelectedAnnotation(null); setEditingAnnotation(null); setEditingTextItem(null); }}
+            onMouseDown={(e) => handlePageMouseDown(e, pageNum)}
+            onMouseMove={(e) => handlePageMouseMove(e, pageNum)}
+            onMouseUp={() => handlePageMouseUp(pageNum)}
+            onMouseLeave={() => { if (highlightStart) { setHighlightStart(null); setHighlightPreview(null); } }}
           >
             <canvas
               className="pdf-page-canvas"
@@ -642,6 +766,18 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             <div className="text-layer">
               {page?.textItems?.map((textItem) => renderTextItem(pageNum, textItem))}
             </div>
+            {/* Highlight preview while drawing */}
+            {highlightStart && highlightStart.pageNum === pageNum && highlightPreview && (
+              <div
+                className="highlight-preview"
+                style={{
+                  left: highlightPreview.x * scale,
+                  top: highlightPreview.y * scale,
+                  width: highlightPreview.width * scale,
+                  height: highlightPreview.height * scale,
+                }}
+              />
+            )}
           </div>
         );
       })}

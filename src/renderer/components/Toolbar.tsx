@@ -9,7 +9,6 @@ import {
   ZoomOut,
   MousePointer,
   Type,
-  Pencil,
   Highlighter,
   Image,
   Eraser,
@@ -35,7 +34,7 @@ interface ToolbarProps {
   onAddImage: () => void;
   onRotateCW: () => void;
   onRotateCCW: () => void;
-  onDeletePage: () => void;
+  onDeleteSelected: () => void;
   disabled: boolean;
 }
 
@@ -56,16 +55,15 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onAddImage,
   onRotateCW,
   onRotateCCW,
-  onDeletePage,
+  onDeleteSelected,
   disabled,
 }) => {
   const tools: Array<{ id: Tool; icon: React.ReactNode; title: string }> = [
     { id: 'select', icon: <MousePointer />, title: 'Select (V)' },
     { id: 'text', icon: <Type />, title: 'Add Text (T)' },
-    { id: 'draw', icon: <Pencil />, title: 'Draw (D)' },
     { id: 'highlight', icon: <Highlighter />, title: 'Highlight (H)' },
     { id: 'image', icon: <Image />, title: 'Add Image (I)' },
-    { id: 'erase', icon: <Eraser />, title: 'Erase (E)' },
+    { id: 'erase', icon: <Eraser />, title: 'Eraser - Click to delete annotations (E)' },
   ];
 
   const zoomOptions = [25, 50, 75, 100, 125, 150, 200, 300, 400];
@@ -120,10 +118,10 @@ const Toolbar: React.FC<ToolbarProps> = ({
             onClick={() => {
               if (tool.id === 'text') {
                 onAddText();
-                onToolChange('select'); // Auto-switch to select after adding text
+                onToolChange('select');
               } else if (tool.id === 'image') {
                 onAddImage();
-                onToolChange('select'); // Auto-switch to select after adding image
+                onToolChange('select');
               } else {
                 onToolChange(tool.id);
               }
@@ -134,6 +132,18 @@ const Toolbar: React.FC<ToolbarProps> = ({
             {tool.icon}
           </button>
         ))}
+      </div>
+
+      {/* Annotation Operations */}
+      <div className="toolbar-group">
+        <button
+          className="toolbar-btn"
+          onClick={onDeleteSelected}
+          disabled={disabled}
+          title="Delete Selected Annotation (Delete)"
+        >
+          <Trash2 />
+        </button>
       </div>
 
       {/* Page Operations */}
@@ -153,14 +163,6 @@ const Toolbar: React.FC<ToolbarProps> = ({
           title="Rotate Clockwise"
         >
           <RotateCw />
-        </button>
-        <button
-          className="toolbar-btn"
-          onClick={onDeletePage}
-          disabled={disabled}
-          title="Delete Page"
-        >
-          <Trash2 />
         </button>
       </div>
 

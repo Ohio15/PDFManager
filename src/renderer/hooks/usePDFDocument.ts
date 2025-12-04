@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { PDFDocument as PDFLib, rgb, StandardFonts, PDFFont } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
-import { PDFDocument, Annotation, Position, TextAnnotation, ImageAnnotation, PDFTextItem } from '../types';
+import { PDFDocument, Annotation, Position, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem } from '../types';
 
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
@@ -741,6 +741,59 @@ export function usePDFDocument() {
     [document, addToHistory]
   );
 
+  const addHighlight = useCallback(
+    (pageIndex: number, rects: Array<{ x: number; y: number; width: number; height: number }>, color: string = 'rgba(255, 255, 0, 0.3)') => {
+      if (!document || rects.length === 0) return;
+
+      const annotation: HighlightAnnotation = {
+        id: `highlight-${Date.now()}`,
+        type: 'highlight',
+        pageIndex,
+        rects,
+        color,
+      };
+
+      const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[pageIndex - 1] = {
+          ...newPages[pageIndex - 1],
+          annotations: [...newPages[pageIndex - 1].annotations, annotation],
+        };
+        return { ...prev, pages: newPages };
+      });
+
+      addToHistory({
+        type: 'addHighlight',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: previousAnnotations,
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: [...newPages[pageIndex - 1].annotations, annotation],
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
   const updateAnnotation = useCallback(
     (pageIndex: number, annotationId: string, updates: Partial<Annotation>) => {
       if (!document) return;
@@ -1028,6 +1081,7 @@ export function usePDFDocument() {
     saveFileAs,
     addText,
     addImage,
+    addHighlight,
     deletePage,
     rotatePage,
     undo,

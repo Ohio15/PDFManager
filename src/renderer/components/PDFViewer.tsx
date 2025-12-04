@@ -651,8 +651,8 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
 
   const renderTextItem = (pageNum: number, textItem: PDFTextItem) => {
     const isEditable = true;
-    // Don't render if text is empty (was "deleted") or in erased set
-    if (!textItem.str || textItem.str.trim() === '') return null;
+    // Don't render if text is empty (was "deleted"), marked as deleted, or in erased set
+    if (!textItem.str || textItem.str.trim() === '' || textItem.isDeleted) return null;
 
     return (
       <div

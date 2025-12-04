@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, PDFTextItem } from '../types';
+import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, PDFTextItem, Size } from '../types';
 import { Tool } from '../App';
+
 interface TextEditDialogState {
   isOpen: boolean;
   pageNum: number;
@@ -10,9 +11,33 @@ interface TextEditDialogState {
   editedText: string;
 }
 
+// Resize handle types for 8-point resize
+type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+interface ResizeState {
+  id: string;
+  handle: ResizeHandle;
+  startX: number;
+  startY: number;
+  origX: number;
+  origY: number;
+  origWidth: number;
+  origHeight: number;
+}
+
+interface ContextMenuState {
+  isOpen: boolean;
+  x: number;
+  y: number;
+  annotationId: string;
+  pageIndex: number;
+}
 
 // Configure PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
+
+// Minimum size for annotations
+const MIN_SIZE = 20;
 
 interface PDFViewerProps {
   document: PDFDocument;
@@ -23,6 +48,8 @@ interface PDFViewerProps {
   onUpdateAnnotation: (pageIndex: number, annotationId: string, updates: Partial<Annotation>) => void;
   onDeleteAnnotation: (pageIndex: number, annotationId: string) => void;
   onUpdateTextItem: (pageIndex: number, textItemId: string, newText: string) => void;
+  onDuplicateAnnotation?: (pageIndex: number, annotationId: string) => void;
+  onBringToFront?: (pageIndex: number, annotationId: string) => void;
   loading: boolean;
 }
 
@@ -35,6 +62,8 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onUpdateAnnotation,
   onDeleteAnnotation,
   onUpdateTextItem,
+  onDuplicateAnnotation,
+  onBringToFront,
   loading,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -42,6 +71,14 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
+  const [resizing, setResizing] = useState<ResizeState | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>({
+    isOpen: false,
+    x: 0,
+    y: 0,
+    annotationId: '',
+    pageIndex: 0,
+  });
   const [editingTextItem, setEditingTextItem] = useState<string | null>(null);
   const [textEditDialog, setTextEditDialog] = useState<TextEditDialogState>({
     isOpen: false,
@@ -61,7 +98,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         return;
       }
       try {
-        // Copy the data to avoid ArrayBuffer detachment issues
         const dataCopy = new Uint8Array(document.pdfData);
         const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
         console.log('PDF loaded, pages:', pdfDoc.numPages);
@@ -133,6 +169,16 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     }
   }, [handleScroll]);
 
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (contextMenu.isOpen) {
+        setContextMenu(prev => ({ ...prev, isOpen: false }));
+      }
+    };
+    window.addEventListener('click', handleClickOutside);
+    return () => window.removeEventListener('click', handleClickOutside);
+  }, [contextMenu.isOpen]);
+
   const handleAnnotationMouseDown = (
     e: React.MouseEvent,
     pageIndex: number,
@@ -140,6 +186,10 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   ) => {
     if (currentTool !== 'select') return;
     e.stopPropagation();
+
+    if (contextMenu.isOpen) {
+      setContextMenu(prev => ({ ...prev, isOpen: false }));
+    }
 
     setSelectedAnnotation(annotation.id);
 
@@ -154,35 +204,186 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     }
   };
 
+  const handleResizeMouseDown = (
+    e: React.MouseEvent,
+    annotation: Annotation,
+    handle: ResizeHandle
+  ) => {
+    if (currentTool !== 'select') return;
+    e.stopPropagation();
+    e.preventDefault();
+
+    let width: number;
+    let height: number;
+
+    if (annotation.type === 'image') {
+      const imgAnnotation = annotation as ImageAnnotation;
+      width = imgAnnotation.size.width;
+      height = imgAnnotation.size.height;
+    } else if (annotation.type === 'text') {
+      const textAnnotation = annotation as TextAnnotation;
+      width = textAnnotation.size?.width || 100;
+      height = textAnnotation.size?.height || textAnnotation.fontSize * 1.5;
+    } else {
+      return;
+    }
+
+    setResizing({
+      id: annotation.id,
+      handle,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: annotation.position.x,
+      origY: annotation.position.y,
+      origWidth: width,
+      origHeight: height,
+    });
+  };
+
+  const handleContextMenu = (
+    e: React.MouseEvent,
+    pageIndex: number,
+    annotation: Annotation
+  ) => {
+    if (currentTool !== 'select') return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    setSelectedAnnotation(annotation.id);
+    setContextMenu({
+      isOpen: true,
+      x: e.clientX,
+      y: e.clientY,
+      annotationId: annotation.id,
+      pageIndex,
+    });
+  };
+
+  const handleContextMenuAction = (action: 'delete' | 'duplicate' | 'bringToFront') => {
+    const { annotationId, pageIndex } = contextMenu;
+
+    switch (action) {
+      case 'delete':
+        onDeleteAnnotation(pageIndex, annotationId);
+        setSelectedAnnotation(null);
+        break;
+      case 'duplicate':
+        if (onDuplicateAnnotation) {
+          onDuplicateAnnotation(pageIndex, annotationId);
+        }
+        break;
+      case 'bringToFront':
+        if (onBringToFront) {
+          onBringToFront(pageIndex, annotationId);
+        }
+        break;
+    }
+
+    setContextMenu(prev => ({ ...prev, isOpen: false }));
+  };
+
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
-      if (!dragging) return;
+      if (resizing) {
+        const dx = (e.clientX - resizing.startX) / scale;
+        const dy = (e.clientY - resizing.startY) / scale;
 
-      const dx = (e.clientX - dragging.startX) / scale;
-      const dy = (e.clientY - dragging.startY) / scale;
+        const pageIndex = document.pages.findIndex((p) =>
+          p.annotations.some((a) => a.id === resizing.id)
+        );
 
-      const pageIndex = document.pages.findIndex((p) =>
-        p.annotations.some((a) => a.id === dragging.id)
-      );
+        if (pageIndex !== -1) {
+          let newX = resizing.origX;
+          let newY = resizing.origY;
+          let newWidth = resizing.origWidth;
+          let newHeight = resizing.origHeight;
 
-      if (pageIndex !== -1) {
-        onUpdateAnnotation(pageIndex + 1, dragging.id, {
-          position: {
-            x: dragging.origX + dx,
-            y: dragging.origY + dy,
-          },
-        });
+          switch (resizing.handle) {
+            case 'nw':
+              newX = resizing.origX + dx;
+              newY = resizing.origY + dy;
+              newWidth = resizing.origWidth - dx;
+              newHeight = resizing.origHeight - dy;
+              break;
+            case 'n':
+              newY = resizing.origY + dy;
+              newHeight = resizing.origHeight - dy;
+              break;
+            case 'ne':
+              newY = resizing.origY + dy;
+              newWidth = resizing.origWidth + dx;
+              newHeight = resizing.origHeight - dy;
+              break;
+            case 'e':
+              newWidth = resizing.origWidth + dx;
+              break;
+            case 'se':
+              newWidth = resizing.origWidth + dx;
+              newHeight = resizing.origHeight + dy;
+              break;
+            case 's':
+              newHeight = resizing.origHeight + dy;
+              break;
+            case 'sw':
+              newX = resizing.origX + dx;
+              newWidth = resizing.origWidth - dx;
+              newHeight = resizing.origHeight + dy;
+              break;
+            case 'w':
+              newX = resizing.origX + dx;
+              newWidth = resizing.origWidth - dx;
+              break;
+          }
+
+          if (newWidth < MIN_SIZE) {
+            if (resizing.handle.includes('w')) {
+              newX = resizing.origX + resizing.origWidth - MIN_SIZE;
+            }
+            newWidth = MIN_SIZE;
+          }
+          if (newHeight < MIN_SIZE) {
+            if (resizing.handle.includes('n')) {
+              newY = resizing.origY + resizing.origHeight - MIN_SIZE;
+            }
+            newHeight = MIN_SIZE;
+          }
+
+          onUpdateAnnotation(pageIndex + 1, resizing.id, {
+            position: { x: newX, y: newY },
+            size: { width: newWidth, height: newHeight },
+          });
+        }
+        return;
+      }
+
+      if (dragging) {
+        const dx = (e.clientX - dragging.startX) / scale;
+        const dy = (e.clientY - dragging.startY) / scale;
+
+        const pageIndex = document.pages.findIndex((p) =>
+          p.annotations.some((a) => a.id === dragging.id)
+        );
+
+        if (pageIndex !== -1) {
+          onUpdateAnnotation(pageIndex + 1, dragging.id, {
+            position: {
+              x: dragging.origX + dx,
+              y: dragging.origY + dy,
+            },
+          });
+        }
       }
     },
-    [dragging, scale, document.pages, onUpdateAnnotation]
+    [dragging, resizing, scale, document.pages, onUpdateAnnotation]
   );
 
   const handleMouseUp = useCallback(() => {
     setDragging(null);
+    setResizing(null);
   }, []);
 
   useEffect(() => {
-    if (dragging) {
+    if (dragging || resizing) {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
       return () => {
@@ -190,7 +391,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         window.removeEventListener('mouseup', handleMouseUp);
       };
     }
-  }, [dragging, handleMouseMove, handleMouseUp]);
+  }, [dragging, resizing, handleMouseMove, handleMouseUp]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -202,6 +403,11 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           onDeleteAnnotation(pageIndex + 1, selectedAnnotation);
           setSelectedAnnotation(null);
         }
+      }
+      if (e.key === 'Escape') {
+        setSelectedAnnotation(null);
+        setEditingAnnotation(null);
+        setContextMenu(prev => ({ ...prev, isOpen: false }));
       }
     },
     [selectedAnnotation, document.pages, onDeleteAnnotation]
@@ -246,7 +452,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
 
     console.log('Double-click on PDF text item:', textItem.id, textItem.str);
 
-    // Open dialog for editing
     setTextEditDialog({
       isOpen: true,
       pageNum,
@@ -277,7 +482,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     }
   };
 
-
   const handleTextItemBlur = (
     pageNum: number,
     textItemId: string,
@@ -293,7 +497,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   };
 
   const renderTextItem = (pageNum: number, textItem: PDFTextItem) => {
-    // All text items are editable
     const isEditable = true;
 
     return (
@@ -315,16 +518,32 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     );
   };
 
+  const renderResizeHandles = (annotation: Annotation) => {
+    const handles: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+
+    return handles.map((handle) => (
+      <div
+        key={handle}
+        className={`resize-handle ${handle}`}
+        onMouseDown={(e) => handleResizeMouseDown(e, annotation, handle)}
+      />
+    ));
+  };
+
   const renderAnnotation = (pageIndex: number, annotation: Annotation) => {
     const isSelected = selectedAnnotation === annotation.id;
     const isEditing = editingAnnotation === annotation.id;
+    const isDraggingThis = dragging?.id === annotation.id;
+    const isResizingThis = resizing?.id === annotation.id;
 
     if (annotation.type === 'text') {
       const textAnnotation = annotation as TextAnnotation;
+      const hasSize = textAnnotation.size && textAnnotation.size.width > 0;
+
       return (
         <div
           key={annotation.id}
-          className={`editable-text ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''}`}
+          className={`editable-text ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${isDraggingThis ? 'dragging' : ''} ${isResizingThis ? 'resizing' : ''}`}
           style={{
             left: textAnnotation.position.x * scale,
             top: textAnnotation.position.y * scale,
@@ -332,9 +551,14 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             fontFamily: textAnnotation.fontFamily,
             color: textAnnotation.color,
             cursor: isEditing ? 'text' : (currentTool === 'select' ? 'move' : 'default'),
+            ...(hasSize ? {
+              width: textAnnotation.size!.width * scale,
+              height: textAnnotation.size!.height * scale,
+            } : {}),
           }}
           onMouseDown={(e) => !isEditing && handleAnnotationMouseDown(e, pageIndex, annotation)}
           onDoubleClick={(e) => handleAnnotationDoubleClick(e, annotation)}
+          onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
           contentEditable={isEditing}
           suppressContentEditableWarning
           onBlur={(e) =>
@@ -342,6 +566,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           }
         >
           {textAnnotation.content}
+          {isSelected && !isEditing && renderResizeHandles(annotation)}
         </div>
       );
     }
@@ -351,7 +576,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       return (
         <div
           key={annotation.id}
-          className={`editable-image ${isSelected ? 'selected' : ''}`}
+          className={`editable-image ${isSelected ? 'selected' : ''} ${isDraggingThis ? 'dragging' : ''} ${isResizingThis ? 'resizing' : ''}`}
           style={{
             left: imageAnnotation.position.x * scale,
             top: imageAnnotation.position.y * scale,
@@ -360,6 +585,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             cursor: currentTool === 'select' ? 'move' : 'default',
           }}
           onMouseDown={(e) => handleAnnotationMouseDown(e, pageIndex, annotation)}
+          onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
         >
           <img
             src={`data:image/${imageAnnotation.imageType};base64,${imageAnnotation.data}`}
@@ -367,14 +593,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             draggable={false}
           />
-          {isSelected && (
-            <>
-              <div className="resize-handle nw" />
-              <div className="resize-handle ne" />
-              <div className="resize-handle sw" />
-              <div className="resize-handle se" />
-            </>
-          )}
+          {isSelected && renderResizeHandles(annotation)}
         </div>
       );
     }
@@ -426,7 +645,43 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           </div>
         );
       })}
-    
+
+
+      {/* Context Menu */}
+      {contextMenu.isOpen && (
+        <div
+          className="annotation-context-menu"
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => handleContextMenuAction('delete')}
+          >
+            Delete
+          </button>
+          {onDuplicateAnnotation && (
+            <button
+              className="context-menu-item"
+              onClick={() => handleContextMenuAction('duplicate')}
+            >
+              Duplicate
+            </button>
+          )}
+          {onBringToFront && (
+            <button
+              className="context-menu-item"
+              onClick={() => handleContextMenuAction('bringToFront')}
+            >
+              Bring to Front
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Text Edit Dialog */}
       {textEditDialog.isOpen && (

@@ -546,6 +546,101 @@ body {
 .resize-handle.sw { bottom: -6px; left: -6px; cursor: nesw-resize; }
 .resize-handle.se { bottom: -6px; right: -6px; cursor: nwse-resize; }
 
+/* Edge resize handles */
+.resize-handle.n { top: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.resize-handle.s { bottom: -6px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.resize-handle.e { top: 50%; right: -6px; transform: translateY(-50%); cursor: ew-resize; }
+.resize-handle.w { top: 50%; left: -6px; transform: translateY(-50%); cursor: ew-resize; }
+
+.resize-handle.n:hover,
+.resize-handle.s:hover { transform: translateX(-50%) scale(1.2); }
+.resize-handle.e:hover,
+.resize-handle.w:hover { transform: translateY(-50%) scale(1.2); }
+
+/* Dragging and Resizing Visual Feedback */
+.editable-text.dragging,
+.editable-image.dragging {
+  opacity: 0.85;
+  cursor: grabbing !important;
+  box-shadow: var(--shadow-lg), 0 0 0 3px var(--primary-glow);
+}
+
+.editable-text.resizing,
+.editable-image.resizing {
+  opacity: 0.9;
+  box-shadow: var(--shadow-lg), 0 0 0 3px rgba(34, 197, 94, 0.2);
+  border-color: var(--success-color);
+}
+
+/* ============================================
+   Context Menu - Enhanced
+   ============================================ */
+.annotation-context-menu {
+  background: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xl);
+  min-width: 160px;
+  padding: 6px 0;
+  z-index: var(--z-dropdown);
+  animation: contextMenuFadeIn 0.15s ease;
+}
+
+@keyframes contextMenuFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--transition-fast);
+}
+
+.context-menu-item:hover {
+  background-color: var(--primary-light);
+  color: var(--primary-color);
+}
+
+.context-menu-item:first-child {
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.context-menu-item:last-child {
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.context-menu-item:only-child {
+  border-radius: var(--radius-sm);
+}
+
+.context-menu-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+}
+
+.context-menu-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 6px 0;
+}
+
 /* Drawing Canvas */
 .drawing-canvas {
   position: absolute;

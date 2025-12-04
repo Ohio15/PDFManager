@@ -96,7 +96,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const [highlightPreview, setHighlightPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [eraserStart, setEraserStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
   const [eraserPreview, setEraserPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const [erasedItems, setErasedItems] = useState<Set<string>>(new Set());
 
   const scale = zoom / 100;
 
@@ -288,13 +287,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
           // Erase all intersecting items
           itemsToErase.forEach((itemId) => {
             onUpdateTextItem(pageNum, itemId, '');
-          });
-
-          // Add to visual erased set for immediate feedback
-          setErasedItems((prev) => {
-            const newSet = new Set(prev);
-            itemsToErase.forEach((id) => newSet.add(id));
-            return newSet;
           });
         }
       }
@@ -651,8 +643,6 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       e.preventDefault();
       // "Delete" the text by setting it to empty string
       onUpdateTextItem(pageNum, textItem.id, '');
-      // Immediately add to erased set for instant visual feedback
-      setErasedItems((prev) => new Set(prev).add(textItem.id));
       return;
     }
   };
@@ -660,7 +650,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const renderTextItem = (pageNum: number, textItem: PDFTextItem) => {
     const isEditable = true;
     // Don't render if text is empty (was "deleted") or in erased set
-    if (!textItem.str || textItem.str.trim() === '' || erasedItems.has(textItem.id)) return null;
+    if (!textItem.str || textItem.str.trim() === '') return null;
 
     return (
       <div

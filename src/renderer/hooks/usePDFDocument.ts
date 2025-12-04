@@ -144,29 +144,50 @@ export function usePDFDocument() {
 
           const textContent = await page.getTextContent();
           // First pass: collect basic text item data
-          const basicTextItems = textContent.items
+          // Split text items into individual words for finer-grained erasing
+          let itemCounter = 0;
+          const basicTextItems: any[] = [];
+
+          textContent.items
             .filter((item: any) => item.str && item.str.trim())
-            .map((item: any, idx: number) => {
+            .forEach((item: any) => {
               const transform = item.transform;
-              const x = transform[4];
+              const baseX = transform[4];
               const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
               const height = item.height || fontSize * 1.2;
-              // transform[5] is the baseline of text, subtract height to get top position
               const y = viewport.height - transform[5] - height;
+              const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
 
-              return {
-                id: `text-item-${i}-${idx}`,
-                str: item.str,
-                originalStr: item.str,
-                x,
-                y,
-                width: item.width || (item.str.length * fontSize * 0.5),
-                height,
-                fontName: item.fontName || 'default',
-                fontSize,
-                transform,
-                isEdited: false,
-              };
+              // Split into words, preserving spaces
+              const words = item.str.split(/( +)/);
+              let currentX = baseX;
+
+              words.forEach((word: string) => {
+                if (!word) return;
+
+                const wordWidth = word.length * avgCharWidth;
+
+                // Only create items for non-empty words (skip pure whitespace)
+                if (word.trim()) {
+                  basicTextItems.push({
+                    id: `text-item-${i}-${itemCounter++}`,
+                    str: word,
+                    originalStr: word,
+                    x: currentX,
+                    y,
+                    width: wordWidth,
+                    height,
+                    fontName: item.fontName || 'default',
+                    fontSize,
+                    transform: [...transform.slice(0, 4), currentX, transform[5]],
+                    isEdited: false,
+                    // Store reference to parent item for potential re-assembly
+                    parentTransform: transform,
+                  });
+                }
+
+                currentX += wordWidth;
+              });
             });
 
           // Second pass: sample background colors for each text item
@@ -356,31 +377,47 @@ export function usePDFDocument() {
               const viewport = pdfPage.getViewport({ scale: 1 });
               const textContent = await pdfPage.getTextContent();
               
-              // Re-extract text items from the saved PDF
-              const newTextItems = textContent.items
+                            // Re-extract text items from the saved PDF, split into words
+              let itemCounter = 0;
+              const newTextItems: any[] = [];
+
+              textContent.items
                 .filter((item: any) => item.str && item.str.trim())
-                .map((item: any, idx: number) => {
+                .forEach((item: any) => {
                   const transform = item.transform;
-                  const x = transform[4];
+                  const baseX = transform[4];
                   const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
                   const height = item.height || fontSize * 1.2;
                   const y = viewport.height - transform[5] - height;
-                  
-                  return {
-                    id: `text-item-${i}-${idx}`,
-                    str: item.str,
-                    originalStr: item.str,
-                    x,
-                    y,
-                    width: item.width || (item.str.length * fontSize * 0.5),
-                    height,
-                    fontName: item.fontName || 'default',
-                    fontSize,
-                    transform,
-                    isEdited: false,
-                    backgroundColor: { r: 1, g: 1, b: 1 },
-                    textColor: { r: 0, g: 0, b: 0 },
-                  };
+                  const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
+
+                  const words = item.str.split(/( +)/);
+                  let currentX = baseX;
+
+                  words.forEach((word: string) => {
+                    if (!word) return;
+                    const wordWidth = word.length * avgCharWidth;
+
+                    if (word.trim()) {
+                      newTextItems.push({
+                        id: `text-item-${i}-${itemCounter++}`,
+                        str: word,
+                        originalStr: word,
+                        x: currentX,
+                        y,
+                        width: wordWidth,
+                        height,
+                        fontName: item.fontName || 'default',
+                        fontSize,
+                        transform: [...transform.slice(0, 4), currentX, transform[5]],
+                        isEdited: false,
+                        backgroundColor: { r: 1, g: 1, b: 1 },
+                        textColor: { r: 0, g: 0, b: 0 },
+                      });
+                    }
+
+                    currentX += wordWidth;
+                  });
                 });
               
               return {
@@ -553,30 +590,47 @@ export function usePDFDocument() {
               const textContent = await pdfPage.getTextContent();
 
               // Re-extract text items from the saved PDF
-              const newTextItems = textContent.items
+              // Split into words for finer-grained control
+              let itemCounter = 0;
+              const newTextItems: any[] = [];
+
+              textContent.items
                 .filter((item: any) => item.str && item.str.trim())
-                .map((item: any, idx: number) => {
+                .forEach((item: any) => {
                   const transform = item.transform;
-                  const x = transform[4];
+                  const baseX = transform[4];
                   const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
                   const height = item.height || fontSize * 1.2;
                   const y = viewport.height - transform[5] - height;
+                  const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
 
-                  return {
-                    id: `text-item-${i}-${idx}`,
-                    str: item.str,
-                    originalStr: item.str,
-                    x,
-                    y,
-                    width: item.width || (item.str.length * fontSize * 0.5),
-                    height,
-                    fontName: item.fontName || 'default',
-                    fontSize,
-                    transform,
-                    isEdited: false,
-                    backgroundColor: { r: 1, g: 1, b: 1 },
-                    textColor: { r: 0, g: 0, b: 0 },
-                  };
+                  const words = item.str.split(/( +)/);
+                  let currentX = baseX;
+
+                  words.forEach((word: string) => {
+                    if (!word) return;
+                    const wordWidth = word.length * avgCharWidth;
+
+                    if (word.trim()) {
+                      newTextItems.push({
+                        id: `text-item-${i}-${itemCounter++}`,
+                        str: word,
+                        originalStr: word,
+                        x: currentX,
+                        y,
+                        width: wordWidth,
+                        height,
+                        fontName: item.fontName || 'default',
+                        fontSize,
+                        transform: [...transform.slice(0, 4), currentX, transform[5]],
+                        isEdited: false,
+                        backgroundColor: { r: 1, g: 1, b: 1 },
+                        textColor: { r: 0, g: 0, b: 0 },
+                      });
+                    }
+
+                    currentX += wordWidth;
+                  });
                 });
 
               return {

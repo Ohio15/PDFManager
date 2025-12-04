@@ -118,9 +118,15 @@ const Toolbar: React.FC<ToolbarProps> = ({
             key={tool.id}
             className={`toolbar-btn ${currentTool === tool.id ? 'active' : ''}`}
             onClick={() => {
-              onToolChange(tool.id);
-              if (tool.id === 'text') onAddText();
-              if (tool.id === 'image') onAddImage();
+              if (tool.id === 'text') {
+                onAddText();
+                onToolChange('select'); // Auto-switch to select after adding text
+              } else if (tool.id === 'image') {
+                onAddImage();
+                onToolChange('select'); // Auto-switch to select after adding image
+              } else {
+                onToolChange(tool.id);
+              }
             }}
             disabled={disabled}
             title={tool.title}

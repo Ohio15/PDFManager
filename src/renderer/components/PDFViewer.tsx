@@ -94,6 +94,9 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   });
   const [highlightStart, setHighlightStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
   const [highlightPreview, setHighlightPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [eraserStart, setEraserStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
+  const [eraserPreview, setEraserPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [erasedItems, setErasedItems] = useState<Set<string>>(new Set());
 
   const scale = zoom / 100;
 
@@ -208,48 +211,104 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     e: React.MouseEvent,
     pageNum: number
   ) => {
-    if (currentTool !== 'highlight') return;
-
     const rect = e.currentTarget.getBoundingClientRect();
     const x = (e.clientX - rect.left) / scale;
     const y = (e.clientY - rect.top) / scale;
 
-    setHighlightStart({ pageNum, x, y });
-    setHighlightPreview(null);
+    if (currentTool === 'highlight') {
+      setHighlightStart({ pageNum, x, y });
+      setHighlightPreview(null);
+    } else if (currentTool === 'erase') {
+      setEraserStart({ pageNum, x, y });
+      setEraserPreview(null);
+    }
   };
 
   const handlePageMouseMove = (
     e: React.MouseEvent,
     pageNum: number
   ) => {
-    if (!highlightStart || highlightStart.pageNum !== pageNum) return;
-
     const rect = e.currentTarget.getBoundingClientRect();
     const currentX = (e.clientX - rect.left) / scale;
     const currentY = (e.clientY - rect.top) / scale;
 
-    const x = Math.min(highlightStart.x, currentX);
-    const y = Math.min(highlightStart.y, currentY);
-    const width = Math.abs(currentX - highlightStart.x);
-    const height = Math.abs(currentY - highlightStart.y);
+    if (highlightStart && highlightStart.pageNum === pageNum) {
+      const x = Math.min(highlightStart.x, currentX);
+      const y = Math.min(highlightStart.y, currentY);
+      const width = Math.abs(currentX - highlightStart.x);
+      const height = Math.abs(currentY - highlightStart.y);
+      setHighlightPreview({ x, y, width, height });
+    }
 
-    setHighlightPreview({ x, y, width, height });
+    if (eraserStart && eraserStart.pageNum === pageNum) {
+      const x = Math.min(eraserStart.x, currentX);
+      const y = Math.min(eraserStart.y, currentY);
+      const width = Math.abs(currentX - eraserStart.x);
+      const height = Math.abs(currentY - eraserStart.y);
+      setEraserPreview({ x, y, width, height });
+    }
   };
 
   const handlePageMouseUp = (pageNum: number) => {
-    if (!highlightStart || highlightStart.pageNum !== pageNum || !highlightPreview) {
+    // Handle highlight tool
+    if (highlightStart && highlightStart.pageNum === pageNum && highlightPreview) {
+      if (highlightPreview.width > 5 && highlightPreview.height > 5) {
+        onAddHighlight?.(pageNum, [highlightPreview]);
+      }
       setHighlightStart(null);
       setHighlightPreview(null);
-      return;
     }
 
-    // Only create highlight if it's big enough
-    if (highlightPreview.width > 5 && highlightPreview.height > 5) {
-      onAddHighlight?.(pageNum, [highlightPreview]);
+    // Handle eraser region selection
+    if (eraserStart && eraserStart.pageNum === pageNum && eraserPreview) {
+      if (eraserPreview.width > 5 && eraserPreview.height > 5) {
+        // Find all text items that intersect with the eraser region
+        const page = document.pages[pageNum - 1];
+        if (page?.textItems) {
+          const itemsToErase: string[] = [];
+          page.textItems.forEach((textItem) => {
+            // Check if text item intersects with eraser region
+            const itemRight = textItem.x + textItem.width;
+            const itemBottom = textItem.y + textItem.height;
+            const eraserRight = eraserPreview.x + eraserPreview.width;
+            const eraserBottom = eraserPreview.y + eraserPreview.height;
+
+            const intersects = !(
+              textItem.x > eraserRight ||
+              itemRight < eraserPreview.x ||
+              textItem.y > eraserBottom ||
+              itemBottom < eraserPreview.y
+            );
+
+            if (intersects && textItem.str && textItem.str.trim()) {
+              itemsToErase.push(textItem.id);
+            }
+          });
+
+          // Erase all intersecting items
+          itemsToErase.forEach((itemId) => {
+            onUpdateTextItem(pageNum, itemId, '');
+          });
+
+          // Add to visual erased set for immediate feedback
+          setErasedItems((prev) => {
+            const newSet = new Set(prev);
+            itemsToErase.forEach((id) => newSet.add(id));
+            return newSet;
+          });
+        }
+      }
+      setEraserStart(null);
+      setEraserPreview(null);
+    } else if (eraserStart) {
+      setEraserStart(null);
+      setEraserPreview(null);
     }
 
-    setHighlightStart(null);
-    setHighlightPreview(null);
+    if (highlightStart) {
+      setHighlightStart(null);
+      setHighlightPreview(null);
+    }
   };
 
   const handleAnnotationMouseDown = (
@@ -592,14 +651,16 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       e.preventDefault();
       // "Delete" the text by setting it to empty string
       onUpdateTextItem(pageNum, textItem.id, '');
+      // Immediately add to erased set for instant visual feedback
+      setErasedItems((prev) => new Set(prev).add(textItem.id));
       return;
     }
   };
 
   const renderTextItem = (pageNum: number, textItem: PDFTextItem) => {
     const isEditable = true;
-    // Don't render if text is empty (was "deleted")
-    if (!textItem.str || textItem.str.trim() === '') return null;
+    // Don't render if text is empty (was "deleted") or in erased set
+    if (!textItem.str || textItem.str.trim() === '' || erasedItems.has(textItem.id)) return null;
 
     return (
       <div
@@ -764,7 +825,10 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
             onMouseDown={(e) => handlePageMouseDown(e, pageNum)}
             onMouseMove={(e) => handlePageMouseMove(e, pageNum)}
             onMouseUp={() => handlePageMouseUp(pageNum)}
-            onMouseLeave={() => { if (highlightStart) { setHighlightStart(null); setHighlightPreview(null); } }}
+            onMouseLeave={() => {
+              if (highlightStart) { setHighlightStart(null); setHighlightPreview(null); }
+              if (eraserStart) { setEraserStart(null); setEraserPreview(null); }
+            }}
           >
             <canvas
               className="pdf-page-canvas"
@@ -796,6 +860,18 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
                   top: highlightPreview.y * scale,
                   width: highlightPreview.width * scale,
                   height: highlightPreview.height * scale,
+                }}
+              />
+            )}
+            {/* Eraser region preview while dragging */}
+            {eraserStart && eraserStart.pageNum === pageNum && eraserPreview && (
+              <div
+                className="eraser-preview"
+                style={{
+                  left: eraserPreview.x * scale,
+                  top: eraserPreview.y * scale,
+                  width: eraserPreview.width * scale,
+                  height: eraserPreview.height * scale,
                 }}
               />
             )}

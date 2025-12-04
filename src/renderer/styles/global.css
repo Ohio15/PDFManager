@@ -1362,3 +1362,14 @@ input:focus:not(:focus-visible) {
   outline: 2px dashed #e53935;
   outline-offset: 1px;
 }
+
+
+/* Eraser region selection preview */
+.eraser-preview {
+  position: absolute;
+  background-color: rgba(229, 57, 53, 0.15);
+  border: 2px dashed #e53935;
+  pointer-events: none;
+  z-index: 1000;
+  box-sizing: border-box;
+}

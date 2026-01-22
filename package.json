@@ -1,7 +1,7 @@
 {
-  "name": "pdf-editor",
-  "version": "1.5.2",
-  "description": "A desktop PDF editor with full editing capabilities",
+  "name": "pdf-manager",
+  "version": "2.0.0",
+  "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
@@ -39,8 +39,8 @@
     "wait-on": "^9.0.3"
   },
   "build": {
-    "appId": "com.pdfeditor.app",
-    "productName": "PDF Editor",
+    "appId": "com.pdfmanager.app",
+    "productName": "PDF Manager",
     "directories": {
       "output": "release"
     },
@@ -66,14 +66,14 @@
     "publish": {
       "provider": "github",
       "owner": "Ohio15",
-      "repo": "PDFEditor"
+      "repo": "PDFManager"
     },
     "nsis": {
-      "artifactName": "PDF-Editor-Setup-${version}.${ext}"
+      "artifactName": "PDF-Manager-Setup-${version}.${ext}"
     }
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Ohio15/PDFEditor.git"
+    "url": "https://github.com/Ohio15/PDFManager.git"
   }
 }

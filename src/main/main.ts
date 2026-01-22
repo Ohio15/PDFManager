@@ -1,10 +1,41 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execFile, spawn } from 'child_process';
 import Store from 'electron-store';
 
-const store = new Store();
+// Define config schema for type safety
+interface StoreSchema {
+  windowBounds: { width: number; height: number; x?: number; y?: number };
+  sidebarVisible: boolean;
+  toolsPanelVisible: boolean;
+  lastOpenDirectory: string;
+  lastSaveDirectory: string;
+  recentFiles: string[];
+  autoConvertOnDrop: boolean;
+  openFolderAfterConversion: boolean;
+  libreOfficePath: string;
+  theme: 'light' | 'dark' | 'system';
+  defaultZoom: number;
+}
+
+const store = new Store<StoreSchema>({
+  defaults: {
+    windowBounds: { width: 1400, height: 900 },
+    sidebarVisible: true,
+    toolsPanelVisible: true,
+    lastOpenDirectory: '',
+    lastSaveDirectory: '',
+    recentFiles: [],
+    autoConvertOnDrop: true,
+    openFolderAfterConversion: true,
+    libreOfficePath: '',
+    theme: 'system',
+    defaultZoom: 100,
+  },
+});
+
 let mainWindow: BrowserWindow | null = null;
 
 // Auto-updater configuration
@@ -108,9 +139,13 @@ function setupAutoUpdater(): void {
 }
 
 function createWindow(): void {
+  const bounds = store.get('windowBounds');
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
     minWidth: 800,
     minHeight: 600,
     webPreferences: {
@@ -119,7 +154,7 @@ function createWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
     },
     icon: path.join(__dirname, '../../assets/icon.png'),
-    title: 'PDF Editor',
+    title: 'PDF Manager',
   });
 
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -129,6 +164,21 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
+
+  // Save window bounds on resize/move
+  mainWindow.on('resize', () => {
+    if (mainWindow && !mainWindow.isMaximized()) {
+      const bounds = mainWindow.getBounds();
+      store.set('windowBounds', bounds);
+    }
+  });
+
+  mainWindow.on('move', () => {
+    if (mainWindow && !mainWindow.isMaximized()) {
+      const bounds = mainWindow.getBounds();
+      store.set('windowBounds', bounds);
+    }
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -162,8 +212,31 @@ function createMenu(): void {
         },
         { type: 'separator' },
         {
+          label: 'Merge PDFs...',
+          accelerator: 'CmdOrCtrl+M',
+          click: () => mainWindow?.webContents.send('menu-merge-pdfs'),
+        },
+        {
+          label: 'Split PDF...',
+          click: () => mainWindow?.webContents.send('menu-split-pdf'),
+        },
+        {
+          label: 'Extract Pages...',
+          click: () => mainWindow?.webContents.send('menu-extract-pages'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Convert Documents to PDF...',
+          click: () => mainWindow?.webContents.send('menu-convert-to-pdf'),
+        },
+        { type: 'separator' },
+        {
           label: 'Export as Image',
           click: () => mainWindow?.webContents.send('menu-export-image'),
+        },
+        {
+          label: 'Extract Images...',
+          click: () => mainWindow?.webContents.send('menu-extract-images'),
         },
         { type: 'separator' },
         {
@@ -247,6 +320,10 @@ function createMenu(): void {
           accelerator: 'CmdOrCtrl+Shift+R',
           click: () => mainWindow?.webContents.send('menu-rotate-ccw'),
         },
+        {
+          label: 'Rotate All Pages',
+          click: () => mainWindow?.webContents.send('menu-rotate-all'),
+        },
         { type: 'separator' },
         {
           label: 'Delete Page',
@@ -259,6 +336,34 @@ function createMenu(): void {
         {
           label: 'Extract Pages',
           click: () => mainWindow?.webContents.send('menu-extract-pages'),
+        },
+      ],
+    },
+    {
+      label: 'Tools',
+      submenu: [
+        {
+          label: 'Toggle Tools Panel',
+          accelerator: 'CmdOrCtrl+T',
+          click: () => mainWindow?.webContents.send('menu-toggle-tools-panel'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Merge PDFs...',
+          click: () => mainWindow?.webContents.send('menu-merge-pdfs'),
+        },
+        {
+          label: 'Split PDF...',
+          click: () => mainWindow?.webContents.send('menu-split-pdf'),
+        },
+        {
+          label: 'Extract Images...',
+          click: () => mainWindow?.webContents.send('menu-extract-images'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Convert Documents to PDF...',
+          click: () => mainWindow?.webContents.send('menu-convert-to-pdf'),
         },
       ],
     },
@@ -287,9 +392,9 @@ function createMenu(): void {
           click: () => {
             dialog.showMessageBox(mainWindow!, {
               type: 'info',
-              title: 'About PDF Editor',
-              message: 'PDF Editor v' + app.getVersion(),
-              detail: 'A powerful desktop PDF editor built with Electron.',
+              title: 'About PDF Manager',
+              message: 'PDF Manager v' + app.getVersion(),
+              detail: 'A powerful desktop PDF manager built with Electron.',
             });
           },
         },
@@ -430,6 +535,268 @@ ipcMain.handle('install-update', () => {
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion();
+});
+
+// Multi-file operations
+ipcMain.handle('open-multiple-files-dialog', async () => {
+  const lastDir = store.get('lastOpenDirectory') || undefined;
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openFile', 'multiSelections'],
+    defaultPath: lastDir,
+    filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    store.set('lastOpenDirectory', path.dirname(result.filePaths[0]));
+    const files = await Promise.all(
+      result.filePaths.map(async (filePath) => {
+        const fileData = fs.readFileSync(filePath);
+        return {
+          path: filePath,
+          data: fileData.toString('base64'),
+        };
+      })
+    );
+    return files;
+  }
+  return null;
+});
+
+ipcMain.handle('select-output-directory', async () => {
+  const lastDir = store.get('lastSaveDirectory') || undefined;
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: lastDir,
+    title: 'Select Output Folder',
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    store.set('lastSaveDirectory', result.filePaths[0]);
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
+  try {
+    const buffer = Buffer.from(data, 'base64');
+    // Ensure directory exists
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, path: filePath };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
+  try {
+    const buffer = Buffer.from(data, 'base64');
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, path: filePath };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+ipcMain.handle('open-folder', async (_event, folderPath: string) => {
+  try {
+    await shell.openPath(folderPath);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+// Recent files management
+ipcMain.handle('get-recent-files', () => {
+  return store.get('recentFiles');
+});
+
+ipcMain.handle('add-recent-file', (_event, filePath: string) => {
+  const recentFiles = store.get('recentFiles');
+  // Remove if already exists
+  const filtered = recentFiles.filter((f) => f !== filePath);
+  // Add to front and limit to 10
+  const updated = [filePath, ...filtered].slice(0, 10);
+  store.set('recentFiles', updated);
+  return updated;
+});
+
+ipcMain.handle('clear-recent-files', () => {
+  store.set('recentFiles', []);
+  return [];
+});
+
+// LibreOffice detection and conversion
+function detectLibreOffice(): string | null {
+  const possiblePaths: string[] = [];
+
+  if (process.platform === 'win32') {
+    // Check common installation paths
+    const programDirs = [
+      process.env['ProgramFiles'] || 'C:\\Program Files',
+      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+      process.env['LOCALAPPDATA'],
+      process.env['APPDATA'],
+    ].filter(Boolean) as string[];
+
+    // LibreOffice folder names to check
+    const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24'];
+
+    for (const base of programDirs) {
+      for (const folder of libreOfficeFolders) {
+        // Direct program path: LibreOffice/program/soffice.exe
+        const directPath = path.join(base, folder, 'program', 'soffice.exe');
+        if (fs.existsSync(directPath)) {
+          console.log('Found LibreOffice at:', directPath);
+          possiblePaths.push(directPath);
+        }
+
+        // Also check for version subfolders: LibreOffice/<version>/program/soffice.exe
+        const libreOfficePath = path.join(base, folder);
+        if (fs.existsSync(libreOfficePath)) {
+          try {
+            const items = fs.readdirSync(libreOfficePath);
+            for (const item of items) {
+              if (item !== 'program') {
+                const versionPath = path.join(libreOfficePath, item, 'program', 'soffice.exe');
+                if (fs.existsSync(versionPath)) {
+                  console.log('Found LibreOffice at:', versionPath);
+                  possiblePaths.push(versionPath);
+                }
+              }
+            }
+          } catch (e) {
+            // Ignore errors reading directory
+          }
+        }
+      }
+    }
+
+    // Also try to find via registry (using PowerShell)
+    if (possiblePaths.length === 0) {
+      try {
+        const { execSync } = require('child_process');
+        const result = execSync(
+          'powershell -Command "Get-ItemProperty HKLM:\\\\SOFTWARE\\\\LibreOffice\\\\* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path"',
+          { encoding: 'utf8', timeout: 5000 }
+        ).trim();
+        if (result) {
+          const regPath = path.join(result, 'program', 'soffice.exe');
+          if (fs.existsSync(regPath)) {
+            console.log('Found LibreOffice via registry at:', regPath);
+            possiblePaths.push(regPath);
+          }
+        }
+      } catch (e) {
+        // Registry lookup failed, continue with other methods
+      }
+    }
+  } else if (process.platform === 'darwin') {
+    const macPaths = [
+      '/Applications/LibreOffice.app/Contents/MacOS/soffice',
+      path.join(process.env['HOME'] || '', 'Applications/LibreOffice.app/Contents/MacOS/soffice'),
+    ];
+    for (const p of macPaths) {
+      if (fs.existsSync(p)) {
+        possiblePaths.push(p);
+      }
+    }
+  } else {
+    const linuxPaths = [
+      '/usr/bin/libreoffice',
+      '/usr/bin/soffice',
+      '/usr/local/bin/libreoffice',
+      '/usr/local/bin/soffice',
+      '/opt/libreoffice/program/soffice',
+      '/opt/libreoffice7.0/program/soffice',
+      '/snap/bin/libreoffice',
+    ];
+    for (const p of linuxPaths) {
+      if (fs.existsSync(p)) {
+        possiblePaths.push(p);
+      }
+    }
+  }
+
+  const result = possiblePaths.length > 0 ? possiblePaths[0] : null;
+  console.log('LibreOffice detection result:', result);
+  return result;
+}
+
+ipcMain.handle('detect-libreoffice', () => {
+  const storedPath = store.get('libreOfficePath');
+  if (storedPath && fs.existsSync(storedPath)) {
+    return storedPath;
+  }
+  const detected = detectLibreOffice();
+  if (detected) {
+    store.set('libreOfficePath', detected);
+  }
+  return detected;
+});
+
+ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
+  const loPath = store.get('libreOfficePath') || detectLibreOffice();
+  if (!loPath) {
+    return { success: false, error: 'LibreOffice not found' };
+  }
+
+  return new Promise((resolve) => {
+    const args = [
+      '--headless',
+      '--invisible',
+      '--nodefault',
+      '--nolockcheck',
+      '--nologo',
+      '--norestore',
+      '--convert-to', 'pdf',
+      '--outdir', outputDir,
+      inputPath,
+    ];
+
+    execFile(loPath, args, { timeout: 120000 }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ success: false, error: error.message });
+      } else {
+        const baseName = path.basename(inputPath, path.extname(inputPath));
+        const outputPath = path.join(outputDir, `${baseName}.pdf`);
+        if (fs.existsSync(outputPath)) {
+          const fileData = fs.readFileSync(outputPath);
+          resolve({ success: true, path: outputPath, data: fileData.toString('base64') });
+        } else {
+          resolve({ success: false, error: 'Output file not created' });
+        }
+      }
+    });
+  });
+});
+
+// Document conversion file dialog
+ipcMain.handle('open-documents-dialog', async () => {
+  const lastDir = store.get('lastOpenDirectory') || undefined;
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    properties: ['openFile', 'multiSelections'],
+    defaultPath: lastDir,
+    filters: [
+      { name: 'Documents', extensions: ['doc', 'docx', 'odt', 'rtf', 'txt', 'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods', 'html', 'htm'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    store.set('lastOpenDirectory', path.dirname(result.filePaths[0]));
+    return result.filePaths;
+  }
+  return null;
 });
 
 app.whenReady().then(createWindow);

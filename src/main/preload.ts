@@ -52,6 +52,20 @@ export interface ElectronAPI {
   onUpdateDownloaded: (callback: (info: UpdateInfo) => void) => void;
   onUpdateError: (callback: (error: { message: string }) => void) => void;
   removeUpdateListeners: () => void;
+  // Multi-file operations
+  openMultipleFilesDialog: () => Promise<FileData[] | null>;
+  selectOutputDirectory: () => Promise<string | null>;
+  saveFileToPath: (data: string, filePath: string) => Promise<SaveResult>;
+  saveImageToPath: (data: string, filePath: string) => Promise<SaveResult>;
+  openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
+  // Recent files
+  getRecentFiles: () => Promise<string[]>;
+  addRecentFile: (filePath: string) => Promise<string[]>;
+  clearRecentFiles: () => Promise<string[]>;
+  // Document conversion
+  detectLibreOffice: () => Promise<string | null>;
+  openDocumentsDialog: () => Promise<string[] | null>;
+  convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
 }
 
 const electronAPI: ElectronAPI = {
@@ -101,6 +115,23 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.removeAllListeners('update-downloaded');
     ipcRenderer.removeAllListeners('update-error');
   },
+  // Multi-file operations
+  openMultipleFilesDialog: () => ipcRenderer.invoke('open-multiple-files-dialog'),
+  selectOutputDirectory: () => ipcRenderer.invoke('select-output-directory'),
+  saveFileToPath: (data: string, filePath: string) =>
+    ipcRenderer.invoke('save-file-to-path', { data, filePath }),
+  saveImageToPath: (data: string, filePath: string) =>
+    ipcRenderer.invoke('save-image-to-path', { data, filePath }),
+  openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath),
+  // Recent files
+  getRecentFiles: () => ipcRenderer.invoke('get-recent-files'),
+  addRecentFile: (filePath: string) => ipcRenderer.invoke('add-recent-file', filePath),
+  clearRecentFiles: () => ipcRenderer.invoke('clear-recent-files'),
+  // Document conversion
+  detectLibreOffice: () => ipcRenderer.invoke('detect-libreoffice'),
+  openDocumentsDialog: () => ipcRenderer.invoke('open-documents-dialog'),
+  convertToPdf: (inputPath: string, outputDir: string) =>
+    ipcRenderer.invoke('convert-to-pdf', { inputPath, outputDir }),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

@@ -13,6 +13,9 @@ import ExtractPagesDialog from './components/ExtractPagesDialog';
 import ExtractImagesDialog from './components/ExtractImagesDialog';
 import ConvertToPdfDialog from './components/ConvertToPdfDialog';
 import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
+import DroppedFileDialog from './components/DroppedFileDialog';
+import ConversionActionBar from './components/ConversionActionBar';
+import SettingsDialog from './components/SettingsDialog';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
@@ -47,12 +50,14 @@ declare global {
       saveFileToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       saveImageToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
+      openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
       // Recent files
       getRecentFiles: () => Promise<string[]>;
       addRecentFile: (filePath: string) => Promise<string[]>;
       clearRecentFiles: () => Promise<string[]>;
       // Document conversion
       detectLibreOffice: () => Promise<string | null>;
+      onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
       openDocumentsDialog: () => Promise<string[] | null>;
       convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
     };
@@ -88,6 +93,12 @@ const App: React.FC = () => {
   const [extractImagesDialogOpen, setExtractImagesDialogOpen] = useState(false);
   const [convertDialogOpen, setConvertDialogOpen] = useState(false);
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+
+  // Dropped file conversion state
+  const [droppedFilePath, setDroppedFilePath] = useState<string>('');
+  const [droppedFileDialogOpen, setDroppedFileDialogOpen] = useState(false);
+  const [showConversionBar, setShowConversionBar] = useState(false);
 
   const toast = useToast();
 
@@ -126,9 +137,20 @@ const App: React.FC = () => {
         const savedZoom = await window.electronAPI.getStore('defaultZoom');
         if (typeof savedZoom === 'number') setZoom(savedZoom);
 
-        // Check LibreOffice availability
+        // Check LibreOffice availability via IPC
         const loPath = await window.electronAPI.detectLibreOffice();
         setLibreOfficeAvailable(!!loPath);
+
+        // Load and apply theme
+        const savedTheme = await window.electronAPI.getStore('theme') as 'light' | 'dark' | 'system' | null;
+        const theme = savedTheme || 'system';
+        const root = window.document.documentElement; // Use window.document to avoid shadowing
+        if (theme === 'system') {
+          const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          root.classList.toggle('dark', prefersDark);
+        } else {
+          root.classList.toggle('dark', theme === 'dark');
+        }
       } catch (e) {
         console.error('Failed to load settings:', e);
       }
@@ -153,13 +175,38 @@ const App: React.FC = () => {
     }
   }, [openFile]);
 
+  // Also listen for LibreOffice status from main process
+  useEffect(() => {
+    window.electronAPI.onLibreOfficeStatus((path) => {
+      setLibreOfficeAvailable(!!path);
+    });
+  }, []);
+
   const handleFileDrop = useCallback(async (filePath: string) => {
     const result = await window.electronAPI.readFileByPath(filePath);
     if (result) {
       await openFile(result.path, result.data);
       await window.electronAPI.addRecentFile(result.path);
+      // Show conversion action bar when PDF is loaded
+      setShowConversionBar(true);
     }
   }, [openFile]);
+
+  // Handle non-PDF file drop - open conversion dialog
+  const handleNonPdfDrop = useCallback((filePath: string) => {
+    setDroppedFilePath(filePath);
+    setDroppedFileDialogOpen(true);
+  }, []);
+
+  // Handle converted file - open the resulting PDF
+  const handleConvertedFileOpen = useCallback(async (pdfPath: string, pdfData: string) => {
+    setDroppedFileDialogOpen(false);
+    setDroppedFilePath('');
+    await openFile(pdfPath, pdfData);
+    await window.electronAPI.addRecentFile(pdfPath);
+    setShowConversionBar(true);
+    toast.success('Document converted and opened');
+  }, [openFile, toast]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -432,6 +479,7 @@ const App: React.FC = () => {
       'extract-pages': () => document && setExtractPagesDialogOpen(true),
       'extract-images': () => document && setExtractImagesDialogOpen(true),
       'convert-to-pdf': () => setConvertDialogOpen(true),
+      'settings': () => setSettingsDialogOpen(true),
     };
 
     Object.entries(menuActions).forEach(([action, handler]) => {
@@ -639,26 +687,35 @@ const App: React.FC = () => {
         />
 
         {document ? (
-          <PDFViewer
-            document={document}
-            zoom={zoom}
-            currentPage={currentPage}
-            onPageChange={setCurrentPage}
-            currentTool={currentTool}
-            onToolChange={setCurrentTool}
-            onUpdateAnnotation={updateAnnotation}
-            onDeleteAnnotation={deleteAnnotation}
-            onUpdateTextItem={updateTextItem}
-            onMarkTextDeleted={markTextDeleted}
-            onSelectionChange={handleSelectionChange}
-            onAddHighlight={addHighlight}
-            onAddText={(pageIndex, position) => addText(pageIndex, position, 'New Text')}
-            loading={loading}
-          />
+          <>
+            <PDFViewer
+              document={document}
+              zoom={zoom}
+              currentPage={currentPage}
+              onPageChange={setCurrentPage}
+              currentTool={currentTool}
+              onToolChange={setCurrentTool}
+              onUpdateAnnotation={updateAnnotation}
+              onDeleteAnnotation={deleteAnnotation}
+              onUpdateTextItem={updateTextItem}
+              onMarkTextDeleted={markTextDeleted}
+              onSelectionChange={handleSelectionChange}
+              onAddHighlight={addHighlight}
+              onAddText={(pageIndex, position) => addText(pageIndex, position, 'New Text')}
+              loading={loading}
+            />
+            <ConversionActionBar
+              visible={showConversionBar}
+              onClose={() => setShowConversionBar(false)}
+              onConvertToImages={() => setConvertFromDialogOpen(true)}
+              libreOfficeAvailable={libreOfficeAvailable}
+            />
+          </>
         ) : (
           <WelcomeScreen
             onOpenFile={handleOpenFile}
             onFileDropped={handleFileDrop}
+            onNonPdfDropped={handleNonPdfDrop}
             onConvertToPdf={() => setConvertDialogOpen(true)}
             libreOfficeAvailable={libreOfficeAvailable}
           />
@@ -739,6 +796,22 @@ const App: React.FC = () => {
           filePath={document.filePath || ''}
         />
       )}
+
+      <SettingsDialog
+        isOpen={settingsDialogOpen}
+        onClose={() => setSettingsDialogOpen(false)}
+      />
+
+      <DroppedFileDialog
+        isOpen={droppedFileDialogOpen}
+        onClose={() => {
+          setDroppedFileDialogOpen(false);
+          setDroppedFilePath('');
+        }}
+        filePath={droppedFilePath}
+        libreOfficeAvailable={libreOfficeAvailable}
+        onConvertAndOpen={handleConvertedFileOpen}
+      />
     </div>
   );
 };

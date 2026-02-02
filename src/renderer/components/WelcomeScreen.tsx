@@ -4,6 +4,7 @@ import { FileText, Upload, FileUp } from 'lucide-react';
 interface WelcomeScreenProps {
   onOpenFile: () => void;
   onFileDropped?: (filePath: string) => void;
+  onNonPdfDropped?: (filePath: string) => void;
   onConvertToPdf?: () => void;
   libreOfficeAvailable?: boolean;
 }
@@ -11,6 +12,7 @@ interface WelcomeScreenProps {
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onOpenFile,
   onFileDropped,
+  onNonPdfDropped,
   onConvertToPdf,
   libreOfficeAvailable = false,
 }) => {
@@ -28,6 +30,15 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     setIsDragging(false);
   }, []);
 
+  // Supported document formats for conversion
+  const convertibleExtensions = [
+    'doc', 'docx', 'odt', 'rtf', 'txt',
+    'xls', 'xlsx', 'ods', 'csv',
+    'ppt', 'pptx', 'odp',
+    'html', 'htm', 'xml', 'md',
+    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'tiff'
+  ];
+
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -37,21 +48,33 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       const files = e.dataTransfer.files;
       if (files.length > 0) {
         const file = files[0];
+        const filePath = (file as any).path;
+        const fileName = file.name.toLowerCase();
+        const extension = fileName.includes('.') ? fileName.split('.').pop() || '' : '';
+
+        if (!filePath) {
+          // Fallback to dialog if path not available
+          onOpenFile();
+          return;
+        }
+
         // Check for PDF by extension or type
-        if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-          // In Electron, files have a path property
-          const filePath = (file as any).path;
-          console.log('Dropped file path:', filePath);
-          if (filePath && onFileDropped) {
+        if (file.type === 'application/pdf' || fileName.endsWith('.pdf')) {
+          console.log('Dropped PDF file:', filePath);
+          if (onFileDropped) {
             onFileDropped(filePath);
-          } else {
-            // Fallback to dialog if path not available
-            onOpenFile();
           }
+        } else if (convertibleExtensions.includes(extension) && onNonPdfDropped) {
+          // Non-PDF file that can be converted
+          console.log('Dropped convertible file:', filePath);
+          onNonPdfDropped(filePath);
+        } else {
+          // Unsupported file type - could show a toast/message
+          console.log('Unsupported file type:', extension);
         }
       }
     },
-    [onOpenFile, onFileDropped]
+    [onOpenFile, onFileDropped, onNonPdfDropped, convertibleExtensions]
   );
 
   return (
@@ -86,7 +109,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           )}
         </div>
         <p className="welcome-text" style={{ fontSize: '14px', marginTop: '16px' }}>
-          Drag and drop a PDF file here to open
+          Drag and drop files here to open or convert
+        </p>
+        <p className="welcome-text welcome-formats" style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
+          Supports: PDF, Word, Excel, PowerPoint, images, and more
         </p>
         {onConvertToPdf && !libreOfficeAvailable && (
           <p className="welcome-text welcome-hint" style={{ fontSize: '12px', marginTop: '8px', opacity: 0.7 }}>

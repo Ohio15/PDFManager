@@ -13,6 +13,7 @@ import ExtractPagesDialog from './components/ExtractPagesDialog';
 import ExtractImagesDialog from './components/ExtractImagesDialog';
 import ConvertToPdfDialog from './components/ConvertToPdfDialog';
 import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
+import PrintDialog from './components/PrintDialog';
 import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
@@ -60,6 +61,9 @@ declare global {
       onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
       openDocumentsDialog: () => Promise<string[] | null>;
       convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
+      getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
+      printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
+      getLaunchFile: () => Promise<{ path: string; data: string } | null>;
     };
   }
 }
@@ -94,6 +98,7 @@ const App: React.FC = () => {
   const [convertDialogOpen, setConvertDialogOpen] = useState(false);
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [printDialogOpen, setPrintDialogOpen] = useState(false);
 
   // Dropped file conversion state
   const [droppedFilePath, setDroppedFilePath] = useState<string>('');
@@ -153,6 +158,17 @@ const App: React.FC = () => {
         }
       } catch (e) {
         console.error('Failed to load settings:', e);
+      }
+
+      // Check if app was launched with a file (double-click / file association)
+      try {
+        const launchFile = await window.electronAPI.getLaunchFile();
+        if (launchFile) {
+          await openFile(launchFile.path, launchFile.data);
+          await window.electronAPI.addRecentFile(launchFile.path);
+        }
+      } catch (e) {
+        console.error('Failed to open launch file:', e);
       }
     };
     loadSettings();
@@ -224,6 +240,12 @@ const App: React.FC = () => {
       console.error('Save error:', error);
     }
   }, [document, saveFile, saveFileAs, toast]);
+
+  const handlePrint = useCallback(() => {
+    if (document) {
+      setPrintDialogOpen(true);
+    }
+  }, [document]);
 
   const handleZoomIn = useCallback(() => {
     setZoom((prev) => Math.min(prev + 25, 400));
@@ -460,6 +482,7 @@ const App: React.FC = () => {
     const menuActions: Record<string, () => void> = {
       save: handleSave,
       'save-as': saveFileAs,
+      print: handlePrint,
       undo: undo,
       redo: redo,
       'add-text': handleAddText,
@@ -497,6 +520,7 @@ const App: React.FC = () => {
     };
   }, [
     handleSave,
+    handlePrint,
     saveFileAs,
     undo,
     redo,
@@ -565,6 +589,10 @@ const App: React.FC = () => {
             e.preventDefault();
             handleSave();
             break;
+          case 'p':
+            e.preventDefault();
+            handlePrint();
+            break;
           case 'z':
             e.preventDefault();
             if (canUndo) undo();
@@ -625,6 +653,7 @@ const App: React.FC = () => {
     selectedAnnotationId,
     handleOpenFile,
     handleSave,
+    handlePrint,
     canUndo,
     canRedo,
     undo,
@@ -662,6 +691,7 @@ const App: React.FC = () => {
         onZoomChange={setZoom}
         onOpenFile={handleOpenFile}
         onSave={handleSave}
+        onPrint={handlePrint}
         onUndo={undo}
         onRedo={redo}
         canUndo={canUndo}
@@ -794,6 +824,17 @@ const App: React.FC = () => {
           fileName={document.fileName}
           pageCount={document.pageCount}
           filePath={document.filePath || ''}
+        />
+      )}
+
+      {document && (
+        <PrintDialog
+          isOpen={printDialogOpen}
+          onClose={() => setPrintDialogOpen(false)}
+          pdfData={document.pdfData}
+          pageCount={document.pageCount}
+          currentPage={currentPage}
+          fileName={document.fileName}
         />
       )}
 

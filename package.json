@@ -56,6 +56,15 @@
         "filter": ["**/*"]
       }
     ],
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "description": "PDF Document",
+        "mimeType": "application/pdf",
+        "role": "Viewer"
+      }
+    ],
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico"
@@ -66,7 +75,8 @@
     },
     "linux": {
       "target": "AppImage",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "mimeTypes": ["application/pdf"]
     },
     "publish": {
       "provider": "github",
@@ -74,7 +84,10 @@
       "repo": "PDFManager"
     },
     "nsis": {
-      "artifactName": "PDF-Manager-Setup-${version}.${ext}"
+      "artifactName": "PDF-Manager-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   },
   "repository": {

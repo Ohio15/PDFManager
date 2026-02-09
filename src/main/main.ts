@@ -15,7 +15,7 @@ interface StoreSchema {
   recentFiles: string[];
   autoConvertOnDrop: boolean;
   openFolderAfterConversion: boolean;
-  libreOfficePath: string;
+  libreOfficePath: string | null;
   theme: 'light' | 'dark' | 'system';
   defaultZoom: number;
 }
@@ -30,13 +30,30 @@ const store = new Store<StoreSchema>({
     recentFiles: [],
     autoConvertOnDrop: true,
     openFolderAfterConversion: true,
-    libreOfficePath: '',
+    libreOfficePath: null,
     theme: 'system',
     defaultZoom: 100,
   },
 });
 
 let mainWindow: BrowserWindow | null = null;
+let fileToOpenOnReady: string | null = null;
+
+// Extract PDF file path from command-line arguments
+function getFileFromArgs(args: string[]): string | null {
+  for (const arg of args) {
+    if (arg.toLowerCase().endsWith('.pdf') && fs.existsSync(arg)) {
+      return arg;
+    }
+  }
+  return null;
+}
+
+// Single instance lock - ensure only one instance runs
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+}
 
 // Auto-updater configuration
 autoUpdater.autoDownload = false; // User must confirm download
@@ -184,6 +201,12 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  // Send LibreOffice status when DOM is ready
+  mainWindow.webContents.on('dom-ready', () => {
+    const loPath = store.get('libreOfficePath');
+    mainWindow?.webContents.send('libreoffice-status', loPath);
+  });
+
   createMenu();
 
   // Setup auto-updater after window is created
@@ -212,6 +235,12 @@ function createMenu(): void {
         },
         { type: 'separator' },
         {
+          label: 'Print',
+          accelerator: 'CmdOrCtrl+P',
+          click: () => mainWindow?.webContents.send('menu-print'),
+        },
+        { type: 'separator' },
+        {
           label: 'Merge PDFs...',
           accelerator: 'CmdOrCtrl+M',
           click: () => mainWindow?.webContents.send('menu-merge-pdfs'),
@@ -237,6 +266,12 @@ function createMenu(): void {
         {
           label: 'Extract Images...',
           click: () => mainWindow?.webContents.send('menu-extract-images'),
+        },
+        { type: 'separator' },
+        {
+          label: 'Settings',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => mainWindow?.webContents.send('menu-settings'),
         },
         { type: 'separator' },
         {
@@ -537,6 +572,85 @@ ipcMain.handle('get-app-version', () => {
   return app.getVersion();
 });
 
+ipcMain.handle('get-launch-file', () => {
+  if (fileToOpenOnReady) {
+    try {
+      const filePath = fileToOpenOnReady;
+      fileToOpenOnReady = null;
+      const fileData = fs.readFileSync(filePath);
+      return {
+        path: filePath,
+        data: fileData.toString('base64'),
+      };
+    } catch (e) {
+      console.error('Failed to read launch file:', e);
+      fileToOpenOnReady = null;
+      return null;
+    }
+  }
+  return null;
+});
+
+ipcMain.handle('get-printers', async () => {
+  if (!mainWindow) return [];
+  const printers = await mainWindow.webContents.getPrintersAsync();
+  return printers.map(p => ({
+    name: p.name,
+    displayName: p.displayName,
+    description: p.description,
+    isDefault: p.isDefault,
+    status: p.status,
+  }));
+});
+
+ipcMain.handle('print-pdf', async (_event, { html, printerName, copies, landscape, color, scaleFactor }) => {
+  const tempFile = path.join(app.getPath('temp'), `pdf-manager-print-${Date.now()}.html`);
+  fs.writeFileSync(tempFile, html, 'utf-8');
+
+  const printWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  await printWindow.loadFile(tempFile);
+
+  // Wait for all images to finish loading
+  await printWindow.webContents.executeJavaScript(`
+    new Promise(resolve => {
+      const imgs = Array.from(document.images);
+      if (imgs.length === 0 || imgs.every(i => i.complete)) return resolve();
+      let loaded = 0;
+      imgs.forEach(img => {
+        if (img.complete) { loaded++; return; }
+        img.onload = img.onerror = () => { if (++loaded >= imgs.length) resolve(); };
+      });
+    })
+  `);
+
+  return new Promise<{ success: boolean; error?: string }>((resolve) => {
+    const printOptions: Electron.WebContentsPrintOptions = {
+      silent: true,
+      printBackground: true,
+      copies: copies || 1,
+      landscape: !!landscape,
+      color: color !== false,
+    };
+
+    if (printerName) {
+      printOptions.deviceName = printerName;
+    }
+
+    printWindow.webContents.print(printOptions, (success, failureReason) => {
+      printWindow.close();
+      try { fs.unlinkSync(tempFile); } catch (_e) { /* ignore */ }
+      resolve({ success, error: failureReason || undefined });
+    });
+  });
+});
+
 // Multi-file operations
 ipcMain.handle('open-multiple-files-dialog', async () => {
   const lastDir = store.get('lastOpenDirectory') || undefined;
@@ -615,6 +729,15 @@ ipcMain.handle('open-folder', async (_event, folderPath: string) => {
   }
 });
 
+ipcMain.handle('open-external', async (_event, url: string) => {
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
 // Recent files management
 ipcMain.handle('get-recent-files', () => {
   return store.get('recentFiles');
@@ -639,6 +762,22 @@ ipcMain.handle('clear-recent-files', () => {
 function detectLibreOffice(): string | null {
   const possiblePaths: string[] = [];
 
+  // Always check hardcoded common Windows paths first (most reliable)
+  // Use forward slashes - they work on Windows in Node.js
+  const hardcodedWindowsPaths = [
+    'C:/Program Files/LibreOffice/program/soffice.exe',
+    'C:/Program Files (x86)/LibreOffice/program/soffice.exe',
+    'C:/Program Files/LibreOffice 7/program/soffice.exe',
+    'C:/Program Files/LibreOffice 24/program/soffice.exe',
+    'C:/Program Files/LibreOffice 25/program/soffice.exe',
+  ];
+
+  for (const p of hardcodedWindowsPaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+
   if (process.platform === 'win32') {
     // Check common installation paths
     const programDirs = [
@@ -649,14 +788,13 @@ function detectLibreOffice(): string | null {
     ].filter(Boolean) as string[];
 
     // LibreOffice folder names to check
-    const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24'];
+    const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24', 'LibreOffice 25'];
 
     for (const base of programDirs) {
       for (const folder of libreOfficeFolders) {
         // Direct program path: LibreOffice/program/soffice.exe
         const directPath = path.join(base, folder, 'program', 'soffice.exe');
         if (fs.existsSync(directPath)) {
-          console.log('Found LibreOffice at:', directPath);
           possiblePaths.push(directPath);
         }
 
@@ -669,7 +807,6 @@ function detectLibreOffice(): string | null {
               if (item !== 'program') {
                 const versionPath = path.join(libreOfficePath, item, 'program', 'soffice.exe');
                 if (fs.existsSync(versionPath)) {
-                  console.log('Found LibreOffice at:', versionPath);
                   possiblePaths.push(versionPath);
                 }
               }
@@ -692,7 +829,6 @@ function detectLibreOffice(): string | null {
         if (result) {
           const regPath = path.join(result, 'program', 'soffice.exe');
           if (fs.existsSync(regPath)) {
-            console.log('Found LibreOffice via registry at:', regPath);
             possiblePaths.push(regPath);
           }
         }
@@ -727,16 +863,19 @@ function detectLibreOffice(): string | null {
     }
   }
 
-  const result = possiblePaths.length > 0 ? possiblePaths[0] : null;
-  console.log('LibreOffice detection result:', result);
-  return result;
+  return possiblePaths.length > 0 ? possiblePaths[0] : null;
 }
 
 ipcMain.handle('detect-libreoffice', () => {
+  // Simply return the stored path - detection already ran at startup
   const storedPath = store.get('libreOfficePath');
-  if (storedPath && fs.existsSync(storedPath)) {
+
+  // If we have a stored path, return it
+  if (storedPath && typeof storedPath === 'string' && storedPath.length > 0) {
     return storedPath;
   }
+
+  // Otherwise run detection now
   const detected = detectLibreOffice();
   if (detected) {
     store.set('libreOfficePath', detected);
@@ -799,7 +938,52 @@ ipcMain.handle('open-documents-dialog', async () => {
   return null;
 });
 
-app.whenReady().then(createWindow);
+// Handle second instance (user double-clicks a PDF while app is already running)
+app.on('second-instance', (_event, commandLine) => {
+  const filePath = getFileFromArgs(commandLine);
+  if (filePath && mainWindow) {
+    const fileData = fs.readFileSync(filePath);
+    mainWindow.webContents.send('file-opened', {
+      path: filePath,
+      data: fileData.toString('base64'),
+    });
+  }
+  // Focus the existing window
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+// macOS: handle open-file event (file association / drag to dock)
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  if (mainWindow) {
+    const fileData = fs.readFileSync(filePath);
+    mainWindow.webContents.send('file-opened', {
+      path: filePath,
+      data: fileData.toString('base64'),
+    });
+  } else {
+    // App not ready yet, store for later
+    fileToOpenOnReady = filePath;
+  }
+});
+
+// Check for file argument passed on launch
+const launchFile = getFileFromArgs(process.argv);
+if (launchFile) {
+  fileToOpenOnReady = launchFile;
+}
+
+app.whenReady().then(() => {
+  // Run LibreOffice detection at startup
+  const detectedPath = detectLibreOffice();
+  if (detectedPath) {
+    store.set('libreOfficePath', detectedPath);
+  }
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

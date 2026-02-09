@@ -3,6 +3,7 @@ import { Tool } from '../App';
 import {
   FolderOpen,
   Save,
+  Printer,
   Undo,
   Redo,
   ZoomIn,
@@ -29,6 +30,7 @@ interface ToolbarProps {
   onZoomChange: (zoom: number) => void;
   onOpenFile: () => void;
   onSave: () => void;
+  onPrint: () => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -54,6 +56,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
   onZoomChange,
   onOpenFile,
   onSave,
+  onPrint,
   onUndo,
   onRedo,
   canUndo,
@@ -110,6 +113,14 @@ const Toolbar: React.FC<ToolbarProps> = ({
           title="Save (Ctrl+S)"
         >
           <Save />
+        </button>
+        <button
+          className="toolbar-btn"
+          onClick={onPrint}
+          disabled={disabled}
+          title="Print (Ctrl+P)"
+        >
+          <Printer />
         </button>
       </div>
 

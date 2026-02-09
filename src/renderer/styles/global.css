@@ -2788,3 +2788,406 @@ input:focus:not(:focus-visible) {
 :root.dark .action-btn:hover {
   background: var(--primary-color);
 }
+
+/* ============================================
+   Print Dialog
+   ============================================ */
+
+.print-dialog-layout {
+  display: flex;
+  gap: 0;
+  min-height: 480px;
+  max-height: 60vh;
+}
+
+.print-preview-section {
+  flex: 0 0 360px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px;
+  border-right: 1px solid var(--border-color);
+  background: var(--background-color);
+  border-radius: 0 0 0 12px;
+}
+
+.print-preview-canvas-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  min-height: 300px;
+  width: 100%;
+}
+
+.print-preview-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+  color: var(--text-secondary);
+}
+
+.print-preview-canvas {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+  transition: opacity 0.2s;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.print-preview-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+
+.print-nav-btn {
+  background: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+
+.print-nav-btn:hover:not(:disabled) {
+  background: var(--primary-light);
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.print-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.print-preview-page-info {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.print-options-section {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.print-option-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.print-option-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.print-option-select {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+.print-option-select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.print-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.print-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.print-radio input[type="radio"] {
+  accent-color: var(--primary-color);
+  margin: 0;
+  width: 15px;
+  height: 15px;
+}
+
+.print-option-input {
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  margin-top: 4px;
+  transition: border-color 0.15s;
+}
+
+.print-option-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.print-option-input::placeholder {
+  color: var(--text-muted);
+}
+
+.print-copies-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.print-copies-btn {
+  background: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  transition: all 0.15s;
+}
+
+.print-copies-btn:hover:not(:disabled) {
+  background: var(--background-color);
+  border-color: var(--border-hover);
+}
+
+.print-copies-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.print-copies-input {
+  width: 52px;
+  padding: 7px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  text-align: center;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 13px;
+  -moz-appearance: textfield;
+}
+
+.print-copies-input::-webkit-outer-spin-button,
+.print-copies-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.print-copies-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.print-scale-custom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.print-scale-input {
+  width: 72px;
+  margin-top: 0 !important;
+}
+
+.print-scale-unit {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.print-toggle-group {
+  display: flex;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.print-toggle-btn {
+  flex: 1;
+  padding: 8px 16px;
+  border: none;
+  background: var(--surface-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+
+.print-toggle-btn:not(:last-child) {
+  border-right: 1px solid var(--border-color);
+}
+
+.print-toggle-btn:hover:not(.active) {
+  background: var(--background-color);
+}
+
+.print-toggle-btn.active {
+  background: var(--primary-color);
+  color: white;
+}
+
+.print-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border-color);
+}
+
+.print-page-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.print-dialog-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.print-cancel-btn {
+  padding: 8px 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+
+.print-cancel-btn:hover:not(:disabled) {
+  background: var(--background-color);
+  border-color: var(--border-hover);
+}
+
+.print-cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.print-submit-btn {
+  padding: 8px 24px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary-color);
+  color: white;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.15s;
+}
+
+.print-submit-btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.print-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Spin animation for loader */
+@keyframes print-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: print-spin 1s linear infinite;
+}
+
+/* Dark mode adjustments for print dialog */
+:root.dark .print-preview-section {
+  background: var(--background-color);
+  border-right-color: var(--border-color);
+}
+
+:root.dark .print-preview-canvas {
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+:root.dark .print-option-select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
+/* ============================================
+   Print Styles (Fallback)
+   ============================================ */
+@media print {
+  .toolbar,
+  .sidebar,
+  .tools-panel,
+  .status-bar,
+  .toast-container,
+  .conversion-action-bar,
+  .update-notification,
+  .modal-overlay {
+    display: none !important;
+  }
+
+  .app-container {
+    display: block !important;
+  }
+
+  .main-content {
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .pdf-viewer {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  .pdf-page {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin: 0 !important;
+    box-shadow: none !important;
+  }
+}

@@ -9,6 +9,8 @@ import {
   Image,
   ChevronLeft,
   X,
+  ExternalLink,
+  AlertCircle,
 } from 'lucide-react';
 
 interface ToolsPanelProps {
@@ -156,9 +158,20 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
             <span>PDF to Images</span>
           </button>
           {!libreOfficeAvailable && (
-            <p className="tools-warning">
-              Install LibreOffice to enable document-to-PDF conversion
-            </p>
+            <div className="tools-notice">
+              <div className="tools-notice-header">
+                <AlertCircle size={16} />
+                <span>LibreOffice Required</span>
+              </div>
+              <p>Install LibreOffice to enable document-to-PDF conversion.</p>
+              <button
+                className="tools-notice-link"
+                onClick={() => window.electronAPI.openExternal('https://www.libreoffice.org/download/download/')}
+              >
+                <ExternalLink size={14} />
+                Download LibreOffice
+              </button>
+            </div>
           )}
         </div>
       </div>

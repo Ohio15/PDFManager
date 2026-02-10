@@ -1,6 +1,6 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { PDFDocument as PDFLib } from 'pdf-lib';
-import Toolbar from './components/Toolbar';
+import Toolbar, { ZoomMode } from './components/Toolbar';
 import Sidebar from './components/Sidebar';
 import PDFViewer from './components/PDFViewer';
 import WelcomeScreen from './components/WelcomeScreen';
@@ -14,6 +14,8 @@ import ExtractImagesDialog from './components/ExtractImagesDialog';
 import ConvertToPdfDialog from './components/ConvertToPdfDialog';
 import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
 import PrintDialog from './components/PrintDialog';
+import SearchBar from './components/SearchBar';
+import ShortcutsDialog from './components/ShortcutsDialog';
 import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
@@ -86,6 +88,7 @@ const App: React.FC = () => {
   const [toolsPanelVisible, setToolsPanelVisible] = useState(true);
   const [currentTool, setCurrentTool] = useState<Tool>('select');
   const [zoom, setZoom] = useState(100);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>('custom');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [libreOfficeAvailable, setLibreOfficeAvailable] = useState(false);
@@ -99,11 +102,14 @@ const App: React.FC = () => {
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
+  const [searchBarOpen, setSearchBarOpen] = useState(false);
+  const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
 
   // Dropped file conversion state
   const [droppedFilePath, setDroppedFilePath] = useState<string>('');
   const [droppedFileDialogOpen, setDroppedFileDialogOpen] = useState(false);
   const [showConversionBar, setShowConversionBar] = useState(false);
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
 
   const toast = useToast();
 
@@ -118,6 +124,7 @@ const App: React.FC = () => {
     addImage,
     addHighlight,
     deletePage,
+    reorderPages,
     rotatePage,
     undo,
     redo,
@@ -128,6 +135,16 @@ const App: React.FC = () => {
     updateTextItem,
     markTextDeleted,
   } = usePDFDocument();
+
+  // Refresh the recent files list
+  const refreshRecentFiles = useCallback(async () => {
+    try {
+      const files = await window.electronAPI.getRecentFiles();
+      setRecentFiles(files);
+    } catch (e) {
+      console.error('Failed to load recent files:', e);
+    }
+  }, []);
 
   // Load persisted settings and check LibreOffice on mount
   useEffect(() => {
@@ -156,6 +173,9 @@ const App: React.FC = () => {
         } else {
           root.classList.toggle('dark', theme === 'dark');
         }
+
+        // Load recent files for welcome screen
+        await refreshRecentFiles();
       } catch (e) {
         console.error('Failed to load settings:', e);
       }
@@ -166,6 +186,7 @@ const App: React.FC = () => {
         if (launchFile) {
           await openFile(launchFile.path, launchFile.data);
           await window.electronAPI.addRecentFile(launchFile.path);
+          await refreshRecentFiles();
         }
       } catch (e) {
         console.error('Failed to open launch file:', e);
@@ -173,6 +194,16 @@ const App: React.FC = () => {
     };
     loadSettings();
   }, []);
+
+  // Update window title based on current document
+  useEffect(() => {
+    if (document) {
+      const indicator = modified ? ' \u2022' : '';
+      window.document.title = `${document.fileName}${indicator} - PDF Manager`;
+    } else {
+      window.document.title = 'PDF Manager';
+    }
+  }, [document, document?.fileName, modified]);
 
   // Save settings when they change
   useEffect(() => {
@@ -188,14 +219,29 @@ const App: React.FC = () => {
     if (result) {
       await openFile(result.path, result.data);
       await window.electronAPI.addRecentFile(result.path);
+      await refreshRecentFiles();
     }
-  }, [openFile]);
+  }, [openFile, refreshRecentFiles]);
 
   // Also listen for LibreOffice status from main process
   useEffect(() => {
     window.electronAPI.onLibreOfficeStatus((path) => {
       setLibreOfficeAvailable(!!path);
     });
+  }, []);
+
+  const handleOpenRecentFile = useCallback(async (filePath: string) => {
+    const result = await window.electronAPI.readFileByPath(filePath);
+    if (result) {
+      await openFile(result.path, result.data);
+      await window.electronAPI.addRecentFile(result.path);
+      await refreshRecentFiles();
+    }
+  }, [openFile, refreshRecentFiles]);
+
+  const handleClearRecentFiles = useCallback(async () => {
+    await window.electronAPI.clearRecentFiles();
+    setRecentFiles([]);
   }, []);
 
   const handleFileDrop = useCallback(async (filePath: string) => {
@@ -249,15 +295,47 @@ const App: React.FC = () => {
 
   const handleZoomIn = useCallback(() => {
     setZoom((prev) => Math.min(prev + 25, 400));
+    setZoomMode('custom');
   }, []);
 
   const handleZoomOut = useCallback(() => {
     setZoom((prev) => Math.max(prev - 25, 25));
+    setZoomMode('custom');
+  }, []);
+
+  const handleZoomChange = useCallback((newZoom: number) => {
+    setZoom(newZoom);
+    setZoomMode('custom');
   }, []);
 
   const handleFitWidth = useCallback(() => {
-    setZoom(100);
-  }, []);
+    if (!document) return;
+    const viewer = window.document.querySelector('.pdf-viewer');
+    if (!viewer) return;
+    const page = document.pages[currentPage - 1];
+    if (!page) return;
+    // Account for padding (32px each side) and scrollbar (~12px)
+    const availableWidth = viewer.clientWidth - 64 - 12;
+    const pageWidth = page.width;
+    const fitZoom = Math.round((availableWidth / pageWidth) * 100);
+    setZoom(Math.max(25, Math.min(fitZoom, 400)));
+    setZoomMode('fit-width');
+  }, [document, currentPage]);
+
+  const handleFitPage = useCallback(() => {
+    if (!document) return;
+    const viewer = window.document.querySelector('.pdf-viewer');
+    if (!viewer) return;
+    const page = document.pages[currentPage - 1];
+    if (!page) return;
+    const availableWidth = viewer.clientWidth - 64 - 12;
+    const availableHeight = viewer.clientHeight - 64;
+    const pageWidth = page.width;
+    const pageHeight = page.height;
+    const fitZoom = Math.round(Math.min(availableWidth / pageWidth, availableHeight / pageHeight) * 100);
+    setZoom(Math.max(25, Math.min(fitZoom, 400)));
+    setZoomMode('fit-page');
+  }, [document, currentPage]);
 
   const handleAddText = useCallback(() => {
     if (document) {
@@ -490,6 +568,7 @@ const App: React.FC = () => {
       'zoom-in': handleZoomIn,
       'zoom-out': handleZoomOut,
       'fit-width': handleFitWidth,
+      'fit-page': handleFitPage,
       'toggle-sidebar': () => setSidebarVisible((prev) => !prev),
       'toggle-tools-panel': () => setToolsPanelVisible((prev) => !prev),
       'rotate-cw': () => handleRotatePage(true),
@@ -529,6 +608,7 @@ const App: React.FC = () => {
     handleZoomIn,
     handleZoomOut,
     handleFitWidth,
+    handleFitPage,
     handleRotatePage,
     handleRotateAllPages,
     handleDeleteSelected,
@@ -576,6 +656,9 @@ const App: React.FC = () => {
             setSelectedAnnotationId(null);
             handleToolChange('select');
             break;
+          case '?':
+            setShortcutsDialogOpen(true);
+            break;
         }
       }
 
@@ -592,6 +675,14 @@ const App: React.FC = () => {
           case 'p':
             e.preventDefault();
             handlePrint();
+            break;
+          case 'f':
+            e.preventDefault();
+            if (document) setSearchBarOpen(true);
+            break;
+          case '/':
+            e.preventDefault();
+            setShortcutsDialogOpen(true);
             break;
           case 'z':
             e.preventDefault();
@@ -612,7 +703,15 @@ const App: React.FC = () => {
             break;
           case '0':
             e.preventDefault();
-            setZoom(100);
+            handleFitWidth();
+            break;
+          case '9':
+            e.preventDefault();
+            handleFitPage();
+            break;
+          case '1':
+            e.preventDefault();
+            handleZoomChange(100);
             break;
           case 'b':
             e.preventDefault();
@@ -660,6 +759,9 @@ const App: React.FC = () => {
     redo,
     handleZoomIn,
     handleZoomOut,
+    handleFitWidth,
+    handleFitPage,
+    handleZoomChange,
     saveFileAs,
   ]);
 
@@ -686,9 +788,12 @@ const App: React.FC = () => {
         currentTool={currentTool}
         onToolChange={handleToolChange}
         zoom={zoom}
+        zoomMode={zoomMode}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
-        onZoomChange={setZoom}
+        onZoomChange={handleZoomChange}
+        onFitWidth={handleFitWidth}
+        onFitPage={handleFitPage}
         onOpenFile={handleOpenFile}
         onSave={handleSave}
         onPrint={handlePrint}
@@ -708,12 +813,20 @@ const App: React.FC = () => {
         disabled={!document}
       />
 
+      <SearchBar
+        isOpen={searchBarOpen}
+        onClose={() => setSearchBarOpen(false)}
+        document={document}
+        onNavigateToPage={setCurrentPage}
+      />
+
       <div className="main-content">
         <Sidebar
           visible={sidebarVisible}
           document={document}
           currentPage={currentPage}
           onPageSelect={setCurrentPage}
+          onReorderPages={reorderPages}
         />
 
         {document ? (
@@ -748,6 +861,9 @@ const App: React.FC = () => {
             onNonPdfDropped={handleNonPdfDrop}
             onConvertToPdf={() => setConvertDialogOpen(true)}
             libreOfficeAvailable={libreOfficeAvailable}
+            recentFiles={recentFiles}
+            onOpenRecentFile={handleOpenRecentFile}
+            onClearRecentFiles={handleClearRecentFiles}
           />
         )}
 
@@ -771,6 +887,7 @@ const App: React.FC = () => {
         currentPage={currentPage}
         zoom={zoom}
         modified={modified}
+        onPageChange={setCurrentPage}
       />
 
       <ToastContainer toasts={toast.toasts} onDismiss={toast.dismissToast} />
@@ -841,6 +958,11 @@ const App: React.FC = () => {
       <SettingsDialog
         isOpen={settingsDialogOpen}
         onClose={() => setSettingsDialogOpen(false)}
+      />
+
+      <ShortcutsDialog
+        isOpen={shortcutsDialogOpen}
+        onClose={() => setShortcutsDialogOpen(false)}
       />
 
       <DroppedFileDialog

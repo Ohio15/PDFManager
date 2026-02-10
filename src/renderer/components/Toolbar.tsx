@@ -21,13 +21,18 @@ import {
   FileX,
 } from 'lucide-react';
 
+export type ZoomMode = 'custom' | 'fit-width' | 'fit-page';
+
 interface ToolbarProps {
   currentTool: Tool;
   onToolChange: (tool: Tool) => void;
   zoom: number;
+  zoomMode?: ZoomMode;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onZoomChange: (zoom: number) => void;
+  onFitWidth?: () => void;
+  onFitPage?: () => void;
   onOpenFile: () => void;
   onSave: () => void;
   onPrint: () => void;
@@ -51,9 +56,12 @@ const Toolbar: React.FC<ToolbarProps> = ({
   currentTool,
   onToolChange,
   zoom,
+  zoomMode = 'custom',
   onZoomIn,
   onZoomOut,
   onZoomChange,
+  onFitWidth,
+  onFitPage,
   onOpenFile,
   onSave,
   onPrint,
@@ -214,27 +222,40 @@ const Toolbar: React.FC<ToolbarProps> = ({
           className="toolbar-btn"
           onClick={onZoomOut}
           disabled={disabled || zoom <= 25}
-          title="Zoom Out"
+          title="Zoom Out (Ctrl+-)"
         >
           <ZoomOut />
         </button>
         <select
           className="toolbar-select"
-          value={zoom}
-          onChange={(e) => onZoomChange(parseInt(e.target.value))}
+          value={zoomMode !== 'custom' ? zoomMode : zoom}
+          onChange={(e) => {
+            const val = e.target.value;
+            if (val === 'fit-width' && onFitWidth) {
+              onFitWidth();
+            } else if (val === 'fit-page' && onFitPage) {
+              onFitPage();
+            } else {
+              onZoomChange(parseInt(val));
+            }
+          }}
           disabled={disabled}
         >
-          {zoomOptions.map((z) => (
-            <option key={z} value={z}>
-              {z}%
-            </option>
-          ))}
+          <option value="fit-width">Fit Width</option>
+          <option value="fit-page">Fit Page</option>
+          <optgroup label="Zoom">
+            {zoomOptions.map((z) => (
+              <option key={z} value={z}>
+                {z}%
+              </option>
+            ))}
+          </optgroup>
         </select>
         <button
           className="toolbar-btn"
           onClick={onZoomIn}
           disabled={disabled || zoom >= 400}
-          title="Zoom In"
+          title="Zoom In (Ctrl+=)"
         >
           <ZoomIn />
         </button>

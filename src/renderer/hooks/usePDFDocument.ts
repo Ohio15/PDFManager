@@ -1161,6 +1161,46 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [document, addToHistory]
   );
 
+  const reorderPages = useCallback(
+    (fromIndex: number, toIndex: number) => {
+      if (!document) return;
+      if (fromIndex === toIndex) return;
+
+      const previousPages = [...document.pages];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        const [movedPage] = newPages.splice(fromIndex, 1);
+        newPages.splice(toIndex, 0, movedPage);
+        // Re-index pages
+        const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
+        return { ...prev, pages: reindexed };
+      });
+
+      addToHistory({
+        type: 'reorderPages',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            return { ...prev, pages: previousPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...previousPages];
+            const [movedPage] = newPages.splice(fromIndex, 1);
+            newPages.splice(toIndex, 0, movedPage);
+            const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
+            return { ...prev, pages: reindexed };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
   const undo = useCallback(() => {
     if (!canUndo) return;
     history[historyIndex].undo();
@@ -1184,6 +1224,7 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     addImage,
     addHighlight,
     deletePage,
+    reorderPages,
     rotatePage,
     undo,
     redo,

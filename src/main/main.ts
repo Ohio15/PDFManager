@@ -976,6 +976,89 @@ if (launchFile) {
   fileToOpenOnReady = launchFile;
 }
 
+// Auto-recovery handlers
+const getRecoveryDir = () => {
+  const dir = path.join(app.getPath('userData'), 'recovery');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+};
+
+ipcMain.handle('save-auto-recovery', async (_event, { data, filePath: originalPath, fileName }) => {
+  try {
+    const recoveryDir = getRecoveryDir();
+    const recoveryFile = path.join(recoveryDir, 'recovery.pdf');
+    const metaFile = path.join(recoveryDir, 'recovery.json');
+
+    const buffer = Buffer.from(data, 'base64');
+    fs.writeFileSync(recoveryFile, buffer);
+    fs.writeFileSync(metaFile, JSON.stringify({
+      originalPath: originalPath || null,
+      fileName: fileName || 'Untitled.pdf',
+      timestamp: Date.now(),
+    }));
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+ipcMain.handle('check-auto-recovery', () => {
+  try {
+    const recoveryDir = getRecoveryDir();
+    const metaFile = path.join(recoveryDir, 'recovery.json');
+    if (fs.existsSync(metaFile)) {
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf-8'));
+      // Only offer recovery for files less than 24 hours old
+      if (Date.now() - meta.timestamp < 24 * 60 * 60 * 1000) {
+        return meta;
+      }
+      // Cleanup stale recovery files
+      fs.unlinkSync(metaFile);
+      const recoveryFile = path.join(recoveryDir, 'recovery.pdf');
+      if (fs.existsSync(recoveryFile)) fs.unlinkSync(recoveryFile);
+    }
+  } catch (e) {
+    // Recovery check failed, not critical
+  }
+  return null;
+});
+
+ipcMain.handle('load-auto-recovery', () => {
+  try {
+    const recoveryDir = getRecoveryDir();
+    const recoveryFile = path.join(recoveryDir, 'recovery.pdf');
+    const metaFile = path.join(recoveryDir, 'recovery.json');
+    if (fs.existsSync(recoveryFile) && fs.existsSync(metaFile)) {
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf-8'));
+      const fileData = fs.readFileSync(recoveryFile);
+      return {
+        data: fileData.toString('base64'),
+        filePath: meta.originalPath,
+        fileName: meta.fileName,
+      };
+    }
+  } catch (e) {
+    console.error('Failed to load recovery file:', e);
+  }
+  return null;
+});
+
+ipcMain.handle('clear-auto-recovery', () => {
+  try {
+    const recoveryDir = getRecoveryDir();
+    const recoveryFile = path.join(recoveryDir, 'recovery.pdf');
+    const metaFile = path.join(recoveryDir, 'recovery.json');
+    if (fs.existsSync(recoveryFile)) fs.unlinkSync(recoveryFile);
+    if (fs.existsSync(metaFile)) fs.unlinkSync(metaFile);
+  } catch (e) {
+    // Cleanup failure is not critical
+  }
+  return { success: true };
+});
+
 app.whenReady().then(() => {
   // Run LibreOffice detection at startup
   const detectedPath = detectLibreOffice();

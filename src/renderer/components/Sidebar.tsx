@@ -20,6 +20,8 @@ interface SidebarProps {
   onReorderPages?: (fromIndex: number, toIndex: number) => void;
   onDeleteAnnotation?: (pageIndex: number, annotationId: string) => void;
   onSelectAnnotation?: (annotationId: string) => void;
+  onInsertBlankPage?: (afterPageIndex: number) => void;
+  onDeletePage?: (pageIndex: number) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -30,6 +32,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   onReorderPages,
   onDeleteAnnotation,
   onSelectAnnotation,
+  onInsertBlankPage,
+  onDeletePage,
 }) => {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<SidebarTab>('pages');
@@ -39,6 +43,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [annotationFilter, setAnnotationFilter] = useState<string>('all');
+  const [pageContextMenu, setPageContextMenu] = useState<{ isOpen: boolean; x: number; y: number; pageIndex: number }>({
+    isOpen: false, x: 0, y: 0, pageIndex: 0,
+  });
   const containerRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
@@ -191,6 +198,14 @@ const Sidebar: React.FC<SidebarProps> = ({
     window.addEventListener('mouseup', handleMouseUp);
   }, [sidebarWidth]);
 
+  // Close page context menu on click outside
+  useEffect(() => {
+    if (!pageContextMenu.isOpen) return;
+    const handleClick = () => setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+    window.addEventListener('click', handleClick);
+    return () => window.removeEventListener('click', handleClick);
+  }, [pageContextMenu.isOpen]);
+
   // Page reorder drag handlers
   const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
     setDragIndex(index);
@@ -340,6 +355,11 @@ const Sidebar: React.FC<SidebarProps> = ({
               onDragEnd={handleDragEnd}
               onDragOver={(e) => handleDragOver(e, index)}
               onDrop={(e) => handleDrop(e, index)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setPageContextMenu({ isOpen: true, x: e.clientX, y: e.clientY, pageIndex: index + 1 });
+              }}
             >
               <img
                 src={thumbnail}
@@ -437,6 +457,49 @@ const Sidebar: React.FC<SidebarProps> = ({
               <p>No annotations</p>
               <span>{annotationFilter !== 'all' ? 'No matching annotations found.' : 'Use the toolbar to add annotations.'}</span>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Page Context Menu */}
+      {pageContextMenu.isOpen && (
+        <div
+          className="page-context-menu"
+          style={{ position: 'fixed', left: pageContextMenu.x, top: pageContextMenu.y, zIndex: 1000 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {onInsertBlankPage && (
+            <>
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  onInsertBlankPage(pageContextMenu.pageIndex - 1);
+                  setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+                }}
+              >
+                Insert blank page before
+              </button>
+              <button
+                className="context-menu-item"
+                onClick={() => {
+                  onInsertBlankPage(pageContextMenu.pageIndex);
+                  setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+                }}
+              >
+                Insert blank page after
+              </button>
+            </>
+          )}
+          {onDeletePage && document && document.pageCount > 1 && (
+            <button
+              className="context-menu-item danger"
+              onClick={() => {
+                onDeletePage(pageContextMenu.pageIndex);
+                setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+              }}
+            >
+              Delete page
+            </button>
           )}
         </div>
       )}

@@ -71,6 +71,11 @@ export interface ElectronAPI {
   getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
   getLaunchFile: () => Promise<{ path: string; data: string } | null>;
+  // Auto-recovery
+  saveAutoRecovery: (data: string, filePath: string | null, fileName: string) => Promise<{ success: boolean; error?: string }>;
+  checkAutoRecovery: () => Promise<{ originalPath: string | null; fileName: string; timestamp: number } | null>;
+  loadAutoRecovery: () => Promise<{ data: string; filePath: string | null; fileName: string } | null>;
+  clearAutoRecovery: () => Promise<{ success: boolean }>;
 }
 
 const electronAPI: ElectronAPI = {
@@ -145,6 +150,12 @@ const electronAPI: ElectronAPI = {
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) =>
     ipcRenderer.invoke('print-pdf', options),
   getLaunchFile: () => ipcRenderer.invoke('get-launch-file'),
+  // Auto-recovery
+  saveAutoRecovery: (data: string, filePath: string | null, fileName: string) =>
+    ipcRenderer.invoke('save-auto-recovery', { data, filePath, fileName }),
+  checkAutoRecovery: () => ipcRenderer.invoke('check-auto-recovery'),
+  loadAutoRecovery: () => ipcRenderer.invoke('load-auto-recovery'),
+  clearAutoRecovery: () => ipcRenderer.invoke('clear-auto-recovery'),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

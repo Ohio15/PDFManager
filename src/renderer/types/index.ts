@@ -151,6 +151,13 @@ export interface AnnotationStyle {
   noteColor: string;
 }
 
+export interface TabInfo {
+  id: string;
+  fileName: string;
+  filePath: string | null;
+  modified: boolean;
+}
+
 export interface HistoryEntry {
   action: string;
   data: unknown;

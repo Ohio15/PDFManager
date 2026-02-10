@@ -17,6 +17,9 @@ import PrintDialog from './components/PrintDialog';
 import SearchBar from './components/SearchBar';
 import ShortcutsDialog from './components/ShortcutsDialog';
 import AnnotationToolbar from './components/AnnotationToolbar';
+import TabBar from './components/TabBar';
+import DocumentPropertiesDialog from './components/DocumentPropertiesDialog';
+import PasswordDialog from './components/PasswordDialog';
 import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
@@ -67,6 +70,11 @@ declare global {
       getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
       printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
       getLaunchFile: () => Promise<{ path: string; data: string } | null>;
+      // Auto-recovery
+      saveAutoRecovery: (data: string, filePath: string | null, fileName: string) => Promise<{ success: boolean; error?: string }>;
+      checkAutoRecovery: () => Promise<{ originalPath: string | null; fileName: string; timestamp: number } | null>;
+      loadAutoRecovery: () => Promise<{ data: string; filePath: string | null; fileName: string } | null>;
+      clearAutoRecovery: () => Promise<{ success: boolean }>;
     };
   }
 }
@@ -105,6 +113,10 @@ const App: React.FC = () => {
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [searchBarOpen, setSearchBarOpen] = useState(false);
   const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
+  const [propertiesDialogOpen, setPropertiesDialogOpen] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [passwordIncorrect, setPasswordIncorrect] = useState(false);
+  const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
   // Dropped file conversion state
   const [droppedFilePath, setDroppedFilePath] = useState<string>('');
@@ -140,6 +152,7 @@ const App: React.FC = () => {
     addShape,
     addStickyNote,
     addStamp,
+    insertBlankPage,
     deletePage,
     reorderPages,
     rotatePage,
@@ -151,6 +164,11 @@ const App: React.FC = () => {
     deleteAnnotation,
     updateTextItem,
     markTextDeleted,
+    // Tab management
+    tabs,
+    activeTabId,
+    switchTab,
+    closeTab,
   } = usePDFDocument();
 
   // Refresh the recent files list
@@ -208,6 +226,27 @@ const App: React.FC = () => {
       } catch (e) {
         console.error('Failed to open launch file:', e);
       }
+
+      // Check for auto-recovery
+      try {
+        const recovery = await window.electronAPI.checkAutoRecovery();
+        if (recovery) {
+          const age = Math.round((Date.now() - recovery.timestamp) / 60000);
+          const shouldRecover = window.confirm(
+            `An unsaved recovery file was found for "${recovery.fileName}" (${age} minutes ago).\n\nWould you like to recover it?`
+          );
+          if (shouldRecover) {
+            const recoveryData = await window.electronAPI.loadAutoRecovery();
+            if (recoveryData) {
+              await openFile(recoveryData.filePath || 'Recovered.pdf', recoveryData.data);
+              toast.success('Document recovered successfully');
+            }
+          }
+          await window.electronAPI.clearAutoRecovery();
+        }
+      } catch (e) {
+        console.error('Recovery check failed:', e);
+      }
     };
     loadSettings();
   }, []);
@@ -231,14 +270,71 @@ const App: React.FC = () => {
     window.electronAPI.setStore('toolsPanelVisible', toolsPanelVisible);
   }, [toolsPanelVisible]);
 
+  // Auto-save recovery: save every 60 seconds when modified
+  useEffect(() => {
+    if (!document || !modified) return;
+
+    const autoSaveTimer = setInterval(async () => {
+      try {
+        const base64 = uint8ArrayToBase64(document.pdfData);
+        await window.electronAPI.saveAutoRecovery(base64, document.filePath, document.fileName);
+      } catch (e) {
+        console.error('Auto-recovery save failed:', e);
+      }
+    }, 60000);
+
+    return () => clearInterval(autoSaveTimer);
+  }, [document, modified]);
+
+  // Clear recovery data after successful save
+  useEffect(() => {
+    if (document && !modified) {
+      window.electronAPI.clearAutoRecovery().catch(() => {});
+    }
+  }, [document, modified]);
+
+  const handlePasswordError = useCallback((error: any, filePath: string, data: string) => {
+    if (error?.message === 'PASSWORD_REQUIRED') {
+      const fileName = filePath.split(/[\\/]/).pop() || 'PDF';
+      setPendingPasswordFile({ path: filePath, data, fileName });
+      setPasswordIncorrect(error.reason === 'INCORRECT_PASSWORD');
+      setPasswordDialogOpen(true);
+      return true;
+    }
+    return false;
+  }, []);
+
+  const handlePasswordSubmit = useCallback(async (password: string) => {
+    if (!pendingPasswordFile) return;
+    try {
+      await openFile(pendingPasswordFile.path, pendingPasswordFile.data, password);
+      await window.electronAPI.addRecentFile(pendingPasswordFile.path);
+      await refreshRecentFiles();
+      setPasswordDialogOpen(false);
+      setPendingPasswordFile(null);
+      setPasswordIncorrect(false);
+    } catch (error: any) {
+      if (!handlePasswordError(error, pendingPasswordFile.path, pendingPasswordFile.data)) {
+        toast.error('Failed to open file');
+        setPasswordDialogOpen(false);
+      }
+    }
+  }, [pendingPasswordFile, openFile, refreshRecentFiles, handlePasswordError, toast]);
+
   const handleOpenFile = useCallback(async () => {
     const result = await window.electronAPI.openFileDialog();
     if (result) {
-      await openFile(result.path, result.data);
-      await window.electronAPI.addRecentFile(result.path);
-      await refreshRecentFiles();
+      try {
+        await openFile(result.path, result.data);
+        await window.electronAPI.addRecentFile(result.path);
+        await refreshRecentFiles();
+      } catch (error: any) {
+        if (!handlePasswordError(error, result.path, result.data)) {
+          toast.error('Failed to open file');
+        }
+      }
     }
-  }, [openFile, refreshRecentFiles]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
 
   // Also listen for LibreOffice status from main process
   useEffect(() => {
@@ -250,11 +346,17 @@ const App: React.FC = () => {
   const handleOpenRecentFile = useCallback(async (filePath: string) => {
     const result = await window.electronAPI.readFileByPath(filePath);
     if (result) {
-      await openFile(result.path, result.data);
-      await window.electronAPI.addRecentFile(result.path);
-      await refreshRecentFiles();
+      try {
+        await openFile(result.path, result.data);
+        await window.electronAPI.addRecentFile(result.path);
+        await refreshRecentFiles();
+      } catch (error: any) {
+        if (!handlePasswordError(error, result.path, result.data)) {
+          toast.error('Failed to open file');
+        }
+      }
     }
-  }, [openFile, refreshRecentFiles]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
 
   const handleClearRecentFiles = useCallback(async () => {
     await window.electronAPI.clearRecentFiles();
@@ -357,6 +459,19 @@ const App: React.FC = () => {
   const handleStyleChange = useCallback((updates: Partial<AnnotationStyle>) => {
     setAnnotationStyle(prev => ({ ...prev, ...updates }));
   }, []);
+
+  // Tab close handler with unsaved changes confirmation
+  const handleCloseTab = useCallback((tabId: string) => {
+    const tab = tabs.find(t => t.id === tabId);
+    if (!tab) return;
+
+    if (tab.modified) {
+      const confirmed = window.confirm(`"${tab.fileName}" has unsaved changes. Close anyway?`);
+      if (!confirmed) return;
+    }
+
+    closeTab(tabId);
+  }, [tabs, closeTab]);
 
   const handleAddText = useCallback(() => {
     if (document) {
@@ -603,6 +718,7 @@ const App: React.FC = () => {
       'extract-images': () => document && setExtractImagesDialogOpen(true),
       'convert-to-pdf': () => setConvertDialogOpen(true),
       'settings': () => setSettingsDialogOpen(true),
+      'document-properties': () => document && setPropertiesDialogOpen(true),
     };
 
     Object.entries(menuActions).forEach(([action, handler]) => {
@@ -702,6 +818,10 @@ const App: React.FC = () => {
             e.preventDefault();
             handleSave();
             break;
+          case 'w':
+            e.preventDefault();
+            if (activeTabId) handleCloseTab(activeTabId);
+            break;
           case 'p':
             e.preventDefault();
             handlePrint();
@@ -713,6 +833,14 @@ const App: React.FC = () => {
           case '/':
             e.preventDefault();
             setShortcutsDialogOpen(true);
+            break;
+          case 'tab':
+            e.preventDefault();
+            if (tabs.length > 1 && activeTabId) {
+              const currentIdx = tabs.findIndex(t => t.id === activeTabId);
+              const nextIdx = (currentIdx + 1) % tabs.length;
+              switchTab(tabs[nextIdx].id);
+            }
             break;
           case 'z':
             e.preventDefault();
@@ -755,6 +883,10 @@ const App: React.FC = () => {
             e.preventDefault();
             setMergeDialogOpen(true);
             break;
+          case 'd':
+            e.preventDefault();
+            if (document) setPropertiesDialogOpen(true);
+            break;
         }
       }
 
@@ -767,6 +899,14 @@ const App: React.FC = () => {
           case 'z':
             e.preventDefault();
             if (canRedo) redo();
+            break;
+          case 'tab':
+            e.preventDefault();
+            if (tabs.length > 1 && activeTabId) {
+              const currentIdx = tabs.findIndex(t => t.id === activeTabId);
+              const prevIdx = (currentIdx - 1 + tabs.length) % tabs.length;
+              switchTab(tabs[prevIdx].id);
+            }
             break;
         }
       }
@@ -793,6 +933,10 @@ const App: React.FC = () => {
     handleFitPage,
     handleZoomChange,
     saveFileAs,
+    tabs,
+    activeTabId,
+    switchTab,
+    handleCloseTab,
   ]);
 
   // Prevent default drag behavior
@@ -856,6 +1000,14 @@ const App: React.FC = () => {
         onNavigateToPage={setCurrentPage}
       />
 
+      <TabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onTabSelect={switchTab}
+        onTabClose={handleCloseTab}
+        onNewTab={handleOpenFile}
+      />
+
       <div className="main-content">
         <Sidebar
           visible={sidebarVisible}
@@ -865,6 +1017,8 @@ const App: React.FC = () => {
           onReorderPages={reorderPages}
           onDeleteAnnotation={deleteAnnotation}
           onSelectAnnotation={(id) => setSelectedAnnotationId(id)}
+          onInsertBlankPage={insertBlankPage}
+          onDeletePage={(pageIndex) => deletePage(pageIndex)}
         />
 
         {document ? (
@@ -1006,6 +1160,24 @@ const App: React.FC = () => {
       <ShortcutsDialog
         isOpen={shortcutsDialogOpen}
         onClose={() => setShortcutsDialogOpen(false)}
+      />
+
+      <PasswordDialog
+        isOpen={passwordDialogOpen}
+        onClose={() => {
+          setPasswordDialogOpen(false);
+          setPendingPasswordFile(null);
+          setPasswordIncorrect(false);
+        }}
+        onSubmit={handlePasswordSubmit}
+        incorrect={passwordIncorrect}
+        fileName={pendingPasswordFile?.fileName}
+      />
+
+      <DocumentPropertiesDialog
+        isOpen={propertiesDialogOpen}
+        onClose={() => setPropertiesDialogOpen(false)}
+        document={document}
       />
 
       <DroppedFileDialog

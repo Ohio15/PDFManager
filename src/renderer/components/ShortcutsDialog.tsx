@@ -13,6 +13,7 @@ const shortcuts = [
       { keys: 'Ctrl+O', description: 'Open file' },
       { keys: 'Ctrl+S', description: 'Save' },
       { keys: 'Ctrl+Shift+S', description: 'Save as' },
+      { keys: 'Ctrl+W', description: 'Close tab' },
       { keys: 'Ctrl+P', description: 'Print' },
       { keys: 'Ctrl+M', description: 'Merge PDFs' },
     ],
@@ -20,6 +21,8 @@ const shortcuts = [
   {
     category: 'Navigation',
     items: [
+      { keys: 'Ctrl+Tab', description: 'Next tab' },
+      { keys: 'Ctrl+Shift+Tab', description: 'Previous tab' },
       { keys: 'Ctrl+F', description: 'Find in document' },
       { keys: 'Ctrl+1', description: 'Actual size (100%)' },
       { keys: 'Ctrl+0', description: 'Fit width' },

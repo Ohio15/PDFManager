@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem, Size } from '../types';
+import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, AnnotationStyle, PDFTextItem, Position, Size } from '../types';
 import { Tool } from '../App';
 
 interface TextEditDialogState {
@@ -56,6 +56,11 @@ interface PDFViewerProps {
   onSelectionChange?: (annotationId: string | null) => void;
   onAddHighlight?: (pageIndex: number, rects: Array<{ x: number; y: number; width: number; height: number }>) => void;
   onAddText?: (pageIndex: number, position: { x: number; y: number }) => string | void;
+  onAddDrawing?: (pageIndex: number, paths: DrawingAnnotation['paths']) => void;
+  onAddShape?: (pageIndex: number, shapeType: ShapeAnnotation['shapeType'], position: Position, size: Size, strokeColor: string, fillColor: string, strokeWidth: number) => void;
+  onAddStickyNote?: (pageIndex: number, position: Position, color?: string) => void;
+  onAddStamp?: (pageIndex: number, position: Position, stampType: StampAnnotation['stampType'], text: string, color: string) => void;
+  annotationStyle?: AnnotationStyle;
   loading: boolean;
 }
 
@@ -75,6 +80,11 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onSelectionChange,
   onAddHighlight,
   onAddText,
+  onAddDrawing,
+  onAddShape,
+  onAddStickyNote,
+  onAddStamp,
+  annotationStyle,
   loading,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -103,6 +113,14 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const [highlightPreview, setHighlightPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [eraserStart, setEraserStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
   const [eraserPreview, setEraserPreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Drawing tool state
+  const [drawingPoints, setDrawingPoints] = useState<Position[]>([]);
+  const [drawingPageNum, setDrawingPageNum] = useState<number | null>(null);
+  // Shape tool state
+  const [shapeStart, setShapeStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
+  const [shapePreview, setShapePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Note editing state
+  const [editingNote, setEditingNote] = useState<string | null>(null);
 
   const scale = zoom / 100;
 
@@ -222,18 +240,14 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     const y = (e.clientY - rect.top) / scale;
 
     if (currentTool === 'text') {
-      // Click-to-place text at this position
       if (onAddText) {
         const newAnnotationId = onAddText(pageNum, { x, y });
-        // If we got an ID back, select it and start editing
         if (newAnnotationId) {
           setSelectedAnnotation(newAnnotationId);
-          // Delay to let the annotation render, then start editing
           setTimeout(() => {
             setEditingAnnotation(newAnnotationId);
           }, 50);
         }
-        // Switch back to select tool
         onToolChange?.('select');
       }
     } else if (currentTool === 'highlight') {
@@ -242,6 +256,22 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     } else if (currentTool === 'erase') {
       setEraserStart({ pageNum, x, y });
       setEraserPreview(null);
+    } else if (currentTool === 'draw') {
+      setDrawingPageNum(pageNum);
+      setDrawingPoints([{ x, y }]);
+    } else if (currentTool === 'shape') {
+      setShapeStart({ pageNum, x, y });
+      setShapePreview(null);
+    } else if (currentTool === 'note') {
+      if (onAddStickyNote) {
+        onAddStickyNote(pageNum, { x, y }, annotationStyle?.noteColor);
+      }
+      onToolChange?.('select');
+    } else if (currentTool === 'stamp') {
+      if (onAddStamp && annotationStyle) {
+        onAddStamp(pageNum, { x, y }, annotationStyle.stampType, annotationStyle.stampText, annotationStyle.color);
+      }
+      onToolChange?.('select');
     }
   };
 
@@ -267,6 +297,20 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       const width = Math.abs(currentX - eraserStart.x);
       const height = Math.abs(currentY - eraserStart.y);
       setEraserPreview({ x, y, width, height });
+    }
+
+    // Drawing tool - collect points
+    if (drawingPageNum === pageNum && drawingPoints.length > 0) {
+      setDrawingPoints(prev => [...prev, { x: currentX, y: currentY }]);
+    }
+
+    // Shape tool - preview
+    if (shapeStart && shapeStart.pageNum === pageNum) {
+      const x = Math.min(shapeStart.x, currentX);
+      const y = Math.min(shapeStart.y, currentY);
+      const width = Math.abs(currentX - shapeStart.x);
+      const height = Math.abs(currentY - shapeStart.y);
+      setShapePreview({ x, y, width, height });
     }
   };
 
@@ -323,6 +367,34 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       setHighlightStart(null);
       setHighlightPreview(null);
     }
+
+    // Finalize drawing
+    if (drawingPageNum === pageNum && drawingPoints.length > 2 && onAddDrawing && annotationStyle) {
+      onAddDrawing(pageNum, [{
+        points: drawingPoints,
+        color: annotationStyle.strokeColor,
+        width: annotationStyle.strokeWidth,
+      }]);
+    }
+    setDrawingPoints([]);
+    setDrawingPageNum(null);
+
+    // Finalize shape
+    if (shapeStart && shapeStart.pageNum === pageNum && shapePreview && onAddShape && annotationStyle) {
+      if (shapePreview.width > 5 && shapePreview.height > 5) {
+        onAddShape(
+          pageNum,
+          annotationStyle.shapeType,
+          { x: shapePreview.x, y: shapePreview.y },
+          { width: shapePreview.width, height: shapePreview.height },
+          annotationStyle.strokeColor,
+          annotationStyle.fillColor,
+          annotationStyle.strokeWidth
+        );
+      }
+    }
+    setShapeStart(null);
+    setShapePreview(null);
   };
 
   const handleAnnotationMouseDown = (
@@ -812,6 +884,215 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       );
     }
 
+    if (annotation.type === 'drawing') {
+      const drawAnnotation = annotation as DrawingAnnotation;
+      return (
+        <svg
+          key={annotation.id}
+          className={`drawing-annotation ${isSelected ? 'selected' : ''}`}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+          }}
+          onClick={(e) => { e.stopPropagation(); }}
+        >
+          {drawAnnotation.paths.map((path, pathIdx) => {
+            if (path.points.length < 2) return null;
+            const d = path.points
+              .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * scale} ${p.y * scale}`)
+              .join(' ');
+            return (
+              <path
+                key={`${annotation.id}-path-${pathIdx}`}
+                d={d}
+                stroke={path.color}
+                strokeWidth={path.width * scale}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ pointerEvents: 'stroke', cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' ? 'pointer' : 'default') }}
+                onMouseDown={(e) => {
+                  const mouseEvent = e as unknown as React.MouseEvent;
+                  handleAnnotationMouseDown(mouseEvent, pageIndex, annotation);
+                }}
+                onContextMenu={(e) => {
+                  const mouseEvent = e as unknown as React.MouseEvent;
+                  handleContextMenu(mouseEvent, pageIndex, annotation);
+                }}
+              />
+            );
+          })}
+        </svg>
+      );
+    }
+
+    if (annotation.type === 'shape') {
+      const shapeAnnotation = annotation as ShapeAnnotation;
+      const sx = shapeAnnotation.position.x * scale;
+      const sy = shapeAnnotation.position.y * scale;
+      const sw = shapeAnnotation.size.width * scale;
+      const sh = shapeAnnotation.size.height * scale;
+
+      let shapeEl: React.ReactNode = null;
+      const commonProps = {
+        stroke: shapeAnnotation.strokeColor,
+        strokeWidth: shapeAnnotation.strokeWidth * scale,
+        fill: shapeAnnotation.fillColor === 'transparent' ? 'none' : shapeAnnotation.fillColor,
+        fillOpacity: shapeAnnotation.fillColor === 'transparent' ? 0 : 0.3,
+        style: { pointerEvents: 'stroke' as const, cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' ? 'move' : 'default') },
+      };
+
+      if (shapeAnnotation.shapeType === 'rectangle') {
+        shapeEl = <rect x={sx} y={sy} width={sw} height={sh} {...commonProps} />;
+      } else if (shapeAnnotation.shapeType === 'ellipse') {
+        shapeEl = <ellipse cx={sx + sw / 2} cy={sy + sh / 2} rx={sw / 2} ry={sh / 2} {...commonProps} />;
+      } else if (shapeAnnotation.shapeType === 'line') {
+        shapeEl = <line x1={sx} y1={sy} x2={sx + sw} y2={sy + sh} {...commonProps} />;
+      } else if (shapeAnnotation.shapeType === 'arrow') {
+        const markerId = `arrow-${annotation.id}`;
+        shapeEl = (
+          <>
+            <defs>
+              <marker
+                id={markerId}
+                markerWidth="10"
+                markerHeight="7"
+                refX="10"
+                refY="3.5"
+                orient="auto"
+              >
+                <polygon
+                  points="0 0, 10 3.5, 0 7"
+                  fill={shapeAnnotation.strokeColor}
+                />
+              </marker>
+            </defs>
+            <line
+              x1={sx}
+              y1={sy}
+              x2={sx + sw}
+              y2={sy + sh}
+              markerEnd={`url(#${markerId})`}
+              {...commonProps}
+            />
+          </>
+        );
+      }
+
+      return (
+        <svg
+          key={annotation.id}
+          className={`shape-annotation ${isSelected ? 'selected' : ''}`}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+            overflow: 'visible',
+          }}
+        >
+          <g
+            onMouseDown={(e) => {
+              const mouseEvent = e as unknown as React.MouseEvent;
+              handleAnnotationMouseDown(mouseEvent, pageIndex, annotation);
+            }}
+            onContextMenu={(e) => {
+              const mouseEvent = e as unknown as React.MouseEvent;
+              handleContextMenu(mouseEvent, pageIndex, annotation);
+            }}
+          >
+            {shapeEl}
+          </g>
+        </svg>
+      );
+    }
+
+    if (annotation.type === 'note') {
+      const noteAnnotation = annotation as StickyNoteAnnotation;
+      const isEditingThis = editingNote === annotation.id;
+
+      return (
+        <div
+          key={annotation.id}
+          className={`sticky-note-annotation ${isSelected ? 'selected' : ''} ${isEditingThis ? 'expanded' : ''}`}
+          style={{
+            left: noteAnnotation.position.x * scale,
+            top: noteAnnotation.position.y * scale,
+          }}
+          onMouseDown={(e) => handleAnnotationMouseDown(e, pageIndex, annotation)}
+          onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            if (currentTool === 'select') {
+              setEditingNote(annotation.id);
+              setSelectedAnnotation(annotation.id);
+            }
+          }}
+        >
+          <div className="sticky-note-icon" style={{ backgroundColor: noteAnnotation.color }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+            </svg>
+          </div>
+          {isEditingThis && (
+            <div className="sticky-note-editor" style={{ backgroundColor: noteAnnotation.color }}>
+              <textarea
+                className="sticky-note-textarea"
+                value={noteAnnotation.content}
+                onChange={(e) => {
+                  onUpdateAnnotation(pageIndex, annotation.id, { content: e.target.value });
+                }}
+                onBlur={() => setEditingNote(null)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setEditingNote(null);
+                }}
+                placeholder="Type your note..."
+                autoFocus
+              />
+            </div>
+          )}
+          {!isEditingThis && noteAnnotation.content && (
+            <div className="sticky-note-preview" style={{ backgroundColor: noteAnnotation.color }}>
+              {noteAnnotation.content.slice(0, 50)}{noteAnnotation.content.length > 50 ? '...' : ''}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (annotation.type === 'stamp') {
+      const stampAnnotation = annotation as StampAnnotation;
+      return (
+        <div
+          key={annotation.id}
+          className={`stamp-annotation ${isSelected ? 'selected' : ''}`}
+          style={{
+            left: stampAnnotation.position.x * scale,
+            top: stampAnnotation.position.y * scale,
+            width: stampAnnotation.size.width * scale,
+            height: stampAnnotation.size.height * scale,
+            borderColor: stampAnnotation.color,
+            color: stampAnnotation.color,
+            cursor: currentTool === 'erase' ? 'pointer' : (currentTool === 'select' ? 'move' : 'default'),
+            fontSize: `${14 * scale}px`,
+          }}
+          onMouseDown={(e) => handleAnnotationMouseDown(e, pageIndex, annotation)}
+          onContextMenu={(e) => handleContextMenu(e, pageIndex, annotation)}
+        >
+          {stampAnnotation.text}
+        </div>
+      );
+    }
+
     return null;
   };
 
@@ -828,18 +1109,20 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         return (
           <div
             key={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''}`}
             style={{
               width: canvas.width,
               height: canvas.height,
             }}
-            onClick={() => { setSelectedAnnotation(null); setEditingAnnotation(null); setEditingTextItem(null); }}
+            onClick={() => { setSelectedAnnotation(null); setEditingAnnotation(null); setEditingTextItem(null); setEditingNote(null); }}
             onMouseDown={(e) => handlePageMouseDown(e, pageNum)}
             onMouseMove={(e) => handlePageMouseMove(e, pageNum)}
             onMouseUp={() => handlePageMouseUp(pageNum)}
             onMouseLeave={() => {
               if (highlightStart) { setHighlightStart(null); setHighlightPreview(null); }
               if (eraserStart) { setEraserStart(null); setEraserPreview(null); }
+              if (drawingPoints.length > 0) { setDrawingPoints([]); setDrawingPageNum(null); }
+              if (shapeStart) { setShapeStart(null); setShapePreview(null); }
             }}
           >
             <canvas
@@ -854,7 +1137,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
               }}
             />
             <div
-              className={`annotation-layer ${currentTool !== 'select' ? '' : 'active'}`}
+              className={`annotation-layer ${currentTool === 'select' || currentTool === 'erase' ? 'active' : ''}`}
             >
               {page?.annotations.map((annotation) =>
                 renderAnnotation(pageNum, annotation)
@@ -886,6 +1169,61 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
                   height: eraserPreview.height * scale,
                 }}
               />
+            )}
+            {/* Drawing preview while freehand drawing */}
+            {drawingPageNum === pageNum && drawingPoints.length > 1 && (
+              <svg className="drawing-preview" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+                <path
+                  d={drawingPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * scale} ${p.y * scale}`).join(' ')}
+                  stroke={annotationStyle?.strokeColor || '#FF0000'}
+                  strokeWidth={(annotationStyle?.strokeWidth || 2) * scale}
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
+            {/* Shape preview while dragging */}
+            {shapeStart && shapeStart.pageNum === pageNum && shapePreview && (
+              <svg className="shape-preview" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
+                {annotationStyle?.shapeType === 'rectangle' && (
+                  <rect
+                    x={shapePreview.x * scale}
+                    y={shapePreview.y * scale}
+                    width={shapePreview.width * scale}
+                    height={shapePreview.height * scale}
+                    stroke={annotationStyle?.strokeColor || '#FF0000'}
+                    strokeWidth={(annotationStyle?.strokeWidth || 2) * scale}
+                    fill={annotationStyle?.fillColor === 'transparent' ? 'none' : annotationStyle?.fillColor}
+                    fillOpacity={annotationStyle?.fillColor === 'transparent' ? 0 : 0.3}
+                    strokeDasharray="5,5"
+                  />
+                )}
+                {annotationStyle?.shapeType === 'ellipse' && (
+                  <ellipse
+                    cx={(shapePreview.x + shapePreview.width / 2) * scale}
+                    cy={(shapePreview.y + shapePreview.height / 2) * scale}
+                    rx={(shapePreview.width / 2) * scale}
+                    ry={(shapePreview.height / 2) * scale}
+                    stroke={annotationStyle?.strokeColor || '#FF0000'}
+                    strokeWidth={(annotationStyle?.strokeWidth || 2) * scale}
+                    fill={annotationStyle?.fillColor === 'transparent' ? 'none' : annotationStyle?.fillColor}
+                    fillOpacity={annotationStyle?.fillColor === 'transparent' ? 0 : 0.3}
+                    strokeDasharray="5,5"
+                  />
+                )}
+                {(annotationStyle?.shapeType === 'line' || annotationStyle?.shapeType === 'arrow') && (
+                  <line
+                    x1={shapeStart.x * scale}
+                    y1={shapeStart.y * scale}
+                    x2={(shapeStart.x + (shapePreview.x < shapeStart.x ? -shapePreview.width : shapePreview.width)) * scale}
+                    y2={(shapeStart.y + (shapePreview.y < shapeStart.y ? -shapePreview.height : shapePreview.height)) * scale}
+                    stroke={annotationStyle?.strokeColor || '#FF0000'}
+                    strokeWidth={(annotationStyle?.strokeWidth || 2) * scale}
+                    strokeDasharray="5,5"
+                  />
+                )}
+              </svg>
             )}
           </div>
         );

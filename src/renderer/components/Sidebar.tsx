@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { FileText, Bookmark, ChevronRight, ChevronDown } from 'lucide-react';
-import { PDFDocument } from '../types';
+import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2 } from 'lucide-react';
+import { PDFDocument, Annotation } from '../types';
 
-export type SidebarTab = 'pages' | 'bookmarks';
+export type SidebarTab = 'pages' | 'bookmarks' | 'annotations';
 
 interface OutlineItem {
   title: string;
@@ -18,6 +18,8 @@ interface SidebarProps {
   currentPage: number;
   onPageSelect: (page: number) => void;
   onReorderPages?: (fromIndex: number, toIndex: number) => void;
+  onDeleteAnnotation?: (pageIndex: number, annotationId: string) => void;
+  onSelectAnnotation?: (annotationId: string) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -26,6 +28,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   currentPage,
   onPageSelect,
   onReorderPages,
+  onDeleteAnnotation,
+  onSelectAnnotation,
 }) => {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<SidebarTab>('pages');
@@ -34,8 +38,24 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
+  const [annotationFilter, setAnnotationFilter] = useState<string>('all');
   const containerRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // Compute flat annotation list across all pages
+  const allAnnotations = useMemo(() => {
+    if (!document) return [];
+    const items: Array<{ annotation: Annotation; pageIndex: number }> = [];
+    document.pages.forEach((page, idx) => {
+      page.annotations.forEach((ann) => {
+        items.push({ annotation: ann, pageIndex: idx + 1 });
+      });
+    });
+    if (annotationFilter !== 'all') {
+      return items.filter((item) => item.annotation.type === annotationFilter);
+    }
+    return items;
+  }, [document, annotationFilter]);
 
   // Generate thumbnails
   useEffect(() => {
@@ -247,6 +267,32 @@ const Sidebar: React.FC<SidebarProps> = ({
     });
   };
 
+  const getAnnotationIcon = (type: string) => {
+    switch (type) {
+      case 'text': return <Type size={13} />;
+      case 'image': return <Image size={13} />;
+      case 'highlight': return <Highlighter size={13} />;
+      case 'drawing': return <Pencil size={13} />;
+      case 'shape': return <Shapes size={13} />;
+      case 'note': return <StickyNote size={13} />;
+      case 'stamp': return <Stamp size={13} />;
+      default: return <MessageSquare size={13} />;
+    }
+  };
+
+  const getAnnotationLabel = (ann: Annotation): string => {
+    switch (ann.type) {
+      case 'text': return ann.content.slice(0, 30) || 'Text';
+      case 'image': return 'Image';
+      case 'highlight': return 'Highlight';
+      case 'drawing': return `Drawing (${ann.paths.length} stroke${ann.paths.length !== 1 ? 's' : ''})`;
+      case 'shape': return ann.shapeType.charAt(0).toUpperCase() + ann.shapeType.slice(1);
+      case 'note': return ann.content.slice(0, 30) || 'Empty note';
+      case 'stamp': return ann.text;
+      default: return 'Annotation';
+    }
+  };
+
   if (!visible) {
     return null;
   }
@@ -270,6 +316,14 @@ const Sidebar: React.FC<SidebarProps> = ({
         >
           <Bookmark size={14} />
           <span>Bookmarks</span>
+        </button>
+        <button
+          className={`sidebar-tab ${activeTab === 'annotations' ? 'active' : ''}`}
+          onClick={() => setActiveTab('annotations')}
+          title="Annotations"
+        >
+          <MessageSquare size={14} />
+          <span>Annotations</span>
         </button>
       </div>
 
@@ -313,6 +367,75 @@ const Sidebar: React.FC<SidebarProps> = ({
               <Bookmark size={24} />
               <p>No bookmarks</p>
               <span>This document has no outline or table of contents.</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Annotations Tab */}
+      {activeTab === 'annotations' && (
+        <div className="sidebar-content annotations-content">
+          {/* Filter bar */}
+          <div className="annotations-filter">
+            <select
+              className="annotations-filter-select"
+              value={annotationFilter}
+              onChange={(e) => setAnnotationFilter(e.target.value)}
+            >
+              <option value="all">All Types</option>
+              <option value="text">Text</option>
+              <option value="highlight">Highlights</option>
+              <option value="drawing">Drawings</option>
+              <option value="shape">Shapes</option>
+              <option value="note">Notes</option>
+              <option value="stamp">Stamps</option>
+              <option value="image">Images</option>
+            </select>
+            <span className="annotations-count">{allAnnotations.length}</span>
+          </div>
+
+          {allAnnotations.length > 0 ? (
+            <div className="annotations-list">
+              {allAnnotations.map(({ annotation, pageIndex }) => (
+                <div
+                  key={annotation.id}
+                  className="annotation-list-item"
+                  onClick={() => {
+                    onPageSelect(pageIndex);
+                    onSelectAnnotation?.(annotation.id);
+                  }}
+                >
+                  <span className="annotation-list-icon">
+                    {getAnnotationIcon(annotation.type)}
+                  </span>
+                  <div className="annotation-list-info">
+                    <span className="annotation-list-label">
+                      {getAnnotationLabel(annotation)}
+                    </span>
+                    <span className="annotation-list-page">
+                      Page {pageIndex}
+                    </span>
+                  </div>
+                  {onDeleteAnnotation && (
+                    <button
+                      className="annotation-list-delete"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteAnnotation(pageIndex, annotation.id);
+                      }}
+                      title="Delete annotation"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="outline-empty">
+              <MessageSquare size={24} />
+              <p>No annotations</p>
+              <span>{annotationFilter !== 'all' ? 'No matching annotations found.' : 'Use the toolbar to add annotations.'}</span>
             </div>
           )}
         </div>

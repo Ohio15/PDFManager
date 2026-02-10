@@ -41,6 +41,39 @@ export interface DrawingAnnotation {
   }>;
 }
 
+export interface ShapeAnnotation {
+  id: string;
+  type: 'shape';
+  pageIndex: number;
+  shapeType: 'rectangle' | 'ellipse' | 'arrow' | 'line';
+  position: Position;
+  size: Size;
+  strokeColor: string;
+  fillColor: string;
+  strokeWidth: number;
+  opacity: number;
+}
+
+export interface StickyNoteAnnotation {
+  id: string;
+  type: 'note';
+  pageIndex: number;
+  position: Position;
+  content: string;
+  color: string;
+}
+
+export interface StampAnnotation {
+  id: string;
+  type: 'stamp';
+  pageIndex: number;
+  position: Position;
+  stampType: 'approved' | 'rejected' | 'draft' | 'confidential' | 'final' | 'custom';
+  text: string;
+  color: string;
+  size: Size;
+}
+
 export interface HighlightAnnotation {
   id: string;
   type: 'highlight';
@@ -82,7 +115,10 @@ export type Annotation =
   | TextAnnotation
   | ImageAnnotation
   | DrawingAnnotation
-  | HighlightAnnotation;
+  | HighlightAnnotation
+  | ShapeAnnotation
+  | StickyNoteAnnotation
+  | StampAnnotation;
 
 export interface PDFPage {
   index: number;
@@ -100,6 +136,19 @@ export interface PDFDocument {
   pageCount: number;
   pages: PDFPage[];
   pdfData: Uint8Array;
+}
+
+export interface AnnotationStyle {
+  color: string;
+  strokeColor: string;
+  fillColor: string;
+  strokeWidth: number;
+  fontSize: number;
+  opacity: number;
+  shapeType: 'rectangle' | 'ellipse' | 'arrow' | 'line';
+  stampType: 'approved' | 'rejected' | 'draft' | 'confidential' | 'final' | 'custom';
+  stampText: string;
+  noteColor: string;
 }
 
 export interface HistoryEntry {

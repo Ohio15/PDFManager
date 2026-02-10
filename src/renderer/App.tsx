@@ -16,11 +16,12 @@ import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
 import PrintDialog from './components/PrintDialog';
 import SearchBar from './components/SearchBar';
 import ShortcutsDialog from './components/ShortcutsDialog';
+import AnnotationToolbar from './components/AnnotationToolbar';
 import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
 import { ToastContainer, useToast } from './components/Toast';
-import { PDFDocument } from './types';
+import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 
 declare global {
@@ -70,7 +71,7 @@ declare global {
   }
 }
 
-export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp';
 
 // Helper to convert Uint8Array to base64
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -110,6 +111,18 @@ const App: React.FC = () => {
   const [droppedFileDialogOpen, setDroppedFileDialogOpen] = useState(false);
   const [showConversionBar, setShowConversionBar] = useState(false);
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [annotationStyle, setAnnotationStyle] = useState<AnnotationStyle>({
+    color: '#000000',
+    strokeColor: '#FF0000',
+    fillColor: 'transparent',
+    strokeWidth: 2,
+    fontSize: 16,
+    opacity: 0.3,
+    shapeType: 'rectangle',
+    stampType: 'approved',
+    stampText: 'APPROVED',
+    noteColor: '#FFF9C4',
+  });
 
   const toast = useToast();
 
@@ -123,6 +136,10 @@ const App: React.FC = () => {
     addText,
     addImage,
     addHighlight,
+    addDrawing,
+    addShape,
+    addStickyNote,
+    addStamp,
     deletePage,
     reorderPages,
     rotatePage,
@@ -337,11 +354,15 @@ const App: React.FC = () => {
     setZoomMode('fit-page');
   }, [document, currentPage]);
 
+  const handleStyleChange = useCallback((updates: Partial<AnnotationStyle>) => {
+    setAnnotationStyle(prev => ({ ...prev, ...updates }));
+  }, []);
+
   const handleAddText = useCallback(() => {
     if (document) {
-      addText(currentPage, { x: 100, y: 100 }, 'New Text');
+      addText(currentPage, { x: 100, y: 100 }, 'New Text', annotationStyle.color, annotationStyle.fontSize);
     }
-  }, [document, currentPage, addText]);
+  }, [document, currentPage, addText, annotationStyle.color, annotationStyle.fontSize]);
 
   const handleAddImage = useCallback(async () => {
     const result = await window.electronAPI.openImageDialog();
@@ -646,6 +667,15 @@ const App: React.FC = () => {
           case 'e':
             handleToolChange('erase');
             break;
+          case 'd':
+            handleToolChange('draw');
+            break;
+          case 's':
+            handleToolChange('shape');
+            break;
+          case 'n':
+            handleToolChange('note');
+            break;
           case 'delete':
           case 'backspace':
             if (selectedAnnotationId) {
@@ -813,6 +843,12 @@ const App: React.FC = () => {
         disabled={!document}
       />
 
+      <AnnotationToolbar
+        currentTool={currentTool}
+        style={annotationStyle}
+        onStyleChange={handleStyleChange}
+      />
+
       <SearchBar
         isOpen={searchBarOpen}
         onClose={() => setSearchBarOpen(false)}
@@ -827,6 +863,8 @@ const App: React.FC = () => {
           currentPage={currentPage}
           onPageSelect={setCurrentPage}
           onReorderPages={reorderPages}
+          onDeleteAnnotation={deleteAnnotation}
+          onSelectAnnotation={(id) => setSelectedAnnotationId(id)}
         />
 
         {document ? (
@@ -843,8 +881,13 @@ const App: React.FC = () => {
               onUpdateTextItem={updateTextItem}
               onMarkTextDeleted={markTextDeleted}
               onSelectionChange={handleSelectionChange}
-              onAddHighlight={addHighlight}
-              onAddText={(pageIndex, position) => addText(pageIndex, position, 'New Text')}
+              onAddHighlight={(pageIndex, rects) => addHighlight(pageIndex, rects, annotationStyle.color)}
+              onAddText={(pageIndex, position) => addText(pageIndex, position, 'New Text', annotationStyle.color, annotationStyle.fontSize)}
+              onAddDrawing={addDrawing}
+              onAddShape={addShape}
+              onAddStickyNote={addStickyNote}
+              onAddStamp={addStamp}
+              annotationStyle={annotationStyle}
               loading={loading}
             />
             <ConversionActionBar

@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { PDFDocument as PDFLib, rgb, StandardFonts, PDFFont } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { PDFDocument, Annotation, Position, TextAnnotation, ImageAnnotation, HighlightAnnotation, PDFTextItem } from '../types';
+import { PDFDocument, Annotation, Position, Size, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, PDFTextItem } from '../types';
 
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
@@ -729,7 +729,7 @@ export function usePDFDocument() {
   }, [document]);
 
   const addText = useCallback(
-    (pageIndex: number, position: Position, content: string): string | undefined => {
+    (pageIndex: number, position: Position, content: string, color: string = '#000000', fontSize: number = 16): string | undefined => {
       if (!document) return undefined;
 
       const annotation: TextAnnotation = {
@@ -738,9 +738,9 @@ export function usePDFDocument() {
         pageIndex,
         position,
         content,
-        fontSize: 16,
+        fontSize,
         fontFamily: 'Helvetica',
-        color: '#000000',
+        color,
       };
 
       const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
@@ -875,6 +875,218 @@ export function usePDFDocument() {
               ...newPages[pageIndex - 1],
               annotations: previousAnnotations,
             };
+            return { ...prev, pages: newPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: [...newPages[pageIndex - 1].annotations, annotation],
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
+  const addDrawing = useCallback(
+    (pageIndex: number, paths: DrawingAnnotation['paths']) => {
+      if (!document || paths.length === 0) return;
+
+      const annotation: DrawingAnnotation = {
+        id: `drawing-${Date.now()}`,
+        type: 'drawing',
+        pageIndex,
+        paths,
+      };
+
+      const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[pageIndex - 1] = {
+          ...newPages[pageIndex - 1],
+          annotations: [...newPages[pageIndex - 1].annotations, annotation],
+        };
+        return { ...prev, pages: newPages };
+      });
+
+      addToHistory({
+        type: 'addDrawing',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = { ...newPages[pageIndex - 1], annotations: previousAnnotations };
+            return { ...prev, pages: newPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: [...newPages[pageIndex - 1].annotations, annotation],
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
+  const addShape = useCallback(
+    (pageIndex: number, shapeType: ShapeAnnotation['shapeType'], position: Position, size: Size, strokeColor: string, fillColor: string, strokeWidth: number) => {
+      if (!document) return;
+
+      const annotation: ShapeAnnotation = {
+        id: `shape-${Date.now()}`,
+        type: 'shape',
+        pageIndex,
+        shapeType,
+        position,
+        size,
+        strokeColor,
+        fillColor,
+        strokeWidth,
+        opacity: 1,
+      };
+
+      const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[pageIndex - 1] = {
+          ...newPages[pageIndex - 1],
+          annotations: [...newPages[pageIndex - 1].annotations, annotation],
+        };
+        return { ...prev, pages: newPages };
+      });
+
+      addToHistory({
+        type: 'addShape',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = { ...newPages[pageIndex - 1], annotations: previousAnnotations };
+            return { ...prev, pages: newPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: [...newPages[pageIndex - 1].annotations, annotation],
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
+  const addStickyNote = useCallback(
+    (pageIndex: number, position: Position, color: string = '#FFF9C4') => {
+      if (!document) return;
+
+      const annotation: StickyNoteAnnotation = {
+        id: `note-${Date.now()}`,
+        type: 'note',
+        pageIndex,
+        position,
+        content: '',
+        color,
+      };
+
+      const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[pageIndex - 1] = {
+          ...newPages[pageIndex - 1],
+          annotations: [...newPages[pageIndex - 1].annotations, annotation],
+        };
+        return { ...prev, pages: newPages };
+      });
+
+      addToHistory({
+        type: 'addStickyNote',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = { ...newPages[pageIndex - 1], annotations: previousAnnotations };
+            return { ...prev, pages: newPages };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = {
+              ...newPages[pageIndex - 1],
+              annotations: [...newPages[pageIndex - 1].annotations, annotation],
+            };
+            return { ...prev, pages: newPages };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
+  const addStamp = useCallback(
+    (pageIndex: number, position: Position, stampType: StampAnnotation['stampType'], text: string, color: string) => {
+      if (!document) return;
+
+      // Calculate stamp size based on text length
+      const width = Math.max(120, text.length * 14 + 40);
+      const height = 40;
+
+      const annotation: StampAnnotation = {
+        id: `stamp-${Date.now()}`,
+        type: 'stamp',
+        pageIndex,
+        position,
+        stampType,
+        text,
+        color,
+        size: { width, height },
+      };
+
+      const previousAnnotations = [...document.pages[pageIndex - 1].annotations];
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[pageIndex - 1] = {
+          ...newPages[pageIndex - 1],
+          annotations: [...newPages[pageIndex - 1].annotations, annotation],
+        };
+        return { ...prev, pages: newPages };
+      });
+
+      addToHistory({
+        type: 'addStamp',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...prev.pages];
+            newPages[pageIndex - 1] = { ...newPages[pageIndex - 1], annotations: previousAnnotations };
             return { ...prev, pages: newPages };
           });
         },
@@ -1223,6 +1435,10 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     addText,
     addImage,
     addHighlight,
+    addDrawing,
+    addShape,
+    addStickyNote,
+    addStamp,
     deletePage,
     reorderPages,
     rotatePage,

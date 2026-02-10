@@ -3636,3 +3636,448 @@ input:focus:not(:focus-visible) {
     box-shadow: none !important;
   }
 }
+
+/* ============================================
+   Annotation Toolbar (Properties Bar)
+   ============================================ */
+.annotation-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: var(--surface-color);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.annotation-toolbar-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.annotation-toolbar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: fit-content;
+}
+
+.color-presets {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: nowrap;
+}
+
+.color-preset {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.color-preset:hover {
+  transform: scale(1.2);
+}
+
+.color-preset.active {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 1px var(--primary-color);
+}
+
+.color-preset.no-fill {
+  background: var(--surface-color) !important;
+  border: 2px dashed var(--border-color);
+  position: relative;
+}
+
+.color-preset.no-fill::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--text-muted);
+  transform: rotate(-45deg);
+}
+
+.color-preset.no-fill.active {
+  border-color: var(--primary-color);
+  border-style: dashed;
+}
+
+.color-custom-input {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.color-custom-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.color-custom-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.stroke-width-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stroke-width-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  min-width: 32px;
+  text-align: center;
+}
+
+.annotation-toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--surface-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  padding: 0;
+}
+
+.annotation-toolbar-btn:hover {
+  background: var(--background-color);
+  color: var(--text-primary);
+}
+
+.annotation-toolbar-btn.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+.shape-type-selector {
+  display: flex;
+  gap: 2px;
+}
+
+.stamp-type-selector {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+.stamp-type-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 2px solid;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.stamp-type-btn:hover {
+  opacity: 0.8;
+}
+
+.stamp-custom-input {
+  width: 120px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.stamp-custom-input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+/* ============================================
+   Drawing Annotations
+   ============================================ */
+.drawing-annotation {
+  z-index: 1;
+}
+
+.drawing-annotation.selected path {
+  filter: drop-shadow(0 0 2px var(--primary-color));
+}
+
+.drawing-preview {
+  z-index: 10;
+}
+
+/* ============================================
+   Shape Annotations
+   ============================================ */
+.shape-annotation {
+  z-index: 1;
+}
+
+.shape-annotation.selected {
+  filter: drop-shadow(0 0 2px var(--primary-color));
+}
+
+/* ============================================
+   Sticky Note Annotations
+   ============================================ */
+.sticky-note-annotation {
+  position: absolute;
+  z-index: 5;
+  cursor: pointer;
+}
+
+.sticky-note-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  color: #666;
+  transition: transform 0.15s;
+}
+
+.sticky-note-icon:hover {
+  transform: scale(1.1);
+}
+
+.sticky-note-annotation.selected .sticky-note-icon {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 1px;
+}
+
+.sticky-note-editor {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  width: 180px;
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  z-index: 20;
+  padding: 8px;
+}
+
+.sticky-note-textarea {
+  width: 100%;
+  min-height: 80px;
+  border: none;
+  background: transparent;
+  color: #333;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+  outline: none;
+  font-family: inherit;
+}
+
+.sticky-note-preview {
+  position: absolute;
+  top: 32px;
+  left: 0;
+  max-width: 160px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #333;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ============================================
+   Stamp Annotations
+   ============================================ */
+.stamp-annotation {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 3px solid;
+  border-radius: 4px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-family: 'Arial Black', 'Impact', sans-serif;
+  opacity: 0.7;
+  transform: rotate(-12deg);
+  z-index: 4;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.stamp-annotation.selected {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+/* ============================================
+   Tool Mode Cursors (New Tools)
+   ============================================ */
+.pdf-page-container.draw-mode {
+  cursor: crosshair;
+}
+
+.pdf-page-container.shape-mode {
+  cursor: crosshair;
+}
+
+.pdf-page-container.note-mode {
+  cursor: cell;
+}
+
+.pdf-page-container.stamp-mode {
+  cursor: cell;
+}
+
+/* ============================================
+   Annotations List Panel
+   ============================================ */
+.annotations-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.annotations-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.annotations-filter-select {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 11px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--surface-color);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.annotations-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--background-color);
+  padding: 2px 6px;
+  border-radius: 10px;
+  min-width: 20px;
+  text-align: center;
+}
+
+.annotations-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.annotation-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.15s;
+}
+
+.annotation-list-item:hover {
+  background: var(--background-color);
+}
+
+.annotation-list-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  background: var(--background-color);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.annotation-list-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.annotation-list-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.annotation-list-page {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.annotation-list-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.annotation-list-item:hover .annotation-list-delete {
+  opacity: 1;
+}
+
+.annotation-list-delete:hover {
+  background: var(--danger-color, #ef4444);
+  color: white;
+}

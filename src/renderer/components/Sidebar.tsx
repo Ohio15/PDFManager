@@ -345,35 +345,44 @@ const Sidebar: React.FC<SidebarProps> = ({
       {/* Pages Tab */}
       {activeTab === 'pages' && (
         <div className="sidebar-content" ref={containerRef}>
-          {thumbnails.map((thumbnail, index) => (
-            <div
-              key={index}
-              className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${dropIndex === index && dragIndex !== index ? 'drop-target' : ''}`}
-              onClick={() => onPageSelect(index + 1)}
-              draggable={!!onReorderPages}
-              onDragStart={(e) => handleDragStart(e, index)}
-              onDragEnd={handleDragEnd}
-              onDragOver={(e) => handleDragOver(e, index)}
-              onDrop={(e) => handleDrop(e, index)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                setPageContextMenu({ isOpen: true, x: e.clientX, y: e.clientY, pageIndex: index + 1 });
-              }}
-            >
-              <img
-                src={thumbnail}
-                alt={`Page ${index + 1}`}
-                style={{
-                  transform: document?.pages[index]?.rotation
-                    ? `rotate(${document.pages[index].rotation}deg)`
-                    : undefined,
+          {(document?.pages || []).map((page, index) => {
+            const thumbnail = thumbnails[index];
+            return (
+              <div
+                key={index}
+                className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${dropIndex === index && dragIndex !== index ? 'drop-target' : ''}`}
+                onClick={() => onPageSelect(index + 1)}
+                draggable={!!onReorderPages}
+                onDragStart={(e) => handleDragStart(e, index)}
+                onDragEnd={handleDragEnd}
+                onDragOver={(e) => handleDragOver(e, index)}
+                onDrop={(e) => handleDrop(e, index)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setPageContextMenu({ isOpen: true, x: e.clientX, y: e.clientY, pageIndex: index + 1 });
                 }}
-                draggable={false}
-              />
-              <span className="page-number">{index + 1}</span>
-            </div>
-          ))}
+              >
+                {thumbnail ? (
+                  <img
+                    src={thumbnail}
+                    alt={`Page ${index + 1}`}
+                    style={{
+                      transform: page.rotation
+                        ? `rotate(${page.rotation}deg)`
+                        : undefined,
+                    }}
+                    draggable={false}
+                  />
+                ) : (
+                  <div className="thumbnail-skeleton">
+                    <div className="thumbnail-skeleton-shimmer" />
+                  </div>
+                )}
+                <span className="page-number">{index + 1}</span>
+              </div>
+            );
+          })}
         </div>
       )}
 

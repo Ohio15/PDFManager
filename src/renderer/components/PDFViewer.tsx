@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback, useState } from 'react';
+import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, AnnotationStyle, PDFTextItem, Position, Size } from '../types';
@@ -90,6 +90,13 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
   const [renderedPages, setRenderedPages] = useState<Map<number, HTMLCanvasElement>>(new Map());
+  const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
+  const renderingRef = useRef<Set<number>>(new Set());
+  const renderedPagesRef = useRef(renderedPages);
+  renderedPagesRef.current = renderedPages;
+  const scaleRef = useRef(zoom / 100);
+  const pagesRef = useRef(document.pages);
+  pagesRef.current = document.pages;
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -123,6 +130,7 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const [editingNote, setEditingNote] = useState<string | null>(null);
 
   const scale = zoom / 100;
+  scaleRef.current = scale;
 
   // Notify parent when selection changes
   useEffect(() => {
@@ -142,49 +150,112 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     }
   }, [editingAnnotation]);
 
+  // Load PDF document proxy (only when pdfData changes)
   useEffect(() => {
-    const renderPages = async () => {
-      console.log('Starting PDF render, data length:', document.pdfData?.length);
-      if (!document.pdfData || document.pdfData.length === 0) {
-        console.error('No PDF data available');
-        return;
-      }
+    const loadPdf = async () => {
+      if (!document.pdfData || document.pdfData.length === 0) return;
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
-        console.log('PDF loaded, pages:', pdfDoc.numPages);
-        const newRenderedPages = new Map<number, HTMLCanvasElement>();
-
-        for (let i = 1; i <= pdfDoc.numPages; i++) {
-          const page = await pdfDoc.getPage(i);
-          const viewport = page.getViewport({ scale, rotation: document.pages[i - 1]?.rotation || 0 });
-          console.log(`Rendering page ${i}, viewport:`, viewport.width, 'x', viewport.height);
-
-          const canvas = window.document.createElement('canvas');
-          const context = canvas.getContext('2d');
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-
-          await page.render({
-            canvasContext: context!,
-            viewport,
-          }).promise;
-
-          newRenderedPages.set(i, canvas);
-          console.log(`Page ${i} rendered successfully`);
-        }
-
-        setRenderedPages(newRenderedPages);
-        console.log('All pages rendered, total:', newRenderedPages.size);
+        const pdf = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+        pdfDocRef.current = pdf;
+        renderedPagesRef.current = new Map();
+        setRenderedPages(new Map());
+        renderingRef.current.clear();
       } catch (error) {
-        console.error('Failed to render PDF:', error);
+        console.error('Failed to load PDF:', error);
       }
     };
+    loadPdf();
+  }, [document.pdfData]);
 
-    if (document.pdfData) {
-      renderPages();
+  // Render a single page lazily
+  const renderPage = useCallback(async (pageNum: number) => {
+    const pdfDoc = pdfDocRef.current;
+    if (!pdfDoc || renderingRef.current.has(pageNum) || renderedPagesRef.current.has(pageNum)) return;
+
+    renderingRef.current.add(pageNum);
+    try {
+      const currentScale = scaleRef.current;
+      const page = await pdfDoc.getPage(pageNum);
+      const rotation = pagesRef.current[pageNum - 1]?.rotation || 0;
+      const viewport = page.getViewport({ scale: currentScale, rotation });
+
+      const canvas = window.document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d')!;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      // Discard if scale changed during async render
+      if (scaleRef.current !== currentScale) {
+        renderingRef.current.delete(pageNum);
+        return;
+      }
+
+      setRenderedPages(prev => new Map(prev).set(pageNum, canvas));
+    } catch (error) {
+      console.error(`Failed to render page ${pageNum}:`, error);
+    } finally {
+      renderingRef.current.delete(pageNum);
     }
-  }, [document.pdfData, scale, document.pages]);
+  }, []);
+
+  // Clear rendered pages when zoom or page rotation changes
+  const rotationsKey = useMemo(() => document.pages.map(p => p.rotation).join(','), [document.pages]);
+  useEffect(() => {
+    renderedPagesRef.current = new Map();
+    setRenderedPages(new Map());
+    renderingRef.current.clear();
+
+    // Re-render currently visible pages after clearing
+    if (containerRef.current && pdfDocRef.current) {
+      const viewerRect = containerRef.current.getBoundingClientRect();
+      setTimeout(() => {
+        containerRef.current?.querySelectorAll('[data-page]').forEach(el => {
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom > viewerRect.top - 500 && rect.top < viewerRect.bottom + 500) {
+            const pageNum = parseInt(el.getAttribute('data-page') || '0');
+            if (pageNum > 0) renderPage(pageNum);
+          }
+        });
+      }, 0);
+    }
+  }, [scale, rotationsKey, renderPage]);
+
+  // IntersectionObserver for lazy page rendering
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const pageNum = parseInt(entry.target.getAttribute('data-page') || '0');
+            if (pageNum > 0) {
+              renderPage(pageNum);
+              // Pre-render buffer pages (2 above and below)
+              for (let i = Math.max(1, pageNum - 2); i <= Math.min(document.pageCount, pageNum + 2); i++) {
+                if (i !== pageNum) renderPage(i);
+              }
+            }
+          }
+        });
+      },
+      { root: containerRef.current, rootMargin: '500px 0px' }
+    );
+
+    // Delay slightly to ensure DOM is ready
+    const timer = setTimeout(() => {
+      containerRef.current?.querySelectorAll('[data-page]').forEach(el => {
+        observer.observe(el);
+      });
+    }, 50);
+
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [document.pageCount, renderPage]);
 
   const handleScroll = useCallback(() => {
     if (!containerRef.current) return;
@@ -1101,18 +1172,24 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       {loading && (
         <div className="loading-overlay">
           <div className="spinner" />
+          <span className="loading-overlay-text">Loading document...</span>
         </div>
       )}
 
-      {Array.from(renderedPages.entries()).map(([pageNum, canvas]) => {
-        const page = document.pages[pageNum - 1];
+      {document.pages.map((page, i) => {
+        const pageNum = i + 1;
+        const canvas = renderedPages.get(pageNum);
+        const pageWidth = page.width * scale;
+        const pageHeight = page.height * scale;
+
         return (
           <div
             key={pageNum}
+            data-page={pageNum}
             className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''}`}
             style={{
-              width: canvas.width,
-              height: canvas.height,
+              width: pageWidth,
+              height: pageHeight,
             }}
             onClick={() => { setSelectedAnnotation(null); setEditingAnnotation(null); setEditingTextItem(null); setEditingNote(null); }}
             onMouseDown={(e) => handlePageMouseDown(e, pageNum)}
@@ -1125,17 +1202,23 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
               if (shapeStart) { setShapeStart(null); setShapePreview(null); }
             }}
           >
-            <canvas
-              className="pdf-page-canvas"
-              ref={(el) => {
-                if (el) {
-                  const ctx = el.getContext('2d');
-                  el.width = canvas.width;
-                  el.height = canvas.height;
-                  ctx?.drawImage(canvas, 0, 0);
-                }
-              }}
-            />
+            {canvas ? (
+              <canvas
+                className="pdf-page-canvas"
+                ref={(el) => {
+                  if (el) {
+                    const ctx = el.getContext('2d');
+                    el.width = canvas.width;
+                    el.height = canvas.height;
+                    ctx?.drawImage(canvas, 0, 0);
+                  }
+                }}
+              />
+            ) : (
+              <div className="page-skeleton" style={{ width: pageWidth, height: pageHeight }}>
+                <div className="page-skeleton-shimmer" />
+              </div>
+            )}
             <div
               className={`annotation-layer ${currentTool === 'select' || currentTool === 'erase' ? 'active' : ''}`}
             >

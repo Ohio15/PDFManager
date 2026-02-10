@@ -23,6 +23,7 @@ import PasswordDialog from './components/PasswordDialog';
 import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
+import OnboardingTour from './components/OnboardingTour';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
@@ -123,6 +124,7 @@ const App: React.FC = () => {
   const [droppedFileDialogOpen, setDroppedFileDialogOpen] = useState(false);
   const [showConversionBar, setShowConversionBar] = useState(false);
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [onboardingActive, setOnboardingActive] = useState(false);
   const [annotationStyle, setAnnotationStyle] = useState<AnnotationStyle>({
     color: '#000000',
     strokeColor: '#FF0000',
@@ -207,6 +209,12 @@ const App: React.FC = () => {
           root.classList.toggle('dark', prefersDark);
         } else {
           root.classList.toggle('dark', theme === 'dark');
+        }
+
+        // Check if first launch for onboarding tour
+        const hasSeenTour = await window.electronAPI.getStore('hasSeenOnboarding');
+        if (!hasSeenTour) {
+          setOnboardingActive(true);
         }
 
         // Load recent files for welcome screen
@@ -361,6 +369,11 @@ const App: React.FC = () => {
   const handleClearRecentFiles = useCallback(async () => {
     await window.electronAPI.clearRecentFiles();
     setRecentFiles([]);
+  }, []);
+
+  const handleOnboardingComplete = useCallback(async () => {
+    setOnboardingActive(false);
+    await window.electronAPI.setStore('hasSeenOnboarding', true);
   }, []);
 
   const handleFileDrop = useCallback(async (filePath: string) => {
@@ -1189,6 +1202,11 @@ const App: React.FC = () => {
         filePath={droppedFilePath}
         libreOfficeAvailable={libreOfficeAvailable}
         onConvertAndOpen={handleConvertedFileOpen}
+      />
+
+      <OnboardingTour
+        active={onboardingActive}
+        onComplete={handleOnboardingComplete}
       />
     </div>
   );

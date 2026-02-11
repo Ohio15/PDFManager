@@ -5,6 +5,7 @@
  * - DCTDecode (JPEG) streams: raw bytes ARE the JPEG — extracted directly
  * - FlateDecode (PNG-compatible) streams: decompressed and wrapped as PNG
  * - Preserves original format to avoid re-encoding bloat
+ * - No filtering — every image is extracted and included in the DOCX
  */
 
 import {
@@ -12,7 +13,6 @@ import {
   PDFName,
   PDFDict,
   PDFRawStream,
-  PDFArray,
   PDFRef,
   PDFStream,
   decodePDFRawStream,
@@ -41,9 +41,6 @@ function pngCrc32(data: Uint8Array): number {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
-/**
- * Write a 4-byte big-endian unsigned integer into a buffer at the given offset.
- */
 function writeUint32BE(buf: Uint8Array, value: number, offset: number): void {
   buf[offset] = (value >>> 24) & 0xFF;
   buf[offset + 1] = (value >>> 16) & 0xFF;
@@ -61,7 +58,6 @@ function wrapAsPng(
   colorType: number,
   bitsPerComponent: number
 ): Uint8Array {
-  // colorType: 0 = Grayscale, 2 = RGB, 6 = RGBA
   const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : 4;
   const bytesPerPixel = channels * (bitsPerComponent / 8);
   const rowBytes = Math.ceil(width * bytesPerPixel);
@@ -69,7 +65,7 @@ function wrapAsPng(
   // Add filter byte (0 = None) to each row
   const filteredData = new Uint8Array(height * (rowBytes + 1));
   for (let row = 0; row < height; row++) {
-    filteredData[row * (rowBytes + 1)] = 0; // filter: None
+    filteredData[row * (rowBytes + 1)] = 0;
     const srcOffset = row * rowBytes;
     const dstOffset = row * (rowBytes + 1) + 1;
     filteredData.set(rawPixels.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
@@ -77,24 +73,21 @@ function wrapAsPng(
 
   const compressedData = pako.deflate(filteredData);
 
-  // Build PNG file
   const pngSignature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
-  // IHDR chunk (13 bytes data)
   const ihdrData = new Uint8Array(13);
   writeUint32BE(ihdrData, width, 0);
   writeUint32BE(ihdrData, height, 4);
-  ihdrData[8] = bitsPerComponent; // bit depth
+  ihdrData[8] = bitsPerComponent;
   ihdrData[9] = colorType;
-  ihdrData[10] = 0; // compression method
-  ihdrData[11] = 0; // filter method
-  ihdrData[12] = 0; // interlace method
+  ihdrData[10] = 0;
+  ihdrData[11] = 0;
+  ihdrData[12] = 0;
 
   const ihdrChunk = buildPngChunk('IHDR', ihdrData);
   const idatChunk = buildPngChunk('IDAT', compressedData);
   const iendChunk = buildPngChunk('IEND', new Uint8Array(0));
 
-  // Concatenate
   const totalLength = pngSignature.length + ihdrChunk.length + idatChunk.length + iendChunk.length;
   const png = new Uint8Array(totalLength);
   let offset = 0;
@@ -107,36 +100,16 @@ function wrapAsPng(
 }
 
 function buildPngChunk(type: string, data: Uint8Array): Uint8Array {
-  // chunk = length(4) + type(4) + data + crc(4)
   const chunk = new Uint8Array(12 + data.length);
   writeUint32BE(chunk, data.length, 0);
-
-  // Type bytes
   for (let i = 0; i < 4; i++) {
     chunk[4 + i] = type.charCodeAt(i);
   }
-
-  // Data
   chunk.set(data, 8);
-
-  // CRC over type + data
   const crcInput = chunk.subarray(4, 8 + data.length);
   const crc = pngCrc32(crcInput);
   writeUint32BE(chunk, crc, 8 + data.length);
-
   return chunk;
-}
-
-/**
- * Resolve a value from a PDF dictionary, following PDFRef references.
- */
-function resolveValue(dict: PDFDict, key: PDFName, pdfDoc: PDFDocument): any {
-  const val = dict.get(key);
-  if (!val) return undefined;
-  if (val instanceof PDFRef) {
-    return pdfDoc.context.lookup(val);
-  }
-  return val;
 }
 
 /**
@@ -152,111 +125,8 @@ function getNumber(obj: any): number | undefined {
 }
 
 /**
- * Count unique colors in raw pixel data by sampling.
- * Samples up to ~10,000 pixels for performance on large images.
- * Returns the number of distinct colors found (capped once we exceed a threshold).
- */
-function countUniqueColors(
-  rawPixels: Uint8Array,
-  width: number,
-  height: number,
-  channels: number
-): number {
-  const totalPixels = width * height;
-  // Sample every Nth pixel — at most ~10,000 samples
-  const step = Math.max(1, Math.floor(totalPixels / 10000));
-  const colors = new Set<number>();
-
-  for (let i = 0; i < totalPixels; i += step) {
-    const offset = i * channels;
-    if (offset + Math.min(channels, 3) > rawPixels.length) break;
-
-    // Pack up to 3 color components into a single 24-bit number
-    let color = 0;
-    for (let c = 0; c < channels && c < 3; c++) {
-      color = (color << 8) | rawPixels[offset + c];
-    }
-    colors.add(color);
-
-    // Early exit: many colors = real content, no need to keep counting
-    if (colors.size > 50) return colors.size;
-  }
-
-  return colors.size;
-}
-
-/**
- * Determine if a decoded image is UI chrome based on pixel color analysis.
- *
- * Rules (applied in order):
- * 1. Unique colors = 1 → always UI chrome. A single-color image is a solid fill.
- * 2. Unique colors ≤ 5 AND aspect ratio > 6:1 → UI chrome (borders, separators, thin bars).
- * 3. Unique colors ≤ 10 AND total pixels < 50,000 → UI chrome (dropdown arrows, checkbox outlines).
- * 4. Compressed size < 2000 AND widget-like dimensions → UI chrome (rasterized form elements).
- * 5. Everything else → real content.
- */
-function isUIChromeByPixels(
-  rawPixels: Uint8Array,
-  width: number,
-  height: number,
-  channels: number,
-  compressedSize: number
-): boolean {
-  const uniqueColors = countUniqueColors(rawPixels, width, height, channels);
-
-  // Rule 1: Single color = solid fill — always UI chrome regardless of dimensions
-  if (uniqueColors === 1) return true;
-
-  // Rule 2: Very few colors + extreme aspect ratio = border/separator/thin fill bar
-  const aspect = Math.max(width / height, height / width);
-  if (uniqueColors <= 5 && aspect > 6) return true;
-
-  // Rule 3: Few colors + small total pixel area = small UI element
-  const totalPixels = width * height;
-  if (uniqueColors <= 10 && totalPixels < 50000) return true;
-
-  // Rule 4: Small compressed size + widget-like dimensions = rasterized input box/button
-  if (compressedSize < 2000) {
-    const isWidgetSized =
-      (width >= 50 && width <= 500 && height >= 40 && height <= 100) ||
-      (height >= 50 && height <= 500 && width >= 40 && width <= 100);
-    if (isWidgetSized) return true;
-  }
-
-  // Rule 5: Short height + few colors = rasterized form field outline/input box
-  // These are the rasterized outlines of form widgets (height 20-80, width 500-1400, 6-21 colors)
-  if (height < 80 && uniqueColors < 30) return true;
-
-  // Rule 6: Pass everything else through
-  return false;
-}
-
-/**
- * Check if a JPEG image is UI chrome using compression ratio as proxy.
- * Real photographs compress to ~0.5-3 bytes/pixel.
- * Solid-color or near-solid JPEGs compress to < 0.01 bytes/pixel.
- */
-function isUIChromeJpeg(
-  jpegData: Uint8Array,
-  width: number,
-  height: number
-): boolean {
-  const totalPixels = width * height;
-  if (totalPixels === 0) return true;
-  const bytesPerPixel = jpegData.length / totalPixels;
-
-  // Extremely low compression ratio → near-solid fill
-  if (bytesPerPixel < 0.02) return true;
-
-  // Very thin or very small
-  if (width <= 3 || height <= 3) return true;
-  if (width <= 15 && height <= 15) return true;
-
-  return false;
-}
-
-/**
  * Extract all images from a single PDF page.
+ * Every valid image XObject is extracted — no filtering.
  */
 export async function extractPageImages(
   pdfDoc: PDFDocument,
@@ -288,7 +158,6 @@ export async function extractPageImages(
 
   if (!xObjectDict || !(xObjectDict instanceof PDFDict)) return images;
 
-  // Iterate all XObjects
   const entries = xObjectDict.entries();
   let imageIndex = 0;
 
@@ -304,22 +173,18 @@ export async function extractPageImages(
       const dict = stream instanceof PDFRawStream ? stream.dict : (stream as any).dict;
       if (!dict) continue;
 
-      // Check subtype is Image
       const subtype = dict.get(PDFName.of('Subtype'));
       if (!subtype || subtype.toString() !== '/Image') continue;
 
-      // Get image dimensions
       const widthObj = dict.get(PDFName.of('Width'));
       const heightObj = dict.get(PDFName.of('Height'));
       const width = getNumber(widthObj) ?? 0;
       const height = getNumber(heightObj) ?? 0;
       if (width === 0 || height === 0) continue;
 
-      // Determine filter type
       const filterObj = dict.get(PDFName.of('Filter'));
       const filterName = filterObj ? filterObj.toString() : '';
 
-      // Get color space for PNG wrapping
       const colorSpaceObj = dict.get(PDFName.of('ColorSpace'));
       const colorSpaceName = colorSpaceObj ? colorSpaceObj.toString() : '/DeviceRGB';
 
@@ -337,10 +202,6 @@ export async function extractPageImages(
           const decoded = decodePDFRawStream(stream as PDFRawStream);
           imageData = decoded.decode();
         }
-
-        // Filter UI chrome JPEGs using compression ratio
-        if (isUIChromeJpeg(imageData, width, height)) continue;
-
         mimeType = 'image/jpeg';
       } else {
         // Other filters (FlateDecode, etc.) — decode and wrap as PNG
@@ -361,25 +222,13 @@ export async function extractPageImages(
           continue; // Skip images we can't decode
         }
 
-        // Determine PNG color type from PDF color space
         let colorType = 2; // RGB default
-        let channels = 3;
         if (colorSpaceName === '/DeviceGray' || colorSpaceName.includes('DeviceGray')) {
-          colorType = 0; // Grayscale
-          channels = 1;
+          colorType = 0;
         } else if (colorSpaceName === '/DeviceCMYK' || colorSpaceName.includes('DeviceCMYK')) {
-          // Convert CMYK to RGB
           rawPixels = cmykToRgb(rawPixels, width, height);
           colorType = 2;
-          channels = 3;
         }
-
-        // Get compressed size for Rule 4 heuristic
-        const compressedStreamSize = stream instanceof PDFRawStream
-          ? stream.contents.length : 0;
-
-        // Filter UI chrome using pixel color analysis
-        if (isUIChromeByPixels(rawPixels, width, height, channels, compressedStreamSize)) continue;
 
         imageData = wrapAsPng(rawPixels, width, height, colorType, bitsPerComponent);
         mimeType = 'image/png';
@@ -393,13 +242,12 @@ export async function extractPageImages(
         mimeType,
         width,
         height,
-        x: 0, // Position will be refined if CTM data is available
-        y: imageIndex * height, // Stack vertically by default
+        x: 0,
+        y: imageIndex * height,
       });
 
       imageIndex++;
     } catch {
-      // Skip problematic images silently
       continue;
     }
   }

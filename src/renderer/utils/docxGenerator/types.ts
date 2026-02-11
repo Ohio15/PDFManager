@@ -35,6 +35,10 @@ export interface DocxParagraph {
   pageBreakBefore?: boolean;
   /** Y position in PDF points (top-left origin) for element interleaving */
   yPosition?: number;
+  /** X position of leftmost text item in PDF points */
+  minX?: number;
+  /** Form fields to emit inline within this paragraph */
+  inlineFormFields?: Array<{ field: DocxFormField; position: 'before' | 'after' }>;
 }
 
 /** An image to embed in the DOCX */

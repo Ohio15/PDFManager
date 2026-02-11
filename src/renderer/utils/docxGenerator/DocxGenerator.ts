@@ -177,6 +177,8 @@ export async function generateDocx(
   const imageHashMap = new Map<string, { rId: string; fileName: string }>();
   // Track unique images for ZIP packaging (only one copy per hash)
   const uniqueImages: DocxImage[] = [];
+  // Track whether any form fields were found for document protection
+  let documentHasFormFields = false;
 
   const numPages = pdfJsDoc.numPages;
 
@@ -304,11 +306,12 @@ export async function generateDocx(
     // -- Extract form fields from Widget annotations --
     const formFields: DocxFormField[] = [];
     try {
-      const annotations = await page.getAnnotations();
+      const annotations = await page.getAnnotations({ intent: 'display' });
       for (const annot of annotations) {
         if (annot.subtype !== 'Widget') continue;
 
         const rect = annot.rect; // [x1, y1, x2, y2] in PDF coords (bottom-left origin)
+        if (!rect || rect.length < 4) continue;
         const fieldWidth = Math.abs(rect[2] - rect[0]);
         const fieldHeight = Math.abs(rect[3] - rect[1]);
         const xPos = rect[0];
@@ -321,24 +324,53 @@ export async function generateDocx(
         let value = '';
         const maxLength = annot.maxLen || 0;
 
-        if (annot.checkBox) {
-          fieldType = 'checkbox';
+        // Use fieldType ('Tx', 'Btn', 'Ch') as primary discriminator
+        const pdfFieldType = annot.fieldType;
+
+        if (pdfFieldType === 'Btn') {
+          // Button field — could be checkbox, radio, or push button
+          if (annot.pushButton) continue; // Skip push buttons
+          fieldType = 'checkbox'; // Both checkboxes and radios emit as DOCX checkboxes
           checked = annot.fieldValue === annot.exportValue ||
                     annot.fieldValue === 'Yes' ||
+                    annot.fieldValue === 'On' ||
                     annot.fieldValue === true;
-        } else if (annot.radioButton) {
-          fieldType = 'checkbox'; // Radio buttons emit as checkboxes in DOCX
-          checked = !!annot.fieldValue && annot.fieldValue !== 'Off';
-        } else if (annot.combo || annot.listBox) {
+          // For radio buttons, check if not "Off"
+          if (annot.radioButton) {
+            checked = !!annot.fieldValue && annot.fieldValue !== 'Off';
+          }
+        } else if (pdfFieldType === 'Ch') {
+          // Choice field — dropdown or listbox
           fieldType = 'dropdown';
-          options = annot.options?.map((o: any) => o.displayValue || o.exportValue || String(o)) || [];
+          options = annot.options?.map((o: any) =>
+            o.displayValue || o.exportValue || String(o)
+          ) || [];
           value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
-        } else if (!annot.pushButton) {
-          // Text field (default) — skip push buttons
+        } else if (pdfFieldType === 'Tx') {
+          // Text field
           fieldType = 'text';
           value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
         } else {
-          continue; // Skip push buttons entirely
+          // Fallback: use boolean property checks (older pdfjs or non-standard)
+          if (annot.checkBox || annot.radioButton) {
+            fieldType = 'checkbox';
+            checked = annot.fieldValue === annot.exportValue ||
+                      annot.fieldValue === 'Yes' ||
+                      annot.fieldValue === 'On' ||
+                      annot.fieldValue === true;
+          } else if (annot.combo || annot.listBox) {
+            fieldType = 'dropdown';
+            options = annot.options?.map((o: any) =>
+              o.displayValue || o.exportValue || String(o)
+            ) || [];
+            value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
+          } else if (annot.pushButton) {
+            continue; // Skip push buttons
+          } else {
+            // Default to text
+            fieldType = 'text';
+            value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
+          }
         }
 
         formFields.push({
@@ -355,8 +387,53 @@ export async function generateDocx(
           maxLength,
         });
       }
-    } catch {
-      // Form field extraction failure is non-fatal
+    } catch (e) {
+      console.warn('[DocxGenerator] Form field extraction failed for page', pageIdx, e);
+    }
+
+    if (formFields.length > 0) {
+      documentHasFormFields = true;
+    }
+
+    // -- Merge form fields inline with nearby paragraphs --
+    const consumedFieldIndices = new Set<number>();
+    for (let fi = 0; fi < formFields.length; fi++) {
+      const field = formFields[fi];
+      // Find the closest paragraph at the same Y baseline
+      let bestPara: DocxParagraph | null = null;
+      let bestDist = Infinity;
+      for (const para of paragraphs) {
+        if (para.yPosition === undefined) continue;
+        const dist = Math.abs(para.yPosition - field.yPosition);
+        if (dist < bestDist && dist <= BASELINE_TOLERANCE * 4) {
+          bestDist = dist;
+          bestPara = para;
+        }
+      }
+      // Also check table cell paragraphs
+      if (!bestPara) {
+        for (const tbl of tables) {
+          for (const row of tbl.rows) {
+            for (const cell of row.cells) {
+              for (const para of cell.paragraphs) {
+                if (para.yPosition === undefined) continue;
+                const dist = Math.abs(para.yPosition - field.yPosition);
+                if (dist < bestDist && dist <= BASELINE_TOLERANCE * 4) {
+                  bestDist = dist;
+                  bestPara = para;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (bestPara) {
+        if (!bestPara.inlineFormFields) bestPara.inlineFormFields = [];
+        const position = field.xPosition < (bestPara.minX ?? Infinity) ? 'before' : 'after';
+        bestPara.inlineFormFields.push({ field, position });
+        consumedFieldIndices.add(fi);
+      }
     }
 
     // -- Build page elements in reading order (interleaved by Y position) --
@@ -371,8 +448,11 @@ export async function generateDocx(
     for (const para of paragraphs) {
       positioned.push({ y: para.yPosition ?? 0, elem: { type: 'paragraph', element: para } });
     }
-    for (const field of formFields) {
-      positioned.push({ y: field.yPosition, elem: { type: 'formField', element: field } });
+    // Only add unconsumed form fields as standalone elements
+    for (let fi = 0; fi < formFields.length; fi++) {
+      if (!consumedFieldIndices.has(fi)) {
+        positioned.push({ y: formFields[fi].yPosition, elem: { type: 'formField', element: formFields[fi] } });
+      }
     }
     for (const tbl of tables) {
       positioned.push({ y: tbl.yPosition ?? 0, elem: { type: 'table', element: tbl } });
@@ -401,7 +481,7 @@ export async function generateDocx(
   const documentRels = generateDocumentRels(uniqueImages);
   const documentXml = generateDocumentXml(allPages, allImages, styleCollector);
   const stylesXml = generateStylesXml(styleCollector);
-  const settingsXml = generateSettingsXml();
+  const settingsXml = generateSettingsXml(documentHasFormFields);
   const fontTableXml = generateFontTableXml(styleCollector.getUsedFonts());
 
   // -- Package into ZIP --
@@ -780,6 +860,7 @@ function buildParagraph(
     spacingAfter: Math.round(avgFontSize * 0.3 * PT_TO_TWIPS), // Small spacing after
     lineSpacing,
     yPosition: lines[0].y,
+    minX: lines[0].minX,
   };
 }
 

@@ -152,33 +152,101 @@ function getNumber(obj: any): number | undefined {
 }
 
 /**
- * Heuristic: Is this image likely UI chrome (border, line, background, checkbox graphic)
- * rather than a real content image?
- *
- * Conservative — only filters things very unlikely to be real images.
+ * Count unique colors in raw pixel data by sampling.
+ * Samples up to ~10,000 pixels for performance on large images.
+ * Returns the number of distinct colors found (capped once we exceed a threshold).
  */
-function isUIChrome(width: number, height: number, rawByteCount: number): boolean {
-  // Very thin images (lines, borders, separators)
-  // 3px or less on either dimension
+function countUniqueColors(
+  rawPixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: number
+): number {
+  const totalPixels = width * height;
+  // Sample every Nth pixel — at most ~10,000 samples
+  const step = Math.max(1, Math.floor(totalPixels / 10000));
+  const colors = new Set<number>();
+
+  for (let i = 0; i < totalPixels; i += step) {
+    const offset = i * channels;
+    if (offset + Math.min(channels, 3) > rawPixels.length) break;
+
+    // Pack up to 3 color components into a single 24-bit number
+    let color = 0;
+    for (let c = 0; c < channels && c < 3; c++) {
+      color = (color << 8) | rawPixels[offset + c];
+    }
+    colors.add(color);
+
+    // Early exit: many colors = real content, no need to keep counting
+    if (colors.size > 50) return colors.size;
+  }
+
+  return colors.size;
+}
+
+/**
+ * Determine if a decoded image is UI chrome based on pixel color analysis.
+ *
+ * Rules (applied in order):
+ * 1. Unique colors = 1 → always UI chrome. A single-color image is a solid fill.
+ * 2. Unique colors ≤ 5 AND aspect ratio > 6:1 → UI chrome (borders, separators, thin bars).
+ * 3. Unique colors ≤ 10 AND total pixels < 50,000 → UI chrome (dropdown arrows, checkbox outlines).
+ * 4. Compressed size < 2000 AND widget-like dimensions → UI chrome (rasterized form elements).
+ * 5. Everything else → real content.
+ */
+function isUIChromeByPixels(
+  rawPixels: Uint8Array,
+  width: number,
+  height: number,
+  channels: number,
+  compressedSize: number
+): boolean {
+  const uniqueColors = countUniqueColors(rawPixels, width, height, channels);
+
+  // Rule 1: Single color = solid fill — always UI chrome regardless of dimensions
+  if (uniqueColors === 1) return true;
+
+  // Rule 2: Very few colors + extreme aspect ratio = border/separator/thin fill bar
+  const aspect = Math.max(width / height, height / width);
+  if (uniqueColors <= 5 && aspect > 6) return true;
+
+  // Rule 3: Few colors + small total pixel area = small UI element
+  const totalPixels = width * height;
+  if (uniqueColors <= 10 && totalPixels < 50000) return true;
+
+  // Rule 4: Small compressed size + widget-like dimensions = rasterized input box/button
+  if (compressedSize < 2000) {
+    const isWidgetSized =
+      (width >= 50 && width <= 500 && height >= 40 && height <= 100) ||
+      (height >= 50 && height <= 500 && width >= 40 && width <= 100);
+    if (isWidgetSized) return true;
+  }
+
+  // Rule 5: Pass everything else through
+  return false;
+}
+
+/**
+ * Check if a JPEG image is UI chrome using compression ratio as proxy.
+ * Real photographs compress to ~0.5-3 bytes/pixel.
+ * Solid-color or near-solid JPEGs compress to < 0.01 bytes/pixel.
+ */
+function isUIChromeJpeg(
+  jpegData: Uint8Array,
+  width: number,
+  height: number
+): boolean {
+  const totalPixels = width * height;
+  if (totalPixels === 0) return true;
+  const bytesPerPixel = jpegData.length / totalPixels;
+
+  // Extremely low compression ratio → near-solid fill
+  if (bytesPerPixel < 0.02) return true;
+
+  // Very thin or very small
   if (width <= 3 || height <= 3) return true;
-
-  // Very small images (bullet dots, tiny icons, checkbox/radio graphics)
-  // 15x15 or smaller
   if (width <= 15 && height <= 15) return true;
-
-  // Extreme aspect ratios: lines and rules
-  // >30:1 or <1:30 (e.g., 500x1 horizontal rule)
-  const aspect = width / height;
-  if (aspect > 30 || aspect < 1 / 30) return true;
-
-  // Tiny byte count — nearly solid color fill or 1-bit pattern
-  // Real photos/graphics have much more data even at small sizes
-  // 500 bytes of pixel data for a >50px image is basically a solid rectangle
-  if (rawByteCount < 500 && (width > 50 || height > 50)) return true;
-
-  // Small image with very few unique pixels (solid backgrounds, single-color fills)
-  // A 100x5 image that's < 200 bytes raw is likely a colored bar
-  if (width * height < 1000 && rawByteCount < 200) return true;
 
   return false;
 }
@@ -243,14 +311,6 @@ export async function extractPageImages(
       const height = getNumber(heightObj) ?? 0;
       if (width === 0 || height === 0) continue;
 
-      // Get raw stream byte count for UI chrome heuristic
-      const rawStreamBytes = stream instanceof PDFRawStream
-        ? stream.contents.length
-        : 0;
-
-      // Filter out UI chrome (lines, borders, tiny icons, solid fills)
-      if (isUIChrome(width, height, rawStreamBytes)) continue;
-
       // Determine filter type
       const filterObj = dict.get(PDFName.of('Filter'));
       const filterName = filterObj ? filterObj.toString() : '';
@@ -270,10 +330,13 @@ export async function extractPageImages(
         if (stream instanceof PDFRawStream) {
           imageData = stream.contents;
         } else {
-          // Fallback: try to get raw contents
           const decoded = decodePDFRawStream(stream as PDFRawStream);
           imageData = decoded.decode();
         }
+
+        // Filter UI chrome JPEGs using compression ratio
+        if (isUIChromeJpeg(imageData, width, height)) continue;
+
         mimeType = 'image/jpeg';
       } else {
         // Other filters (FlateDecode, etc.) — decode and wrap as PNG
@@ -296,13 +359,23 @@ export async function extractPageImages(
 
         // Determine PNG color type from PDF color space
         let colorType = 2; // RGB default
+        let channels = 3;
         if (colorSpaceName === '/DeviceGray' || colorSpaceName.includes('DeviceGray')) {
           colorType = 0; // Grayscale
+          channels = 1;
         } else if (colorSpaceName === '/DeviceCMYK' || colorSpaceName.includes('DeviceCMYK')) {
           // Convert CMYK to RGB
           rawPixels = cmykToRgb(rawPixels, width, height);
           colorType = 2;
+          channels = 3;
         }
+
+        // Get compressed size for Rule 4 heuristic
+        const compressedStreamSize = stream instanceof PDFRawStream
+          ? stream.contents.length : 0;
+
+        // Filter UI chrome using pixel color analysis
+        if (isUIChromeByPixels(rawPixels, width, height, channels, compressedStreamSize)) continue;
 
         imageData = wrapAsPng(rawPixels, width, height, colorType, bitsPerComponent);
         mimeType = 'image/png';

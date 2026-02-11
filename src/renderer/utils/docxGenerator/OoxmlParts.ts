@@ -210,9 +210,27 @@ function generateParagraphXml(
     xml += '  </w:pPr>\n';
   }
 
-  // Runs
+  // Emit "before" inline form fields (form fields whose X < paragraph's leftmost text)
+  if (para.inlineFormFields) {
+    for (const ff of para.inlineFormFields) {
+      if (ff.position === 'before') {
+        xml += generateFormFieldRuns(ff.field);
+      }
+    }
+  }
+
+  // Text runs
   for (const run of para.runs) {
     xml += generateRunXml(run, normalStyle);
+  }
+
+  // Emit "after" inline form fields
+  if (para.inlineFormFields) {
+    for (const ff of para.inlineFormFields) {
+      if (ff.position === 'after') {
+        xml += generateFormFieldRuns(ff.field);
+      }
+    }
   }
 
   xml += '</w:p>\n';
@@ -321,15 +339,14 @@ function generateImageParagraphXml(image: DocxImage): string {
 }
 
 /**
- * Generate XML for a form field using OOXML w:ffData (form field data).
- * Maps PDF widget types to Word legacy form fields.
+ * Generate form field runs (w:r elements only, no w:p wrapper).
+ * Used both for standalone form field paragraphs and inline embedding.
  */
-function generateFormFieldXml(field: DocxFormField): string {
+function generateFormFieldRuns(field: DocxFormField): string {
   const name = escXml(field.fieldName || 'Field');
 
   if (field.fieldType === 'checkbox') {
-    // Checkbox form field
-    let xml = '<w:p>\n';
+    let xml = '';
     xml += '  <w:r>\n';
     xml += '    <w:fldChar w:fldCharType="begin">\n';
     xml += '      <w:ffData>\n';
@@ -349,22 +366,22 @@ function generateFormFieldXml(field: DocxFormField): string {
     xml += '    <w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText>\n';
     xml += '  </w:r>\n';
     xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="separate"/>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
     xml += '    <w:fldChar w:fldCharType="end"/>\n';
     xml += '  </w:r>\n';
-    xml += '</w:p>\n';
     return xml;
   }
 
   if (field.fieldType === 'dropdown') {
-    // Dropdown form field
-    let xml = '<w:p>\n';
+    let xml = '';
     xml += '  <w:r>\n';
     xml += '    <w:fldChar w:fldCharType="begin">\n';
     xml += '      <w:ffData>\n';
     xml += `        <w:name w:val="${name}"/>\n`;
     xml += '        <w:enabled/>\n';
     xml += '        <w:ddList>\n';
-    // Find index of current value
     const selectedIdx = field.options.indexOf(field.value);
     if (selectedIdx >= 0) {
       xml += `          <w:result w:val="${selectedIdx}"/>\n`;
@@ -380,14 +397,16 @@ function generateFormFieldXml(field: DocxFormField): string {
     xml += '    <w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText>\n';
     xml += '  </w:r>\n';
     xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="separate"/>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
     xml += '    <w:fldChar w:fldCharType="end"/>\n';
     xml += '  </w:r>\n';
-    xml += '</w:p>\n';
     return xml;
   }
 
   // Default: text input form field
-  let xml = '<w:p>\n';
+  let xml = '';
   xml += '  <w:r>\n';
   xml += '    <w:fldChar w:fldCharType="begin">\n';
   xml += '      <w:ffData>\n';
@@ -411,11 +430,21 @@ function generateFormFieldXml(field: DocxFormField): string {
   xml += '    <w:fldChar w:fldCharType="separate"/>\n';
   xml += '  </w:r>\n';
   xml += '  <w:r>\n';
-  xml += `    <w:t xml:space="preserve">${escXml(field.value || '')}</w:t>\n`;
+  xml += `    <w:t xml:space="preserve">${escXml(field.value || '     ')}</w:t>\n`;
   xml += '  </w:r>\n';
   xml += '  <w:r>\n';
   xml += '    <w:fldChar w:fldCharType="end"/>\n';
   xml += '  </w:r>\n';
+  return xml;
+}
+
+/**
+ * Generate XML for a standalone form field paragraph.
+ * Wraps generateFormFieldRuns in a <w:p> element.
+ */
+function generateFormFieldXml(field: DocxFormField): string {
+  let xml = '<w:p>\n';
+  xml += generateFormFieldRuns(field);
   xml += '</w:p>\n';
   return xml;
 }
@@ -561,13 +590,21 @@ export function generateStylesXml(styleCollector: StyleCollector): string {
 /**
  * Generate word/settings.xml
  * Compatibility mode 15 = Word 2013+
+ * When hasFormFields is true, adds document protection for form editing.
  */
-export function generateSettingsXml(): string {
+export function generateSettingsXml(hasFormFields: boolean = false): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">\n';
   xml += '  <w:zoom w:percent="100"/>\n';
   xml += '  <w:defaultTabStop w:val="720"/>\n';
   xml += '  <w:characterSpacingControl w:val="doNotCompress"/>\n';
+
+  // Enable form protection when document contains form fields
+  // This makes checkboxes clickable, text fields editable, dropdowns selectable
+  if (hasFormFields) {
+    xml += '  <w:documentProtection w:edit="forms" w:enforcement="1"/>\n';
+  }
+
   xml += '  <w:compat>\n';
   xml += '    <w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>\n';
   xml += '  </w:compat>\n';

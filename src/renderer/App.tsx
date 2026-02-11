@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { PDFDocument as PDFLib } from 'pdf-lib';
 import Toolbar, { ZoomMode } from './components/Toolbar';
 import Sidebar from './components/Sidebar';
@@ -25,6 +25,7 @@ import DroppedFileDialog from './components/DroppedFileDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
+import FormDataPanel from './components/FormDataPanel';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
@@ -127,6 +128,11 @@ const App: React.FC = () => {
   const [showConversionBar, setShowConversionBar] = useState(false);
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [onboardingActive, setOnboardingActive] = useState(false);
+  // Form field state
+  const [formFieldCount, setFormFieldCount] = useState(0);
+  const [formPanelVisible, setFormPanelVisible] = useState(false);
+  const annotationStorageRef = useRef<any>(null);
+
   const [annotationStyle, setAnnotationStyle] = useState<AnnotationStyle>({
     color: '#000000',
     strokeColor: '#FF0000',
@@ -173,6 +179,9 @@ const App: React.FC = () => {
     activeTabId,
     switchTab,
     closeTab,
+    // Form field support
+    formFieldMappings,
+    setAnnotationStorage,
   } = usePDFDocument();
 
   // Refresh the recent files list
@@ -377,6 +386,105 @@ const App: React.FC = () => {
     setOnboardingActive(false);
     await window.electronAPI.setStore('hasSeenOnboarding', true);
   }, []);
+
+  // Form field handlers
+  const handleFormFieldsDetected = useCallback((count: number) => {
+    setFormFieldCount(count);
+    // Auto-close form panel when opening a non-form PDF
+    if (count === 0) setFormPanelVisible(false);
+  }, []);
+
+  const handleAnnotationStorageReady = useCallback((storage: any) => {
+    annotationStorageRef.current = storage;
+    setAnnotationStorage(storage);
+  }, [setAnnotationStorage]);
+
+  const handleExportFormData = useCallback(async () => {
+    if (!annotationStorageRef.current || formFieldMappings.length === 0) return;
+
+    const data: Record<string, any> = {};
+    const allValues = annotationStorageRef.current.getAll();
+    if (!allValues) {
+      toast.warning('No form data to export');
+      return;
+    }
+
+    const mappingById = new Map(formFieldMappings.map(m => [m.annotationId, m]));
+    for (const [annotId, stored] of Object.entries(allValues)) {
+      const mapping = mappingById.get(annotId);
+      if (mapping?.fieldName) {
+        data[mapping.fieldName] = (stored as any).value;
+      }
+    }
+
+    const json = JSON.stringify(data, null, 2);
+    const base64 = btoa(unescape(encodeURIComponent(json)));
+    const fileName = document?.fileName?.replace(/\.pdf$/i, '') || 'form-data';
+    const result = await window.electronAPI.saveFileDialog(base64, `${fileName}_form_data.json`);
+    if (result.success) {
+      toast.success('Form data exported');
+    }
+  }, [formFieldMappings, document, toast]);
+
+  const handleResetForm = useCallback(() => {
+    if (!annotationStorageRef.current) return;
+    const confirmed = window.confirm('Reset all form fields to their default values?');
+    if (!confirmed) return;
+
+    // Clear the annotation storage
+    const allValues = annotationStorageRef.current.getAll();
+    if (allValues) {
+      for (const key of Object.keys(allValues)) {
+        annotationStorageRef.current.remove(key);
+      }
+    }
+    annotationStorageRef.current.resetModified();
+
+    // Reload the document to reset rendered fields
+    toast.success('Form fields reset');
+    // Force re-render by toggling a state (the form fields will reload from PDF defaults)
+  }, [toast]);
+
+  const handleFlattenForm = useCallback(async () => {
+    if (!document) return;
+    const confirmed = window.confirm(
+      'Flattening will convert all form fields to static content. This cannot be undone. Continue?'
+    );
+    if (!confirmed) return;
+
+    try {
+      const { PDFDocument: PDFLibDoc } = await import('pdf-lib');
+      const pdfDoc = await PDFLibDoc.load(document.pdfData);
+
+      // Save current form values first
+      if (annotationStorageRef.current && formFieldMappings.length > 0) {
+        const { saveFormFieldValues } = await import('./utils/formFieldSaver');
+        await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
+      }
+
+      const form = pdfDoc.getForm();
+      form.flatten();
+
+      const flattenedBytes = await pdfDoc.save();
+      const base64 = uint8ArrayToBase64(flattenedBytes);
+
+      const result = await window.electronAPI.saveFileDialog(
+        base64,
+        document.fileName.replace(/\.pdf$/i, '_flattened.pdf')
+      );
+      if (result.success && result.path) {
+        toast.success('Form flattened successfully');
+        // Open the flattened file
+        const fileData = await window.electronAPI.readFileByPath(result.path);
+        if (fileData) {
+          await openFile(fileData.path, fileData.data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to flatten form:', error);
+      toast.error('Failed to flatten form');
+    }
+  }, [document, formFieldMappings, toast, openFile]);
 
   const handleFileDrop = useCallback(async (filePath: string) => {
     const result = await window.electronAPI.readFileByPath(filePath);
@@ -1077,6 +1185,8 @@ const App: React.FC = () => {
               onAddStamp={addStamp}
               annotationStyle={annotationStyle}
               loading={loading}
+              onFormFieldsDetected={handleFormFieldsDetected}
+              onAnnotationStorageReady={handleAnnotationStorageReady}
             />
             <ConversionActionBar
               visible={showConversionBar}
@@ -1085,6 +1195,21 @@ const App: React.FC = () => {
               onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
               libreOfficeAvailable={libreOfficeAvailable}
             />
+            {formFieldCount > 0 && !formPanelVisible && (
+              <div
+                className="form-indicator-badge"
+                onClick={() => setFormPanelVisible(true)}
+                style={{ position: 'absolute', top: 8, right: 8, zIndex: 10 }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="16" y1="13" x2="8" y2="13" />
+                  <line x1="16" y1="17" x2="8" y2="17" />
+                </svg>
+                {formFieldCount} Fields
+              </div>
+            )}
           </>
         ) : (
           <WelcomeScreen
@@ -1112,6 +1237,16 @@ const App: React.FC = () => {
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
           libreOfficeAvailable={libreOfficeAvailable}
+        />
+
+        <FormDataPanel
+          visible={formPanelVisible && formFieldCount > 0}
+          onClose={() => setFormPanelVisible(false)}
+          formFields={formFieldMappings}
+          annotationStorage={annotationStorageRef.current}
+          onExportFormData={handleExportFormData}
+          onResetForm={handleResetForm}
+          onFlattenForm={handleFlattenForm}
         />
       </div>
 

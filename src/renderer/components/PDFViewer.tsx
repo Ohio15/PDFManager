@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import { AnnotationLayer } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, AnnotationStyle, PDFTextItem, Position, Size } from '../types';
 import { Tool } from '../App';
@@ -40,6 +41,21 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 // Minimum size for annotations
 const MIN_SIZE = 20;
 
+// Minimal link service required by AnnotationLayer
+const simpleLinkService = {
+  getDestinationHash: () => '#',
+  getAnchorUrl: () => '#',
+  addLinkAttributes: () => {},
+  isPageVisible: () => true,
+  isPageCached: () => true,
+  goToDestination: () => {},
+  goToPage: () => {},
+  navigateTo: () => {},
+  externalLinkEnabled: true,
+  externalLinkRel: 'noopener noreferrer nofollow',
+  externalLinkTarget: 2,
+};
+
 interface PDFViewerProps {
   document: PDFDocument;
   zoom: number;
@@ -62,6 +78,8 @@ interface PDFViewerProps {
   onAddStamp?: (pageIndex: number, position: Position, stampType: StampAnnotation['stampType'], text: string, color: string) => void;
   annotationStyle?: AnnotationStyle;
   loading: boolean;
+  onFormFieldsDetected?: (count: number) => void;
+  onAnnotationStorageReady?: (storage: any) => void;
 }
 
 const PDFViewer: React.FC<PDFViewerProps> = ({
@@ -86,6 +104,8 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   onAddStamp,
   annotationStyle,
   loading,
+  onFormFieldsDetected,
+  onAnnotationStorageReady,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
@@ -97,6 +117,12 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   const scaleRef = useRef(zoom / 100);
   const pagesRef = useRef(document.pages);
   pagesRef.current = document.pages;
+
+  // AcroForm annotation layer state
+  const annotationStorageRef = useRef<any>(null);
+  const annotationLayerDivsRef = useRef<Map<number, HTMLDivElement>>(new Map());
+  const renderedAnnotLayersRef = useRef<Set<number>>(new Set());
+  const [hasFormFields, setHasFormFields] = useState(false);
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -161,6 +187,22 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         renderedPagesRef.current = new Map();
         setRenderedPages(new Map());
         renderingRef.current.clear();
+        // Reset annotation layer state for new document
+        renderedAnnotLayersRef.current.clear();
+        annotationLayerDivsRef.current.forEach(div => { div.innerHTML = ''; });
+        // Use the document proxy's built-in AnnotationStorage (shared across all pages)
+        annotationStorageRef.current = (pdf as any).annotationStorage;
+        onAnnotationStorageReady?.(annotationStorageRef.current);
+
+        // Detect form fields across all pages
+        let formFieldCount = 0;
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const annotations = await page.getAnnotations();
+          formFieldCount += annotations.filter((a: any) => a.subtype === 'Widget').length;
+        }
+        setHasFormFields(formFieldCount > 0);
+        onFormFieldsDetected?.(formFieldCount);
       } catch (error) {
         console.error('Failed to load PDF:', error);
       }
@@ -200,12 +242,71 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
     }
   }, []);
 
+  // Render pdfjs AnnotationLayer for a page (form fields)
+  const renderAnnotationLayer = useCallback(async (pageNum: number) => {
+    const pdfDoc = pdfDocRef.current;
+    const div = annotationLayerDivsRef.current.get(pageNum);
+    if (!pdfDoc || !div || renderedAnnotLayersRef.current.has(pageNum)) return;
+
+    renderedAnnotLayersRef.current.add(pageNum);
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      const annotations = await page.getAnnotations();
+      const formAnnotations = annotations.filter((a: any) => a.subtype === 'Widget');
+      if (formAnnotations.length === 0) return;
+
+      const rotation = pagesRef.current[pageNum - 1]?.rotation || 0;
+      const viewport = page.getViewport({ scale: scaleRef.current, rotation });
+
+      div.innerHTML = '';
+      div.style.width = `${viewport.width}px`;
+      div.style.height = `${viewport.height}px`;
+
+      const annotationLayer = new AnnotationLayer({
+        div,
+        accessibilityManager: null as any,
+        annotationCanvasMap: null as any,
+        annotationEditorUIManager: null as any,
+        page,
+        viewport,
+        structTreeLayer: null as any,
+      });
+
+      await annotationLayer.render({
+        viewport,
+        div,
+        annotations,
+        page,
+        linkService: simpleLinkService as any,
+        annotationStorage: annotationStorageRef.current,
+        renderForms: true,
+        imageResourcesPath: '',
+      } as any);
+    } catch (error) {
+      console.error(`Failed to render annotation layer for page ${pageNum}:`, error);
+      renderedAnnotLayersRef.current.delete(pageNum);
+    }
+  }, []);
+
+  // Re-render annotation layers when pages are rendered
+  useEffect(() => {
+    if (!hasFormFields) return;
+    renderedPages.forEach((_, pageNum) => {
+      if (!renderedAnnotLayersRef.current.has(pageNum)) {
+        renderAnnotationLayer(pageNum);
+      }
+    });
+  }, [renderedPages, hasFormFields, renderAnnotationLayer]);
+
   // Clear rendered pages when zoom or page rotation changes
   const rotationsKey = useMemo(() => document.pages.map(p => p.rotation).join(','), [document.pages]);
   useEffect(() => {
     renderedPagesRef.current = new Map();
     setRenderedPages(new Map());
     renderingRef.current.clear();
+    // Also clear annotation layers so they re-render at new zoom
+    renderedAnnotLayersRef.current.clear();
+    annotationLayerDivsRef.current.forEach(div => { div.innerHTML = ''; });
 
     // Re-render currently visible pages after clearing
     if (containerRef.current && pdfDocRef.current) {
@@ -1218,6 +1319,17 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
               <div className="page-skeleton" style={{ width: pageWidth, height: pageHeight }}>
                 <div className="page-skeleton-shimmer" />
               </div>
+            )}
+            {/* pdfjs AnnotationLayer for AcroForm fields — always interactive */}
+            {hasFormFields && (
+              <div
+                className="pdfjs-annotation-layer"
+                ref={(el) => {
+                  if (el) {
+                    annotationLayerDivsRef.current.set(pageNum, el);
+                  }
+                }}
+              />
             )}
             <div
               className={`annotation-layer ${currentTool === 'select' || currentTool === 'erase' ? 'active' : ''}`}

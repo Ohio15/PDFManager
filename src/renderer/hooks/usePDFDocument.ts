@@ -6,6 +6,7 @@ import { PDFDocument, Annotation, Position, Size, TextAnnotation, ImageAnnotatio
 
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
+import { saveFormFieldValues, buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -138,6 +139,10 @@ export function usePDFDocument() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const tabStatesRef = useRef<Map<string, TabState>>(new Map());
 
+  // Form field state
+  const [formFieldMappings, setFormFieldMappings] = useState<FormFieldMapping[]>([]);
+  const annotationStorageRef = useRef<any>(null);
+
   // Ref that always holds the latest state values (updated synchronously each render)
   const stateRef = useRef<{
     document: PDFDocument | null;
@@ -151,6 +156,10 @@ export function usePDFDocument() {
 
   const canUndo = historyIndex >= 0;
   const canRedo = historyIndex < history.length - 1;
+
+  const setAnnotationStorage = useCallback((storage: any) => {
+    annotationStorageRef.current = storage;
+  }, []);
 
   const addToHistory = useCallback((entry: HistoryEntry) => {
     setHistory((prev) => [...prev.slice(0, historyIndex + 1), entry]);
@@ -407,6 +416,15 @@ export function usePDFDocument() {
         history: [],
         historyIndex: -1,
       });
+
+      // Build form field mappings for the new document
+      try {
+        const mappings = await buildFormFieldMapping(pdfDoc);
+        setFormFieldMappings(mappings);
+      } catch (e) {
+        console.warn('Failed to build form field mappings:', e);
+        setFormFieldMappings([]);
+      }
     } catch (error) {
       console.error('Failed to open PDF:', error);
       throw error;
@@ -540,6 +558,15 @@ export function usePDFDocument() {
         }
       }
 
+      // Save form field values from AnnotationStorage into pdf-lib form fields
+      if (annotationStorageRef.current && formFieldMappings.length > 0) {
+        try {
+          await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
+        } catch (e) {
+          console.warn('Failed to save form field values:', e);
+        }
+      }
+
       const modifiedPdfBytes = await pdfDoc.save();
       const base64 = uint8ArrayToBase64(modifiedPdfBytes);
 
@@ -647,7 +674,7 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document]);
+  }, [document, formFieldMappings]);
 
   const saveFileAs = useCallback(async () => {
     if (!document) return;
@@ -773,6 +800,15 @@ export function usePDFDocument() {
         }
       }
 
+      // Save form field values from AnnotationStorage into pdf-lib form fields
+      if (annotationStorageRef.current && formFieldMappings.length > 0) {
+        try {
+          await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
+        } catch (e) {
+          console.warn('Failed to save form field values:', e);
+        }
+      }
+
       const modifiedPdfBytes = await pdfDoc.save();
       const base64 = uint8ArrayToBase64(modifiedPdfBytes);
 
@@ -884,7 +920,7 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document]);
+  }, [document, formFieldMappings]);
 
   const addText = useCallback(
     (pageIndex: number, position: Position, content: string, color: string = '#000000', fontSize: number = 16): string | undefined => {
@@ -1665,6 +1701,9 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     activeTabId,
     switchTab,
     closeTab,
+    // Form field support
+    formFieldMappings,
+    setAnnotationStorage,
   };
 }
 

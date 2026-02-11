@@ -33,6 +33,8 @@ export interface DocxParagraph {
   lineSpacing: number;
   styleId?: string;
   pageBreakBefore?: boolean;
+  /** Y position in PDF points (top-left origin) for element interleaving */
+  yPosition?: number;
 }
 
 /** An image to embed in the DOCX */
@@ -74,13 +76,42 @@ export interface DocxTable {
   rows: DocxTableRow[];
   /** Column widths in twips */
   columnWidths: number[];
+  /** Y position in PDF points (top-left origin) for element interleaving */
+  yPosition?: number;
+}
+
+/** A form field extracted from PDF Widget annotations */
+export interface DocxFormField {
+  /** Field name from the PDF AcroForm */
+  fieldName: string;
+  /** Field type: text, checkbox, dropdown */
+  fieldType: 'text' | 'checkbox' | 'dropdown';
+  /** Current value if any */
+  value: string;
+  /** Options for dropdown fields */
+  options: string[];
+  /** Whether checkbox is checked */
+  checked: boolean;
+  /** Y position on the page in PDF points for ordering */
+  yPosition: number;
+  /** X position on the page in PDF points */
+  xPosition: number;
+  /** Width in PDF points */
+  width: number;
+  /** Height in PDF points */
+  height: number;
+  /** Page index */
+  pageIndex: number;
+  /** Max length for text fields (0 = unlimited) */
+  maxLength: number;
 }
 
 /** Content element in page order */
 export type DocxPageElement =
   | { type: 'paragraph'; element: DocxParagraph }
   | { type: 'image'; element: DocxImage }
-  | { type: 'table'; element: DocxTable };
+  | { type: 'table'; element: DocxTable }
+  | { type: 'formField'; element: DocxFormField };
 
 /** A single page's worth of DOCX content */
 export interface DocxPage {

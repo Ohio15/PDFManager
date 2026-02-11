@@ -14,7 +14,7 @@
  * - word/fontTable.xml
  */
 
-import type { DocxPage, DocxParagraph, DocxRun, DocxImage, DocxStyle } from './types';
+import type { DocxPage, DocxParagraph, DocxRun, DocxImage, DocxStyle, DocxFormField, DocxTable } from './types';
 import { StyleCollector } from './StyleCollector';
 
 /** Escape XML special characters */
@@ -120,29 +120,17 @@ export function generateDocumentXml(
   for (let pageIdx = 0; pageIdx < pages.length; pageIdx++) {
     const page = pages[pageIdx];
 
-    // Collect images for this page, sorted by Y position
-    const pageImages = images
-      .filter(img => img.pageIndex === pageIdx)
-      .sort((a, b) => a.yPosition - b.yPosition);
-
-    let imageIdx = 0;
-
+    // Elements are already interleaved by Y position in DocxGenerator
     for (const elem of page.elements) {
       if (elem.type === 'paragraph') {
-        // Insert any images that should come before this paragraph's position
-        // (based on approximate Y ordering from the PDF)
-        // For now, images are inserted at the start of each page
-
         xml += generateParagraphXml(elem.element, normalStyle, styleCollector);
       } else if (elem.type === 'image') {
         xml += generateImageParagraphXml(elem.element);
+      } else if (elem.type === 'formField') {
+        xml += generateFormFieldXml(elem.element);
+      } else if (elem.type === 'table') {
+        xml += generateTableXml(elem.element, normalStyle, styleCollector);
       }
-    }
-
-    // Insert any remaining images for this page that weren't placed inline
-    while (imageIdx < pageImages.length) {
-      xml += generateImageParagraphXml(pageImages[imageIdx]);
-      imageIdx++;
     }
 
     // Page break between pages (except after last page)
@@ -329,6 +317,172 @@ function generateImageParagraphXml(image: DocxImage): string {
   xml += '    </w:drawing>\n';
   xml += '  </w:r>\n';
   xml += '</w:p>\n';
+  return xml;
+}
+
+/**
+ * Generate XML for a form field using OOXML w:ffData (form field data).
+ * Maps PDF widget types to Word legacy form fields.
+ */
+function generateFormFieldXml(field: DocxFormField): string {
+  const name = escXml(field.fieldName || 'Field');
+
+  if (field.fieldType === 'checkbox') {
+    // Checkbox form field
+    let xml = '<w:p>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="begin">\n';
+    xml += '      <w:ffData>\n';
+    xml += `        <w:name w:val="${name}"/>\n`;
+    xml += '        <w:enabled/>\n';
+    xml += '        <w:checkBox>\n';
+    xml += '          <w:sizeAuto/>\n';
+    xml += `          <w:default w:val="${field.checked ? '1' : '0'}"/>\n`;
+    if (field.checked) {
+      xml += '          <w:checked/>\n';
+    }
+    xml += '        </w:checkBox>\n';
+    xml += '      </w:ffData>\n';
+    xml += '    </w:fldChar>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="end"/>\n';
+    xml += '  </w:r>\n';
+    xml += '</w:p>\n';
+    return xml;
+  }
+
+  if (field.fieldType === 'dropdown') {
+    // Dropdown form field
+    let xml = '<w:p>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="begin">\n';
+    xml += '      <w:ffData>\n';
+    xml += `        <w:name w:val="${name}"/>\n`;
+    xml += '        <w:enabled/>\n';
+    xml += '        <w:ddList>\n';
+    // Find index of current value
+    const selectedIdx = field.options.indexOf(field.value);
+    if (selectedIdx >= 0) {
+      xml += `          <w:result w:val="${selectedIdx}"/>\n`;
+    }
+    for (const opt of field.options) {
+      xml += `          <w:listEntry w:val="${escXml(opt)}"/>\n`;
+    }
+    xml += '        </w:ddList>\n';
+    xml += '      </w:ffData>\n';
+    xml += '    </w:fldChar>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText>\n';
+    xml += '  </w:r>\n';
+    xml += '  <w:r>\n';
+    xml += '    <w:fldChar w:fldCharType="end"/>\n';
+    xml += '  </w:r>\n';
+    xml += '</w:p>\n';
+    return xml;
+  }
+
+  // Default: text input form field
+  let xml = '<w:p>\n';
+  xml += '  <w:r>\n';
+  xml += '    <w:fldChar w:fldCharType="begin">\n';
+  xml += '      <w:ffData>\n';
+  xml += `        <w:name w:val="${name}"/>\n`;
+  xml += '        <w:enabled/>\n';
+  xml += '        <w:textInput>\n';
+  if (field.value) {
+    xml += `          <w:default w:val="${escXml(field.value)}"/>\n`;
+  }
+  if (field.maxLength > 0) {
+    xml += `          <w:maxLength w:val="${field.maxLength}"/>\n`;
+  }
+  xml += '        </w:textInput>\n';
+  xml += '      </w:ffData>\n';
+  xml += '    </w:fldChar>\n';
+  xml += '  </w:r>\n';
+  xml += '  <w:r>\n';
+  xml += '    <w:instrText xml:space="preserve"> FORMTEXT </w:instrText>\n';
+  xml += '  </w:r>\n';
+  xml += '  <w:r>\n';
+  xml += '    <w:fldChar w:fldCharType="separate"/>\n';
+  xml += '  </w:r>\n';
+  xml += '  <w:r>\n';
+  xml += `    <w:t xml:space="preserve">${escXml(field.value || '')}</w:t>\n`;
+  xml += '  </w:r>\n';
+  xml += '  <w:r>\n';
+  xml += '    <w:fldChar w:fldCharType="end"/>\n';
+  xml += '  </w:r>\n';
+  xml += '</w:p>\n';
+  return xml;
+}
+
+/**
+ * Generate XML for a table using OOXML w:tbl markup.
+ */
+function generateTableXml(
+  table: DocxTable,
+  normalStyle: DocxStyle,
+  styleCollector: StyleCollector
+): string {
+  let xml = '<w:tbl>\n';
+
+  // Table properties
+  xml += '  <w:tblPr>\n';
+  xml += '    <w:tblStyle w:val="TableGrid"/>\n';
+  xml += '    <w:tblW w:w="0" w:type="auto"/>\n';
+  xml += '    <w:tblBorders>\n';
+  xml += '      <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += '    </w:tblBorders>\n';
+  xml += '    <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>\n';
+  xml += '  </w:tblPr>\n';
+
+  // Column grid
+  xml += '  <w:tblGrid>\n';
+  for (const colW of table.columnWidths) {
+    xml += `    <w:gridCol w:w="${colW}"/>\n`;
+  }
+  xml += '  </w:tblGrid>\n';
+
+  // Rows
+  for (const row of table.rows) {
+    xml += '  <w:tr>\n';
+    for (const cell of row.cells) {
+      xml += '    <w:tc>\n';
+      xml += '      <w:tcPr>\n';
+      xml += `        <w:tcW w:w="${cell.width}" w:type="dxa"/>\n`;
+      if (cell.colSpan > 1) {
+        xml += `        <w:gridSpan w:val="${cell.colSpan}"/>\n`;
+      }
+      if (cell.rowSpan > 1) {
+        xml += '        <w:vMerge w:val="restart"/>\n';
+      }
+      xml += '      </w:tcPr>\n';
+
+      // Cell content (paragraphs)
+      if (cell.paragraphs.length === 0) {
+        // Empty cell needs at least one paragraph
+        xml += '      <w:p/>\n';
+      } else {
+        for (const para of cell.paragraphs) {
+          xml += generateParagraphXml(para, normalStyle, styleCollector);
+        }
+      }
+
+      xml += '    </w:tc>\n';
+    }
+    xml += '  </w:tr>\n';
+  }
+
+  xml += '</w:tbl>\n';
   return xml;
 }
 

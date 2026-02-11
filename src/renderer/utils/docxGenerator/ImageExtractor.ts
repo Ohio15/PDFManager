@@ -152,6 +152,38 @@ function getNumber(obj: any): number | undefined {
 }
 
 /**
+ * Heuristic: Is this image likely UI chrome (border, line, background, checkbox graphic)
+ * rather than a real content image?
+ *
+ * Conservative — only filters things very unlikely to be real images.
+ */
+function isUIChrome(width: number, height: number, rawByteCount: number): boolean {
+  // Very thin images (lines, borders, separators)
+  // 3px or less on either dimension
+  if (width <= 3 || height <= 3) return true;
+
+  // Very small images (bullet dots, tiny icons, checkbox/radio graphics)
+  // 15x15 or smaller
+  if (width <= 15 && height <= 15) return true;
+
+  // Extreme aspect ratios: lines and rules
+  // >30:1 or <1:30 (e.g., 500x1 horizontal rule)
+  const aspect = width / height;
+  if (aspect > 30 || aspect < 1 / 30) return true;
+
+  // Tiny byte count — nearly solid color fill or 1-bit pattern
+  // Real photos/graphics have much more data even at small sizes
+  // 500 bytes of pixel data for a >50px image is basically a solid rectangle
+  if (rawByteCount < 500 && (width > 50 || height > 50)) return true;
+
+  // Small image with very few unique pixels (solid backgrounds, single-color fills)
+  // A 100x5 image that's < 200 bytes raw is likely a colored bar
+  if (width * height < 1000 && rawByteCount < 200) return true;
+
+  return false;
+}
+
+/**
  * Extract all images from a single PDF page.
  */
 export async function extractPageImages(
@@ -210,6 +242,14 @@ export async function extractPageImages(
       const width = getNumber(widthObj) ?? 0;
       const height = getNumber(heightObj) ?? 0;
       if (width === 0 || height === 0) continue;
+
+      // Get raw stream byte count for UI chrome heuristic
+      const rawStreamBytes = stream instanceof PDFRawStream
+        ? stream.contents.length
+        : 0;
+
+      // Filter out UI chrome (lines, borders, tiny icons, solid fills)
+      if (isUIChrome(width, height, rawStreamBytes)) continue;
 
       // Determine filter type
       const filterObj = dict.get(PDFName.of('Filter'));

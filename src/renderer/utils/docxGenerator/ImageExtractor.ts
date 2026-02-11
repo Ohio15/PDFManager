@@ -223,7 +223,11 @@ function isUIChromeByPixels(
     if (isWidgetSized) return true;
   }
 
-  // Rule 5: Pass everything else through
+  // Rule 5: Short height + few colors = rasterized form field outline/input box
+  // These are the rasterized outlines of form widgets (height 20-80, width 500-1400, 6-21 colors)
+  if (height < 80 && uniqueColors < 30) return true;
+
+  // Rule 6: Pass everything else through
   return false;
 }
 

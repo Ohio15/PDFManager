@@ -339,103 +339,91 @@ function generateImageParagraphXml(image: DocxImage): string {
 }
 
 /**
+ * Sanitize a PDF field name for OOXML w:name.
+ * Takes the last segment of the dotted path and strips array indices.
+ * Word has a 20-character limit on form field names.
+ */
+function sanitizeFieldName(fullName: string): string {
+  const last = fullName.split('.').pop() || fullName;
+  return last.replace(/\[\d+\]/g, '').substring(0, 20);
+}
+
+/**
+ * Generate OOXML runs for a text input form field (FORMTEXT).
+ */
+function generateTextFieldRuns(field: DocxFormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  const value = field.fieldValue || '     ';
+  return [
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:textInput>${field.maxLength > 0 ? `<w:maxLength w:val="${field.maxLength}"/>` : ''}</w:textInput>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    `<w:r><w:rPr><w:noProof/></w:rPr><w:t xml:space="preserve">${escXml(value)}</w:t></w:r>`,
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
+ * Generate OOXML runs for a checkbox form field (FORMCHECKBOX).
+ * Also used for radio buttons (Word legacy forms don't have native radio groups).
+ */
+function generateCheckBoxRuns(field: DocxFormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  const checked = field.isChecked ? '1' : '0';
+  return [
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:checkBox><w:sizeAuto/><w:default w:val="${checked}"/></w:checkBox>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
+ * Generate OOXML runs for a dropdown form field (FORMDROPDOWN).
+ */
+function generateDropdownRuns(field: DocxFormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  const selectedIdx = Math.max(0, field.options.findIndex(
+    o => o.exportValue === field.fieldValue
+  ));
+  const entries = field.options.map(
+    o => `<w:listEntry w:val="${escXml(o.displayValue || o.exportValue)}"/>`
+  ).join('');
+  return [
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:ddList><w:result w:val="${selectedIdx}"/>${entries}</w:ddList>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
  * Generate form field runs (w:r elements only, no w:p wrapper).
- * Used both for standalone form field paragraphs and inline embedding.
+ * Dispatches to the appropriate generator based on field type.
  */
 function generateFormFieldRuns(field: DocxFormField): string {
-  const name = escXml(field.fieldName || 'Field');
-
-  if (field.fieldType === 'checkbox') {
-    let xml = '';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="begin">\n';
-    xml += '      <w:ffData>\n';
-    xml += `        <w:name w:val="${name}"/>\n`;
-    xml += '        <w:enabled/>\n';
-    xml += '        <w:checkBox>\n';
-    xml += '          <w:sizeAuto/>\n';
-    xml += `          <w:default w:val="${field.checked ? '1' : '0'}"/>\n`;
-    if (field.checked) {
-      xml += '          <w:checked/>\n';
-    }
-    xml += '        </w:checkBox>\n';
-    xml += '      </w:ffData>\n';
-    xml += '    </w:fldChar>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="separate"/>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="end"/>\n';
-    xml += '  </w:r>\n';
-    return xml;
-  }
-
-  if (field.fieldType === 'dropdown') {
-    let xml = '';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="begin">\n';
-    xml += '      <w:ffData>\n';
-    xml += `        <w:name w:val="${name}"/>\n`;
-    xml += '        <w:enabled/>\n';
-    xml += '        <w:ddList>\n';
-    const selectedIdx = field.options.indexOf(field.value);
-    if (selectedIdx >= 0) {
-      xml += `          <w:result w:val="${selectedIdx}"/>\n`;
-    }
-    for (const opt of field.options) {
-      xml += `          <w:listEntry w:val="${escXml(opt)}"/>\n`;
-    }
-    xml += '        </w:ddList>\n';
-    xml += '      </w:ffData>\n';
-    xml += '    </w:fldChar>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="separate"/>\n';
-    xml += '  </w:r>\n';
-    xml += '  <w:r>\n';
-    xml += '    <w:fldChar w:fldCharType="end"/>\n';
-    xml += '  </w:r>\n';
-    return xml;
-  }
-
-  // Default: text input form field
-  let xml = '';
-  xml += '  <w:r>\n';
-  xml += '    <w:fldChar w:fldCharType="begin">\n';
-  xml += '      <w:ffData>\n';
-  xml += `        <w:name w:val="${name}"/>\n`;
-  xml += '        <w:enabled/>\n';
-  xml += '        <w:textInput>\n';
-  if (field.value) {
-    xml += `          <w:default w:val="${escXml(field.value)}"/>\n`;
-  }
-  if (field.maxLength > 0) {
-    xml += `          <w:maxLength w:val="${field.maxLength}"/>\n`;
-  }
-  xml += '        </w:textInput>\n';
-  xml += '      </w:ffData>\n';
-  xml += '    </w:fldChar>\n';
-  xml += '  </w:r>\n';
-  xml += '  <w:r>\n';
-  xml += '    <w:instrText xml:space="preserve"> FORMTEXT </w:instrText>\n';
-  xml += '  </w:r>\n';
-  xml += '  <w:r>\n';
-  xml += '    <w:fldChar w:fldCharType="separate"/>\n';
-  xml += '  </w:r>\n';
-  xml += '  <w:r>\n';
-  xml += `    <w:t xml:space="preserve">${escXml(field.value || '     ')}</w:t>\n`;
-  xml += '  </w:r>\n';
-  xml += '  <w:r>\n';
-  xml += '    <w:fldChar w:fldCharType="end"/>\n';
-  xml += '  </w:r>\n';
-  return xml;
+  if (field.fieldType === 'Tx') return generateTextFieldRuns(field);
+  if (field.fieldType === 'Btn') return generateCheckBoxRuns(field);
+  if (field.fieldType === 'Ch') return generateDropdownRuns(field);
+  return '';
 }
 
 /**

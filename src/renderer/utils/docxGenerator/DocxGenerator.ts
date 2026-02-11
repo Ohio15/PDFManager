@@ -303,136 +303,114 @@ export async function generateDocx(
       }
     }
 
-    // -- Extract form fields from Widget annotations --
+    // -- Extract form field annotations --
     const formFields: DocxFormField[] = [];
     try {
       const annotations = await page.getAnnotations({ intent: 'display' });
-      for (const annot of annotations) {
-        if (annot.subtype !== 'Widget') continue;
 
-        const rect = annot.rect; // [x1, y1, x2, y2] in PDF coords (bottom-left origin)
-        if (!rect || rect.length < 4) continue;
-        const fieldWidth = Math.abs(rect[2] - rect[0]);
-        const fieldHeight = Math.abs(rect[3] - rect[1]);
-        const xPos = rect[0];
-        // Convert from bottom-left to top-left origin
-        const yPos = pageHeight - rect[3];
+      // Filter to Widget annotations with a fieldType
+      const widgetAnnotations = annotations.filter(
+        (a: any) => a.subtype === 'Widget' && a.fieldType
+      );
 
-        let fieldType: DocxFormField['fieldType'] = 'text';
-        let checked = false;
-        let options: string[] = [];
-        let value = '';
-        const maxLength = annot.maxLen || 0;
+      for (const widget of widgetAnnotations) {
+        const [x1, y1, x2, y2] = widget.rect;
+        if (!widget.rect || widget.rect.length < 4) continue;
 
-        // Use fieldType ('Tx', 'Btn', 'Ch') as primary discriminator
-        const pdfFieldType = annot.fieldType;
+        // Skip push buttons (submit/reset) — not form data
+        if (widget.pushButton) continue;
 
-        if (pdfFieldType === 'Btn') {
-          // Button field — could be checkbox, radio, or push button
-          if (annot.pushButton) continue; // Skip push buttons
-          fieldType = 'checkbox'; // Both checkboxes and radios emit as DOCX checkboxes
-          checked = annot.fieldValue === annot.exportValue ||
-                    annot.fieldValue === 'Yes' ||
-                    annot.fieldValue === 'On' ||
-                    annot.fieldValue === true;
-          // For radio buttons, check if not "Off"
-          if (annot.radioButton) {
-            checked = !!annot.fieldValue && annot.fieldValue !== 'Off';
-          }
-        } else if (pdfFieldType === 'Ch') {
-          // Choice field — dropdown or listbox
-          fieldType = 'dropdown';
-          options = annot.options?.map((o: any) =>
-            o.displayValue || o.exportValue || String(o)
-          ) || [];
-          value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
-        } else if (pdfFieldType === 'Tx') {
-          // Text field
-          fieldType = 'text';
-          value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
-        } else {
-          // Fallback: use boolean property checks (older pdfjs or non-standard)
-          if (annot.checkBox || annot.radioButton) {
-            fieldType = 'checkbox';
-            checked = annot.fieldValue === annot.exportValue ||
-                      annot.fieldValue === 'Yes' ||
-                      annot.fieldValue === 'On' ||
-                      annot.fieldValue === true;
-          } else if (annot.combo || annot.listBox) {
-            fieldType = 'dropdown';
-            options = annot.options?.map((o: any) =>
-              o.displayValue || o.exportValue || String(o)
-            ) || [];
-            value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
-          } else if (annot.pushButton) {
-            continue; // Skip push buttons
-          } else {
-            // Default to text
-            fieldType = 'text';
-            value = typeof annot.fieldValue === 'string' ? annot.fieldValue : '';
+        // Determine checked state for Btn fields
+        let isChecked = false;
+        if (widget.fieldType === 'Btn') {
+          isChecked = widget.fieldValue !== 'Off' && widget.fieldValue !== '' &&
+                      widget.fieldValue !== undefined && widget.fieldValue !== null;
+        }
+
+        // Build options for Ch (choice) fields
+        const options: Array<{ exportValue: string; displayValue: string }> = [];
+        if (widget.options && Array.isArray(widget.options)) {
+          for (const o of widget.options) {
+            if (typeof o === 'string') {
+              options.push({ exportValue: o, displayValue: o });
+            } else {
+              options.push({
+                exportValue: o.exportValue || String(o),
+                displayValue: o.displayValue || o.exportValue || String(o),
+              });
+            }
           }
         }
 
         formFields.push({
-          fieldName: annot.fieldName || '',
-          fieldType,
-          value,
+          fieldType: widget.fieldType,
+          fieldName: widget.fieldName || '',
+          fieldValue: typeof widget.fieldValue === 'string' ? widget.fieldValue : '',
+          isCheckBox: widget.checkBox === true,
+          isRadioButton: widget.radioButton === true,
+          isChecked,
           options,
-          checked,
-          yPosition: yPos,
-          xPosition: xPos,
-          width: fieldWidth,
-          height: fieldHeight,
-          pageIndex: pageIdx,
-          maxLength,
+          readOnly: widget.readOnly || false,
+          rect: widget.rect as [number, number, number, number],
+          x: x1,
+          y: pageHeight - y2, // flip to top-left origin
+          width: x2 - x1,
+          height: y2 - y1,
+          maxLength: widget.maxLen || 0,
         });
       }
-    } catch (e) {
-      console.warn('[DocxGenerator] Form field extraction failed for page', pageIdx, e);
+    } catch {
+      // Form field extraction failure is non-fatal
     }
 
     if (formFields.length > 0) {
       documentHasFormFields = true;
     }
 
-    // -- Merge form fields inline with nearby paragraphs --
+    // -- Associate form fields with text labels by position --
+    // For each form field, find its nearest text label:
+    //   - Checkboxes: label is to the RIGHT of the checkbox
+    //   - Text inputs / Dropdowns: label is to the LEFT of the field
+    //   - Fallback: text directly ABOVE the field (within ~20pt)
     const consumedFieldIndices = new Set<number>();
-    for (let fi = 0; fi < formFields.length; fi++) {
-      const field = formFields[fi];
-      // Find the closest paragraph at the same Y baseline
-      let bestPara: DocxParagraph | null = null;
-      let bestDist = Infinity;
-      for (const para of paragraphs) {
-        if (para.yPosition === undefined) continue;
-        const dist = Math.abs(para.yPosition - field.yPosition);
-        if (dist < bestDist && dist <= BASELINE_TOLERANCE * 4) {
-          bestDist = dist;
-          bestPara = para;
+    const BASELINE_TOL = 5; // Y tolerance for "same line" in PDF points
+
+    for (const para of paragraphs) {
+      if (!para.inlineFormFields) para.inlineFormFields = [];
+
+      for (let fi = 0; fi < formFields.length; fi++) {
+        if (consumedFieldIndices.has(fi)) continue;
+        const field = formFields[fi];
+
+        // Check each line of text in the paragraph for proximity
+        const paraY = para.yPosition ?? 0;
+        const paraMinX = para.minX ?? 0;
+
+        // Find the rightmost text X for this paragraph (approximate from runs)
+        // We'll use a wider tolerance for Y matching
+        const yClose = Math.abs(field.y - paraY) <= BASELINE_TOL;
+
+        if (!yClose) {
+          // Fallback: check if field is directly below the paragraph (within ~20pt)
+          const fieldBelowPara = field.y > paraY && (field.y - paraY) <= 20;
+          if (!fieldBelowPara) continue;
         }
-      }
-      // Also check table cell paragraphs
-      if (!bestPara) {
-        for (const tbl of tables) {
-          for (const row of tbl.rows) {
-            for (const cell of row.cells) {
-              for (const para of cell.paragraphs) {
-                if (para.yPosition === undefined) continue;
-                const dist = Math.abs(para.yPosition - field.yPosition);
-                if (dist < bestDist && dist <= BASELINE_TOLERANCE * 4) {
-                  bestDist = dist;
-                  bestPara = para;
-                }
-              }
-            }
+
+        if (field.fieldType === 'Btn' && (field.isCheckBox || field.isRadioButton)) {
+          // Checkbox: look for label text to the RIGHT
+          // Checkbox X should be < paragraph's left edge (checkbox comes first)
+          if (yClose && field.x < paraMinX) {
+            para.inlineFormFields.push({ field, position: 'before' });
+            consumedFieldIndices.add(fi);
+          }
+        } else {
+          // Text input / Dropdown: label is to the LEFT, field is to the RIGHT
+          // Field X should be > paragraph's left edge
+          if (yClose && field.x >= paraMinX) {
+            para.inlineFormFields.push({ field, position: 'after' });
+            consumedFieldIndices.add(fi);
           }
         }
-      }
-
-      if (bestPara) {
-        if (!bestPara.inlineFormFields) bestPara.inlineFormFields = [];
-        const position = field.xPosition < (bestPara.minX ?? Infinity) ? 'before' : 'after';
-        bestPara.inlineFormFields.push({ field, position });
-        consumedFieldIndices.add(fi);
       }
     }
 
@@ -451,7 +429,7 @@ export async function generateDocx(
     // Only add unconsumed form fields as standalone elements
     for (let fi = 0; fi < formFields.length; fi++) {
       if (!consumedFieldIndices.has(fi)) {
-        positioned.push({ y: formFields[fi].yPosition, elem: { type: 'formField', element: formFields[fi] } });
+        positioned.push({ y: formFields[fi].y, elem: { type: 'formField', element: formFields[fi] } });
       }
     }
     for (const tbl of tables) {

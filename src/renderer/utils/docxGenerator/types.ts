@@ -86,26 +86,32 @@ export interface DocxTable {
 
 /** A form field extracted from PDF Widget annotations */
 export interface DocxFormField {
-  /** Field name from the PDF AcroForm */
+  /** PDF field type: Tx = text, Btn = button/checkbox/radio, Ch = choice/dropdown */
+  fieldType: 'Tx' | 'Btn' | 'Ch';
+  /** Full field name path from the PDF AcroForm */
   fieldName: string;
-  /** Field type: text, checkbox, dropdown */
-  fieldType: 'text' | 'checkbox' | 'dropdown';
-  /** Current value if any */
-  value: string;
-  /** Options for dropdown fields */
-  options: string[];
-  /** Whether checkbox is checked */
-  checked: boolean;
-  /** Y position on the page in PDF points for ordering */
-  yPosition: number;
-  /** X position on the page in PDF points */
-  xPosition: number;
+  /** Current field value (string for text/dropdown, "Off" for unchecked checkbox) */
+  fieldValue: string;
+  /** True if this is a checkbox widget */
+  isCheckBox: boolean;
+  /** True if this is a radio button widget */
+  isRadioButton: boolean;
+  /** True if the checkbox/radio is in checked state */
+  isChecked: boolean;
+  /** Options for dropdown/listbox fields */
+  options: Array<{ exportValue: string; displayValue: string }>;
+  /** Whether the field is read-only */
+  readOnly: boolean;
+  /** Original PDF rect [x1, y1, x2, y2] in bottom-left origin */
+  rect: [number, number, number, number];
+  /** X position in top-left origin coordinate system */
+  x: number;
+  /** Y position in top-left origin coordinate system */
+  y: number;
   /** Width in PDF points */
   width: number;
   /** Height in PDF points */
   height: number;
-  /** Page index */
-  pageIndex: number;
   /** Max length for text fields (0 = unlimited) */
   maxLength: number;
 }

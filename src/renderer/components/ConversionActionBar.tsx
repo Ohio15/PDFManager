@@ -5,6 +5,7 @@ interface ConversionActionBarProps {
   visible: boolean;
   onClose: () => void;
   onConvertToImages: () => void;
+  onConvertToDocx: () => void;
   libreOfficeAvailable?: boolean;
 }
 
@@ -12,6 +13,7 @@ const ConversionActionBar: React.FC<ConversionActionBarProps> = ({
   visible,
   onClose,
   onConvertToImages,
+  onConvertToDocx,
 }) => {
   if (!visible) return null;
 
@@ -23,6 +25,14 @@ const ConversionActionBar: React.FC<ConversionActionBarProps> = ({
           PDF loaded. Convert to:
         </span>
         <div className="action-bar-buttons">
+          <button
+            className="action-btn"
+            onClick={onConvertToDocx}
+            title="Convert PDF to Word document"
+          >
+            <FileText size={16} />
+            Word
+          </button>
           <button
             className="action-btn"
             onClick={onConvertToImages}

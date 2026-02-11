@@ -13,6 +13,7 @@ import ExtractPagesDialog from './components/ExtractPagesDialog';
 import ExtractImagesDialog from './components/ExtractImagesDialog';
 import ConvertToPdfDialog from './components/ConvertToPdfDialog';
 import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
+import ConvertToDocxDialog from './components/ConvertToDocxDialog';
 import PrintDialog from './components/PrintDialog';
 import SearchBar from './components/SearchBar';
 import ShortcutsDialog from './components/ShortcutsDialog';
@@ -110,6 +111,7 @@ const App: React.FC = () => {
   const [extractImagesDialogOpen, setExtractImagesDialogOpen] = useState(false);
   const [convertDialogOpen, setConvertDialogOpen] = useState(false);
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
+  const [convertToDocxDialogOpen, setConvertToDocxDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [searchBarOpen, setSearchBarOpen] = useState(false);
@@ -704,6 +706,25 @@ const App: React.FC = () => {
     return { count: convertedCount, folder: outputDir };
   }, [document, toast]);
 
+  // Convert PDF to DOCX handler
+  const handleConvertToDocx = useCallback(async (
+    outputDir: string
+  ): Promise<{ count: number; folder: string }> => {
+    if (!document) return { count: 0, folder: outputDir };
+
+    const { generateDocx } = await import('./utils/docxGenerator/DocxGenerator');
+
+    const baseName = document.fileName.replace(/\.pdf$/i, '');
+    const result = await generateDocx(document.pdfData);
+
+    const base64 = uint8ArrayToBase64(result.data);
+    const filePath = `${outputDir}/${baseName}.docx`;
+    await window.electronAPI.saveFileToPath(base64, filePath);
+
+    toast.success(`Converted ${result.pageCount} pages to Word document`);
+    return { count: result.pageCount, folder: outputDir };
+  }, [document, toast]);
+
   // Menu event handlers
   useEffect(() => {
     const menuActions: Record<string, () => void> = {
@@ -1061,6 +1082,7 @@ const App: React.FC = () => {
               visible={showConversionBar}
               onClose={() => setShowConversionBar(false)}
               onConvertToImages={() => setConvertFromDialogOpen(true)}
+              onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
               libreOfficeAvailable={libreOfficeAvailable}
             />
           </>
@@ -1088,6 +1110,7 @@ const App: React.FC = () => {
           onRotateAll={handleRotateAllPages}
           onConvertToPdf={() => setConvertDialogOpen(true)}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
+          onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
           libreOfficeAvailable={libreOfficeAvailable}
         />
       </div>
@@ -1148,6 +1171,17 @@ const App: React.FC = () => {
           isOpen={convertFromDialogOpen}
           onClose={() => setConvertFromDialogOpen(false)}
           onConvert={handleConvertFromPdf}
+          fileName={document.fileName}
+          pageCount={document.pageCount}
+          filePath={document.filePath || ''}
+        />
+      )}
+
+      {document && (
+        <ConvertToDocxDialog
+          isOpen={convertToDocxDialogOpen}
+          onClose={() => setConvertToDocxDialogOpen(false)}
+          onConvert={handleConvertToDocx}
           fileName={document.fileName}
           pageCount={document.pageCount}
           filePath={document.filePath || ''}

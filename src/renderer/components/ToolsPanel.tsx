@@ -24,6 +24,7 @@ interface ToolsPanelProps {
   onRotateAll: () => void;
   onConvertToPdf: () => void;
   onConvertFromPdf: () => void;
+  onConvertToDocx: () => void;
   libreOfficeAvailable: boolean;
 }
 
@@ -38,6 +39,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onRotateAll,
   onConvertToPdf,
   onConvertFromPdf,
+  onConvertToDocx,
   libreOfficeAvailable,
 }) => {
   const tools = [
@@ -147,6 +149,15 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
           >
             {conversionTool.icon}
             <span>{conversionTool.label}</span>
+          </button>
+          <button
+            className="tool-btn"
+            onClick={onConvertToDocx}
+            disabled={disabled}
+            title="Convert PDF to Word document (.docx)"
+          >
+            <FileText size={18} />
+            <span>PDF to Word</span>
           </button>
           <button
             className="tool-btn"

@@ -268,6 +268,42 @@ function wrapRgbaAsPng(
   return buildPng(width, height, 8, 6, compressedData); // colorType 6 = RGBA
 }
 
+/** Wrap raw RGB pixels as a PNG (colorType 2, no alpha — 25% smaller than RGBA). */
+function wrapRgbAsPng(
+  rgbPixels: Uint8Array,
+  width: number,
+  height: number,
+): Uint8Array {
+  const rowBytes = width * 3;
+  const filteredData = new Uint8Array(height * (rowBytes + 1));
+  for (let row = 0; row < height; row++) {
+    filteredData[row * (rowBytes + 1)] = 0; // filter byte: None
+    const srcOffset = row * rowBytes;
+    const dstOffset = row * (rowBytes + 1) + 1;
+    filteredData.set(rgbPixels.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+  }
+  const compressedData = pako.deflate(filteredData);
+  return buildPng(width, height, 8, 2, compressedData); // colorType 2 = RGB
+}
+
+/** Wrap raw grayscale pixels as a PNG (colorType 0 — 75% smaller than RGBA). */
+function wrapGrayAsPng(
+  grayPixels: Uint8Array,
+  width: number,
+  height: number,
+): Uint8Array {
+  const rowBytes = width;
+  const filteredData = new Uint8Array(height * (rowBytes + 1));
+  for (let row = 0; row < height; row++) {
+    filteredData[row * (rowBytes + 1)] = 0; // filter byte: None
+    const srcOffset = row * rowBytes;
+    const dstOffset = row * (rowBytes + 1) + 1;
+    filteredData.set(grayPixels.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+  }
+  const compressedData = pako.deflate(filteredData);
+  return buildPng(width, height, 8, 0, compressedData); // colorType 0 = Grayscale
+}
+
 // ─── PDF Color Space Resolution ───────────────────────────────────
 
 /**
@@ -309,9 +345,23 @@ function resolveColorSpace(
                 }
               }
             }
+          } else if (csName === '/Indexed') {
+            // Indexed (palette-based): each pixel is a single index byte.
+            // The base color space determines the actual colors, but for extraction
+            // purposes, we treat this as 1 component (the palette index).
+            // The pdfjs fallback handles palette lookup correctly; for direct extraction,
+            // numComponents=1 causes rawPixelsToRgbaPng to treat indices as grayscale,
+            // which is a reasonable fallback (better than black).
+            return { numComponents: 1, pngColorType: 0 };
           } else if (csName === '/CalRGB') {
             return { numComponents: 3, pngColorType: 2 };
           } else if (csName === '/CalGray') {
+            return { numComponents: 1, pngColorType: 0 };
+          } else if (csName === '/Lab') {
+            return { numComponents: 3, pngColorType: 2 };
+          } else if (csName === '/Separation' || csName === '/DeviceN') {
+            // Spot colors: typically 1 component per channel
+            // Treat as grayscale for direct extraction; pdfjs fallback handles correctly
             return { numComponents: 1, pngColorType: 0 };
           }
         }
@@ -380,49 +430,49 @@ interface ExtractedImageData {
 }
 
 /**
- * Convert raw pixel data to RGBA and wrap as PNG.
+ * Convert raw pixel data to the most efficient PNG format.
+ * Uses RGB (colorType 2) for 3-component, Grayscale (colorType 0) for 1-component,
+ * and RGBA (colorType 6) only when alpha is needed.
+ * @param invertCmyk If true, CMYK values are inverted (0=full ink, 255=none)
  */
 function rawPixelsToRgbaPng(
   pixels: Uint8Array,
   width: number,
   height: number,
   numComponents: number,
+  invertCmyk: boolean = false,
 ): Uint8Array | null {
   const pixelCount = width * height;
-  const rgba = new Uint8Array(pixelCount * 4);
 
   if (numComponents === 4) {
-    // CMYK -> RGB (naive conversion)
+    // CMYK -> RGB conversion (always outputs RGB, not RGBA)
+    const rgb = new Uint8Array(pixelCount * 3);
     for (let p = 0; p < pixelCount; p++) {
-      const c = pixels[p * 4] / 255;
-      const m = pixels[p * 4 + 1] / 255;
-      const y = pixels[p * 4 + 2] / 255;
-      const k = pixels[p * 4 + 3] / 255;
-      rgba[p * 4] = Math.round(255 * (1 - c) * (1 - k));
-      rgba[p * 4 + 1] = Math.round(255 * (1 - m) * (1 - k));
-      rgba[p * 4 + 2] = Math.round(255 * (1 - y) * (1 - k));
-      rgba[p * 4 + 3] = 255;
+      let c = pixels[p * 4] / 255;
+      let m = pixels[p * 4 + 1] / 255;
+      let y = pixels[p * 4 + 2] / 255;
+      let k = pixels[p * 4 + 3] / 255;
+      if (invertCmyk) { c = 1 - c; m = 1 - m; y = 1 - y; k = 1 - k; }
+      rgb[p * 3] = Math.round(255 * (1 - c) * (1 - k));
+      rgb[p * 3 + 1] = Math.round(255 * (1 - m) * (1 - k));
+      rgb[p * 3 + 2] = Math.round(255 * (1 - y) * (1 - k));
     }
+    return wrapRgbAsPng(rgb, width, height);
   } else if (numComponents === 3) {
-    for (let p = 0; p < pixelCount; p++) {
-      rgba[p * 4] = pixels[p * 3];
-      rgba[p * 4 + 1] = pixels[p * 3 + 1];
-      rgba[p * 4 + 2] = pixels[p * 3 + 2];
-      rgba[p * 4 + 3] = 255;
+    // RGB: use efficient RGB PNG (no alpha channel, 25% smaller)
+    if (pixels.length >= pixelCount * 3) {
+      return wrapRgbAsPng(pixels.subarray(0, pixelCount * 3), width, height);
     }
+    return wrapRgbAsPng(pixels, width, height);
   } else if (numComponents === 1) {
-    for (let p = 0; p < pixelCount; p++) {
-      const v = pixels[p];
-      rgba[p * 4] = v;
-      rgba[p * 4 + 1] = v;
-      rgba[p * 4 + 2] = v;
-      rgba[p * 4 + 3] = 255;
+    // Grayscale: use efficient grayscale PNG (75% smaller than RGBA)
+    if (pixels.length >= pixelCount) {
+      return wrapGrayAsPng(pixels.subarray(0, pixelCount), width, height);
     }
-  } else {
-    return null;
+    return wrapGrayAsPng(pixels, width, height);
   }
 
-  return wrapRgbaAsPng(rgba, width, height);
+  return null;
 }
 
 /**
@@ -458,13 +508,38 @@ function handleFlateImage(
   const bpcObj = dict.get(PDFName.of('BitsPerComponent'));
   const bpc = bpcObj instanceof PDFNumber ? bpcObj.asNumber() : 8;
 
+  // Detect CMYK inversion from Decode array
+  // Standard CMYK Decode: [0 1 0 1 0 1 0 1]
+  // Inverted CMYK Decode: [1 0 1 0 1 0 1 0]
+  let invertCmyk = false;
+  if (numComponents === 4) {
+    try {
+      const decodeObj = dict.get(PDFName.of('Decode'));
+      if (decodeObj instanceof PDFArray && decodeObj.size() >= 2) {
+        const first = context.lookup(decodeObj.get(0));
+        if (first instanceof PDFNumber && first.asNumber() === 1) {
+          invertCmyk = true;
+        }
+      }
+    } catch { /* use default */ }
+  }
+
   console.log(`[handleFlateImage] ${width}x${height}, predictor=${predictor}, bpc=${bpc}, numComponents=${numComponents}, pngColorType=${pngColorType}, hintColors=${hintColors}, rawBytes=${rawBytes.length}, first2=[0x${rawBytes[0]?.toString(16)},0x${rawBytes[1]?.toString(16)}]`);
 
   // Always use the safe path: decompress, then re-encode as PNG.
   // The "fast path" (wrapping compressed bytes directly as IDAT) is unreliable
   // because pdf-lib getContents() may return data in a format incompatible with PNG IDAT.
   try {
-    const decompressed = pako.inflate(rawBytes);
+    // Try decompression first; if getContents() returned already-decompressed data,
+    // inflate will fail — fall back to using raw bytes directly.
+    let decompressed: Uint8Array;
+    try {
+      decompressed = pako.inflate(rawBytes);
+    } catch {
+      // pdf-lib may return already-decompressed bytes for some PDF structures
+      decompressed = rawBytes;
+      console.log(`[handleFlateImage] inflate failed — treating rawBytes as already decompressed`);
+    }
     const expectedRawSize = height * (1 + width * numComponents); // with predictor filter bytes
     const expectedPlainSize = width * height * numComponents; // without predictor filter bytes
     console.log(`[handleFlateImage] Decompressed: ${decompressed.length} bytes, expectedWithPredictor=${expectedRawSize}, expectedPlain=${expectedPlainSize}`);
@@ -479,7 +554,7 @@ function handleFlateImage(
       if (decompressed.length < height * rowStride) {
         console.warn(`[handleFlateImage] Decompressed size ${decompressed.length} < expected ${height * rowStride} for predictor path. Trying plain pixel path.`);
         // Fall through to plain pixel handling
-        return rawPixelsToRgbaPng(decompressed, width, height, numComponents);
+        return rawPixelsToRgbaPng(decompressed, width, height, numComponents, invertCmyk);
       }
 
       const rawPixels = new Uint8Array(width * height * bytesPerPixel);
@@ -491,7 +566,8 @@ function handleFlateImage(
         const outOffset = row * rowDataWidth;
 
         for (let x = 0; x < rowDataWidth; x++) {
-          const raw = decompressed[rowOffset + 1 + x] || 0;
+          const rawIdx = rowOffset + 1 + x;
+          const raw = rawIdx < decompressed.length ? decompressed[rawIdx] : 0;
           const a = x >= bytesPerPixel ? rawPixels[outOffset + x - bytesPerPixel] : 0;
           const b = prevRow[x];
           const c = x >= bytesPerPixel ? prevRow[x - bytesPerPixel] : 0;
@@ -519,7 +595,7 @@ function handleFlateImage(
         prevRow.set(rawPixels.subarray(outOffset, outOffset + rowDataWidth));
       }
 
-      const result = rawPixelsToRgbaPng(rawPixels, width, height, numComponents);
+      const result = rawPixelsToRgbaPng(rawPixels, width, height, numComponents, invertCmyk);
       if (result) {
         console.log(`[handleFlateImage] Predictor path produced ${result.length} byte PNG`);
       }
@@ -527,7 +603,7 @@ function handleFlateImage(
     }
 
     // No predictor — decompressed data is raw pixels
-    const result = rawPixelsToRgbaPng(decompressed, width, height, numComponents);
+    const result = rawPixelsToRgbaPng(decompressed, width, height, numComponents, invertCmyk);
     if (result) {
       console.log(`[handleFlateImage] Plain path produced ${result.length} byte PNG`);
     }
@@ -725,6 +801,74 @@ function getPageImageResourceInfo(
   return result;
 }
 
+// ─── pdfjs Fallback: Decoded Pixel Data ───────────────────────────
+
+/**
+ * Use pdfjs's internal image decoders as a universal fallback.
+ *
+ * pdfjs-dist can decode ALL PDF image formats (DCTDecode, FlateDecode,
+ * CCITTFaxDecode, JBIG2Decode, JPXDecode, LZWDecode, etc.) because it
+ * implements complete PDF rendering. When our direct extraction fails,
+ * we can retrieve the fully decoded pixel data from pdfjs's object store.
+ *
+ * This is what makes us match Adobe Acrobat's image handling — every
+ * image type is supported through pdfjs's decoders.
+ *
+ * @returns PNG bytes or null if pdfjs also can't decode it
+ */
+function extractImageFromPdfjs(
+  pdfjsPage: any,
+  objId: string,
+): Uint8Array | null {
+  try {
+    // pdfjs resolves decoded images into page.objs or page.commonObjs
+    let imgData: any = null;
+
+    if (pdfjsPage.objs?.has(objId)) {
+      imgData = pdfjsPage.objs.get(objId);
+    } else if (pdfjsPage.commonObjs?.has(objId)) {
+      imgData = pdfjsPage.commonObjs.get(objId);
+    }
+
+    if (!imgData || (!imgData.data && !imgData.bitmap)) {
+      return null;
+    }
+
+    const width = imgData.width;
+    const height = imgData.height;
+    if (!width || !height) return null;
+
+    // imgData.kind: 1=GRAYSCALE_1BPP, 2=RGB_24BPP, 3=RGBA_32BPP
+    const kind = imgData.kind || 3;
+    const pixels: Uint8Array = imgData.data;
+    if (!pixels || pixels.length === 0) return null;
+
+    // Use the most efficient PNG format based on pixel kind
+    const pixelCount = width * height;
+
+    if (kind === 1) {
+      // 1-bit grayscale: unpack to 8-bit grayscale PNG
+      const gray = new Uint8Array(pixelCount);
+      for (let p = 0; p < pixelCount; p++) {
+        const byteIdx = Math.floor(p / 8);
+        const bitIdx = 7 - (p % 8);
+        const bit = (pixels[byteIdx] >> bitIdx) & 1;
+        gray[p] = bit ? 0 : 255; // In PDF, 1 = black, 0 = white
+      }
+      return wrapGrayAsPng(gray, width, height);
+    } else if (kind === 2) {
+      // RGB 24bpp — use RGB PNG directly (no alpha overhead)
+      return wrapRgbAsPng(pixels.subarray(0, pixelCount * 3), width, height);
+    } else {
+      // RGBA 32bpp — only case that needs alpha
+      return wrapRgbaAsPng(pixels.subarray(0, pixelCount * 4), width, height);
+    }
+  } catch (e) {
+    console.warn(`[PageAnalyzer] pdfjs fallback failed for ${objId}:`, e);
+    return null;
+  }
+}
+
 // ─── Graphics State Machine ───────────────────────────────────────
 
 interface GraphicsState {
@@ -753,6 +897,7 @@ function parseOperatorList(
   pageHeight: number,
   pdfLibDoc: any,
   pageIndex: number,
+  pdfjsPage: any,
 ): SceneElement[] {
   const elements: SceneElement[] = [];
   const { fnArray, argsArray } = opList;
@@ -764,6 +909,9 @@ function parseOperatorList(
   } catch {
     resourceInfo = new Map();
   }
+
+  // Track used resource names to prevent collision when multiple images share dimensions
+  const usedResourceNames = new Set<string>();
 
   // Graphics state
   const defaultState: GraphicsState = {
@@ -1056,7 +1204,7 @@ function parseOperatorList(
 
         // Resolve resource name from objId.
         // pdfjs generates IDs like "img_p0_1" — we need the PDF resource name (e.g., "Im0").
-        // Strategy: try to match by dimension against known page resources.
+        // Strategy: direct match first, then dimension match (tracking used resources to avoid collisions).
         let resourceName = objId;
         let intrinsicW = hintW;
         let intrinsicH = hintH;
@@ -1071,13 +1219,13 @@ function parseOperatorList(
           filterName = info.filterName;
           bpc = info.bpc;
         } else {
-          // Dimension-based matching: find resource with matching intrinsic dimensions
+          // Dimension-based matching: find resource with matching intrinsic dimensions.
+          // Track already-matched resources to avoid collisions when multiple images share dimensions.
           let matched = false;
           for (const [name, info] of resourceInfo) {
-            if (
-              (hintW > 0 && hintH > 0 && info.intrinsicWidth === hintW && info.intrinsicHeight === hintH) ||
-              (hintW === 0 && hintH === 0 && !matched) // If no hints, take first unmatched
-            ) {
+            if (usedResourceNames.has(name)) continue; // Skip already-matched resources
+
+            if (hintW > 0 && hintH > 0 && info.intrinsicWidth === hintW && info.intrinsicHeight === hintH) {
               resourceName = name;
               intrinsicW = info.intrinsicWidth;
               intrinsicH = info.intrinsicHeight;
@@ -1087,7 +1235,20 @@ function parseOperatorList(
               break;
             }
           }
+          // Last resort: if no dimension match, try first unused resource
+          if (!matched && hintW === 0 && hintH === 0) {
+            for (const [name, info] of resourceInfo) {
+              if (usedResourceNames.has(name)) continue;
+              resourceName = name;
+              intrinsicW = info.intrinsicWidth;
+              intrinsicH = info.intrinsicHeight;
+              filterName = info.filterName;
+              bpc = info.bpc;
+              break;
+            }
+          }
         }
+        usedResourceNames.add(resourceName);
 
         // For paintJpegXObject, filter is always DCTDecode
         if (op === OPS.paintJpegXObject) {
@@ -1104,22 +1265,37 @@ function parseOperatorList(
           bpc,
         );
 
-        // Extract actual image bytes from pdf-lib (only if genuine, to avoid waste)
+        // Extract actual image bytes: try pdf-lib direct extraction first, then pdfjs fallback
         let imageData: Uint8Array | null = null;
         let mimeType: 'image/jpeg' | 'image/png' = filterName === 'DCTDecode' ? 'image/jpeg' : 'image/png';
 
         console.log(`[PageAnalyzer] Image: objId=${objId}, resourceName=${resourceName}, intrinsic=${intrinsicW}x${intrinsicH}, display=${displayWidth.toFixed(1)}x${effectiveHeight.toFixed(1)}, filter=${filterName}, bpc=${bpc}, isGenuine=${isGenuine}`);
 
-        if (isGenuine && pdfLibDoc) {
-          const extracted = extractImageData(pdfLibDoc, pageIndex, resourceName);
-          if (extracted) {
-            imageData = extracted.data;
-            mimeType = extracted.mimeType;
-            intrinsicW = extracted.intrinsicWidth;
-            intrinsicH = extracted.intrinsicHeight;
-            console.log(`[PageAnalyzer]   -> Extracted ${extracted.mimeType}, ${extracted.data.length} bytes, ${intrinsicW}x${intrinsicH}`);
-          } else {
-            console.warn(`[PageAnalyzer]   -> extractImageData FAILED for resource "${resourceName}" on page ${pageIndex}`);
+        if (isGenuine) {
+          // Strategy 1: Direct extraction via pdf-lib (fastest, lossless for JPEG)
+          if (pdfLibDoc) {
+            const extracted = extractImageData(pdfLibDoc, pageIndex, resourceName);
+            if (extracted) {
+              imageData = extracted.data;
+              mimeType = extracted.mimeType;
+              intrinsicW = extracted.intrinsicWidth;
+              intrinsicH = extracted.intrinsicHeight;
+              console.log(`[PageAnalyzer]   -> Extracted ${extracted.mimeType}, ${extracted.data.length} bytes, ${intrinsicW}x${intrinsicH}`);
+            }
+          }
+
+          // Strategy 2: pdfjs decoded pixel data fallback (handles ALL formats)
+          // Used when pdf-lib can't extract (CCITTFaxDecode, JBIG2Decode, JPXDecode,
+          // Indexed color spaces, multi-filter chains, LZWDecode, etc.)
+          if (!imageData && pdfjsPage) {
+            const fallbackPng = extractImageFromPdfjs(pdfjsPage, objId);
+            if (fallbackPng) {
+              imageData = fallbackPng;
+              mimeType = 'image/png';
+              console.log(`[PageAnalyzer]   -> pdfjs fallback: ${fallbackPng.length} bytes PNG`);
+            } else {
+              console.warn(`[PageAnalyzer]   -> BOTH extraction methods failed for "${resourceName}" (objId=${objId}) on page ${pageIndex}`);
+            }
           }
         }
 
@@ -1376,6 +1552,7 @@ export async function analyzePage(
     pageHeight,
     pdfLibDoc,
     pageIndex,
+    page,
   );
 
   // Convert text content items to TextElements

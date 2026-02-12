@@ -650,11 +650,25 @@ function generateParagraphGroupXml(
 
     xml += '<w:p>\n';
 
-    // Paragraph properties
-    if (alignment !== 'left') {
+    // Paragraph properties (alignment, background shading, borders)
+    const needsPPr = alignment !== 'left' || group.backgroundColor || group.bottomBorder;
+    if (needsPPr) {
       xml += '  <w:pPr>\n';
-      const jcVal = alignment === 'justify' ? 'both' : alignment;
-      xml += `    <w:jc w:val="${jcVal}"/>\n`;
+      if (alignment !== 'left') {
+        const jcVal = alignment === 'justify' ? 'both' : alignment;
+        xml += `    <w:jc w:val="${jcVal}"/>\n`;
+      }
+      if (group.backgroundColor) {
+        const bgHex = rgbToHex(group.backgroundColor);
+        xml += `    <w:shd w:val="clear" w:color="auto" w:fill="${bgHex}"/>\n`;
+      }
+      if (group.bottomBorder) {
+        const borderHex = rgbToHex(group.bottomBorder.color);
+        const borderSz = Math.round(group.bottomBorder.widthPt * 8); // half-points to eighths
+        xml += '    <w:pBdr>\n';
+        xml += `      <w:bottom w:val="single" w:sz="${Math.max(borderSz, 4)}" w:space="1" w:color="${borderHex}"/>\n`;
+        xml += '    </w:pBdr>\n';
+      }
       xml += '  </w:pPr>\n';
     }
 

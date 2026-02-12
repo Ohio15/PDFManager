@@ -31,6 +31,7 @@ import type {
 
 const OPS = {
   setLineWidth: 2,
+  setGState: 9,
   save: 10,
   restore: 11,
   transform: 12,
@@ -49,6 +50,8 @@ const OPS = {
   eoFillStroke: 25,
   closeFillStroke: 26,
   endPath: 28,
+  clip: 29,
+  eoClip: 30,
   setStrokeGray: 56,
   setFillGray: 57,
   setStrokeRGBColor: 58,
@@ -57,6 +60,7 @@ const OPS = {
   setFillCMYKColor: 61,
   paintJpegXObject: 82,
   paintImageXObject: 85,
+  constructPath: 91,
 } as const;
 
 // ─── Affine Matrix Types and Math ─────────────────────────────────
@@ -108,6 +112,15 @@ function cmykToRgb(c: number, m: number, y: number, k: number): RGB {
 function rgbToHex(r: number, g: number, b: number): string {
   const toHex = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0');
   return `${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+/**
+ * Normalize a color component from pdfjs to 0-1 range.
+ * pdfjs provides RGB values in 0-255 range (not 0-1 as per PDF spec).
+ * Gray and CMYK values may already be 0-1. We detect by checking if > 1.
+ */
+function normalizeColorComponent(v: number): number {
+  return v > 1 ? v / 255 : v;
 }
 
 // ─── Font Resolution ──────────────────────────────────────────────
@@ -1071,12 +1084,17 @@ function parseOperatorList(
       }
 
       // ── Color: Fill ──
+      // pdfjs provides RGB in 0-255 range; normalize to 0-1 for our types.
       case OPS.setFillRGBColor: {
-        state.fillColor = { r: args[0], g: args[1], b: args[2] };
+        state.fillColor = {
+          r: normalizeColorComponent(args[0]),
+          g: normalizeColorComponent(args[1]),
+          b: normalizeColorComponent(args[2]),
+        };
         break;
       }
       case OPS.setFillGray: {
-        const g = args[0];
+        const g = normalizeColorComponent(args[0]);
         state.fillColor = { r: g, g: g, b: g };
         break;
       }
@@ -1087,11 +1105,15 @@ function parseOperatorList(
 
       // ── Color: Stroke ──
       case OPS.setStrokeRGBColor: {
-        state.strokeColor = { r: args[0], g: args[1], b: args[2] };
+        state.strokeColor = {
+          r: normalizeColorComponent(args[0]),
+          g: normalizeColorComponent(args[1]),
+          b: normalizeColorComponent(args[2]),
+        };
         break;
       }
       case OPS.setStrokeGray: {
-        const g = args[0];
+        const g = normalizeColorComponent(args[0]);
         state.strokeColor = { r: g, g: g, b: g };
         break;
       }
@@ -1101,6 +1123,67 @@ function parseOperatorList(
       }
 
       // ── Path construction ──
+      // pdfjs emits BOTH individual path ops (moveTo, lineTo, etc.) AND the
+      // bundled constructPath meta-operator. constructPath packages sub-operations
+      // + coordinates into a single operator. We handle both forms.
+
+      case OPS.constructPath: {
+        // constructPath: pdfjs meta-operator bundling path sub-operations.
+        // args[0] = array of sub-operation codes (OPS.moveTo, OPS.lineTo, etc.)
+        // args[1] = flattened coordinate values
+        // args[2] = bounding box [minX, minY, maxX, maxY] (optional)
+        const subOps: number[] = args[0] || [];
+        const subArgs: number[] = args[1] || [];
+        let argIdx = 0;
+
+        for (const subOp of subOps) {
+          switch (subOp) {
+            case OPS.rectangle: {
+              pathOps.push({ type: 'rectangle', args: [subArgs[argIdx], subArgs[argIdx + 1], subArgs[argIdx + 2], subArgs[argIdx + 3]] });
+              argIdx += 4;
+              break;
+            }
+            case OPS.moveTo: {
+              pathOps.push({ type: 'moveTo', args: [subArgs[argIdx], subArgs[argIdx + 1]] });
+              argIdx += 2;
+              break;
+            }
+            case OPS.lineTo: {
+              pathOps.push({ type: 'lineTo', args: [subArgs[argIdx], subArgs[argIdx + 1]] });
+              argIdx += 2;
+              break;
+            }
+            case OPS.curveTo: {
+              pathOps.push({ type: 'curveTo', args: [subArgs[argIdx], subArgs[argIdx + 1], subArgs[argIdx + 2], subArgs[argIdx + 3], subArgs[argIdx + 4], subArgs[argIdx + 5]] });
+              argIdx += 6;
+              break;
+            }
+            case OPS.curveTo2: {
+              const lastPt2 = getLastPathPoint(pathOps);
+              pathOps.push({
+                type: 'curveTo',
+                args: [lastPt2.x, lastPt2.y, subArgs[argIdx], subArgs[argIdx + 1], subArgs[argIdx + 2], subArgs[argIdx + 3]],
+              });
+              argIdx += 4;
+              break;
+            }
+            case OPS.curveTo3: {
+              pathOps.push({
+                type: 'curveTo',
+                args: [subArgs[argIdx], subArgs[argIdx + 1], subArgs[argIdx + 2], subArgs[argIdx + 3], subArgs[argIdx + 2], subArgs[argIdx + 3]],
+              });
+              argIdx += 4;
+              break;
+            }
+            case OPS.closePath: {
+              pathOps.push({ type: 'closePath', args: [] });
+              break;
+            }
+          }
+        }
+        break;
+      }
+
       case OPS.moveTo: {
         pathOps.push({ type: 'moveTo', args: [args[0], args[1]] });
         break;

@@ -168,6 +168,10 @@ export interface ParagraphGroup {
   formFields: FormField[];
   y: number;
   x: number;
+  /** Background color from overlapping cell-fill rect (RGB 0-1 range) */
+  backgroundColor?: RGB | null;
+  /** Bottom border from overlapping separator rect */
+  bottomBorder?: { color: RGB; widthPt: number } | null;
 }
 
 /** A single element within a PageLayout, tagged by type */

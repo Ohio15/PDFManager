@@ -25,6 +25,7 @@ import type {
   DetectedCell,
   ParagraphGroup,
   RectRole,
+  RGB,
 } from './types';
 
 // ─── Constants ───────────────────────────────────────────────
@@ -1342,6 +1343,149 @@ function detectFormFieldTables(
   return tables;
 }
 
+// ─── Rect-to-Paragraph Styling ───────────────────────────────
+
+/**
+ * Apply visual styling from classified rectangles to paragraph groups.
+ *
+ * Handles two cases:
+ * 1. TALL cell-fill rects → paragraph backgroundColor (colored section headers)
+ * 2. THIN cell-fill rects & separators → paragraph bottomBorder (colored underlines)
+ *
+ * Many PDFs draw section headers as colored underlines (thin 1-2pt rects) just
+ * below the header text, not as tall background rectangles. This function
+ * detects both patterns.
+ */
+function applyRectStylingToParagraphs(
+  paragraphs: ParagraphGroup[],
+  rectRoles: Map<RectElement, RectRole>,
+  scene: PageScene,
+): void {
+  // Collect styled rects
+  const cellFills: RectElement[] = [];
+  const separators: RectElement[] = [];
+
+  for (const [rect, role] of rectRoles) {
+    if (role === 'cell-fill') cellFills.push(rect);
+    if (role === 'separator') separators.push(rect);
+  }
+
+  if (cellFills.length === 0 && separators.length === 0) return;
+
+  // Split cell-fills into background rects (tall) and underline rects (thin)
+  const bgFills: RectElement[] = [];
+  const underlineFills: RectElement[] = [];
+
+  for (const fill of cellFills) {
+    const fh = Math.abs(fill.height);
+    if (fh >= 5) {
+      bgFills.push(fill); // Tall enough to be a background
+    } else if (fh > 0.2) {
+      underlineFills.push(fill); // Thin colored line (likely underline/border)
+    }
+  }
+
+  // For each paragraph, compute its bounding box from texts and fields
+  for (const para of paragraphs) {
+    const items = [
+      ...para.texts.map(t => ({ x: t.x, y: t.y, w: t.width, h: t.height })),
+      ...para.formFields.map(f => ({ x: f.x, y: f.y, w: f.width, h: f.height })),
+    ];
+    if (items.length === 0) continue;
+
+    const paraLeft = Math.min(...items.map(it => it.x));
+    const paraTop = Math.min(...items.map(it => it.y));
+    const paraRight = Math.max(...items.map(it => it.x + it.w));
+    const paraBottom = Math.max(...items.map(it => it.y + it.h));
+    const paraCenterY = (paraTop + paraBottom) / 2;
+
+    // Check tall cell-fill rects for background color
+    for (const fill of bgFills) {
+      if (!fill.fillColor) continue;
+
+      const fx = Math.min(fill.x, fill.x + fill.width);
+      const fy = Math.min(fill.y, fill.y + fill.height);
+      const fw = Math.abs(fill.width);
+      const fh = Math.abs(fill.height);
+
+      // Check if the paragraph center falls within the rect
+      if (paraCenterY >= fy - 2 && paraCenterY <= fy + fh + 2 &&
+          paraLeft >= fx - 5 && paraLeft <= fx + fw + 5) {
+        // Skip white or near-white fills
+        const { r, g, b } = fill.fillColor;
+        if (r > 0.95 && g > 0.95 && b > 0.95) continue;
+
+        para.backgroundColor = fill.fillColor;
+        break;
+      }
+    }
+
+    // Check thin colored rects (underlines) for bottom borders
+    // These are typically 1-2pt tall colored lines just below section header text
+    if (!para.bottomBorder) {
+      // Find the best matching underline: closest one just below the paragraph
+      let bestUnderline: RectElement | null = null;
+      let bestGap = Infinity;
+
+      for (const ul of underlineFills) {
+        if (!ul.fillColor) continue;
+
+        const ux = Math.min(ul.x, ul.x + ul.width);
+        const uy = Math.min(ul.y, ul.y + ul.height);
+        const uw = Math.abs(ul.width);
+        const uh = Math.abs(ul.height);
+
+        // Skip white or near-white fills
+        const { r, g, b } = ul.fillColor;
+        if (r > 0.95 && g > 0.95 && b > 0.95) continue;
+
+        // Skip full-page-width decorative bars (header/footer decoration)
+        if (uw > scene.width * 0.9) continue;
+
+        // The underline should be just below the paragraph (within ~15pt)
+        const ulCenterY = uy + uh / 2;
+        const gap = ulCenterY - paraBottom;
+
+        if (gap >= -2 && gap <= 15 && gap < bestGap) {
+          // Check horizontal overlap — the underline should overlap the paragraph X range
+          if (ux < paraRight + 5 && ux + uw > paraLeft - 5) {
+            bestGap = gap;
+            bestUnderline = ul;
+          }
+        }
+      }
+
+      if (bestUnderline && bestUnderline.fillColor) {
+        para.bottomBorder = {
+          color: bestUnderline.fillColor,
+          widthPt: Math.max(Math.abs(bestUnderline.height), 1),
+        };
+      }
+    }
+
+    // Check separator rects for bottom borders
+    if (!para.bottomBorder) {
+      for (const sep of separators) {
+        const sx = Math.min(sep.x, sep.x + sep.width);
+        const sy = Math.min(sep.y, sep.y + sep.height);
+        const sw = Math.abs(sep.width);
+        const sh = Math.abs(sep.height);
+
+        const sepY = sy + sh / 2;
+        const gap = sepY - paraBottom;
+
+        if (gap >= -2 && gap <= 15) {
+          if (sx < paraRight && sx + sw > paraLeft) {
+            const color: RGB = sep.strokeColor || sep.fillColor || { r: 0, g: 0, b: 0 };
+            para.bottomBorder = { color, widthPt: Math.max(sh, sep.lineWidth || 0.5) };
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
 // ─── Main Entry Point ────────────────────────────────────────
 
 /**
@@ -1424,6 +1568,10 @@ export function buildPageLayout(scene: PageScene): PageLayout {
 
   // Group free text and fields into paragraphs
   const paragraphs = groupIntoParagraphs(freeTexts, freeFields);
+
+  // Step 5b: Apply visual styling from rects to paragraphs
+  // Map cell-fill rects (colored backgrounds) and separator rects to paragraphs
+  applyRectStylingToParagraphs(paragraphs, rectRoles, scene);
 
   // Step 6: Combine all layout elements and sort by Y position
   const layoutElements: LayoutElement[] = [];

@@ -56,6 +56,7 @@ export interface ElectronAPI {
   openMultipleFilesDialog: () => Promise<FileData[] | null>;
   selectOutputDirectory: () => Promise<string | null>;
   saveFileToPath: (data: string, filePath: string) => Promise<SaveResult>;
+  saveRawBytesToPath: (data: ArrayBuffer, filePath: string) => Promise<SaveResult>;
   saveImageToPath: (data: string, filePath: string) => Promise<SaveResult>;
   openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
   openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
@@ -130,6 +131,8 @@ const electronAPI: ElectronAPI = {
   selectOutputDirectory: () => ipcRenderer.invoke('select-output-directory'),
   saveFileToPath: (data: string, filePath: string) =>
     ipcRenderer.invoke('save-file-to-path', { data, filePath }),
+  saveRawBytesToPath: (data: ArrayBuffer, filePath: string) =>
+    ipcRenderer.invoke('save-raw-bytes-to-path', { data, filePath }),
   saveImageToPath: (data: string, filePath: string) =>
     ipcRenderer.invoke('save-image-to-path', { data, filePath }),
   openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath),

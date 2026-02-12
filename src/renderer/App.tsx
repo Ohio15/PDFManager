@@ -58,6 +58,7 @@ declare global {
       openMultipleFilesDialog: () => Promise<Array<{ path: string; data: string }> | null>;
       selectOutputDirectory: () => Promise<string | null>;
       saveFileToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+      saveRawBytesToPath: (data: ArrayBuffer, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       saveImageToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
       openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
@@ -825,9 +826,15 @@ const App: React.FC = () => {
     const baseName = document.fileName.replace(/\.pdf$/i, '');
     const result = await generateDocx(document.pdfData);
 
-    const base64 = uint8ArrayToBase64(result.data);
+    console.log(`[DOCX] Generated ${result.data.length} bytes, ${result.pageCount} pages`);
+    console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
+
+    // Send raw bytes directly via IPC (no base64 encoding/decoding)
     const filePath = `${outputDir}/${baseName}.docx`;
-    await window.electronAPI.saveFileToPath(base64, filePath);
+    await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
+      result.data.byteOffset,
+      result.data.byteOffset + result.data.byteLength
+    ), filePath);
 
     toast.success(`Converted ${result.pageCount} pages to Word document`);
     return { count: result.pageCount, folder: outputDir };

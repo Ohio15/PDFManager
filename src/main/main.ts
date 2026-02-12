@@ -706,6 +706,22 @@ ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
   }
 });
 
+// Save raw binary bytes directly (bypasses base64 encoding for DOCX)
+ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
+  try {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    // data arrives as ArrayBuffer via structured clone — convert to Buffer
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(filePath, buffer);
+    return { success: true, path: filePath };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
 ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
   try {
     const buffer = Buffer.from(data, 'base64');

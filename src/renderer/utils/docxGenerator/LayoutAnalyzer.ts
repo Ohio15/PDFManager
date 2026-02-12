@@ -4,14 +4,13 @@
  * Converts a PageScene (flat list of PDF content-stream elements) into a PageLayout
  * (structured sequence of tables, paragraphs, and images in reading order).
  *
- * Core algorithm: VECTOR-BASED table detection.
- *   - Stroked rectangles form grid borders → table structure
- *   - Filled rectangles provide cell shading
- *   - Text/form fields assigned to cells by coordinate containment (center point)
- *   - Remaining text grouped into paragraphs by baseline proximity and line gaps
+ * Two table detection strategies:
+ *   1. VECTOR-BASED: Stroked rectangles form grid borders → table structure
+ *   2. FORM-FIELD SPATIAL: When no vector rects exist (form fields in annotation streams),
+ *      detect tables from the spatial arrangement of text input fields.
  *
- * This replaces the old text-gap heuristic approach which was fundamentally broken
- * for any non-trivial table layout.
+ * Remaining text grouped into paragraphs by baseline proximity and line gaps.
+ * Section headers (larger font size) trigger paragraph breaks.
  */
 
 import type {
@@ -687,7 +686,7 @@ function groupIntoParagraphs(
     line.texts.sort((a, b) => a.x - b.x);
   }
 
-  // Step 2: Group lines into paragraphs by gap analysis
+  // Step 2: Group lines into paragraphs by gap analysis AND font size changes
   const paragraphs: ParagraphGroup[] = [];
   let paraLines: TextLine[] = [lines[0]];
 
@@ -700,8 +699,16 @@ function groupIntoParagraphs(
     const gap = currLine.y - prevLineBottom;
     const avgFontSize = (prevLine.avgFontSize + currLine.avgFontSize) / 2;
 
-    if (gap > avgFontSize * PARA_GAP_FACTOR) {
-      // Large gap — start new paragraph
+    // Break on large gap
+    const largeGap = gap > avgFontSize * PARA_GAP_FACTOR;
+
+    // Break on significant font size change (section headers at different size)
+    const fontSizeRatio = Math.max(prevLine.avgFontSize, currLine.avgFontSize) /
+                          Math.min(prevLine.avgFontSize, currLine.avgFontSize);
+    const fontSizeChanged = fontSizeRatio > 1.15; // >15% size difference
+
+    if (largeGap || fontSizeChanged) {
+      // Start new paragraph
       paragraphs.push(finalizeParagraphGroup(paraLines));
       paraLines = [currLine];
     } else {
@@ -777,6 +784,455 @@ function finalizeParagraphGroup(
   };
 }
 
+// ─── Form Field Spatial Table Detection ──────────────────────
+
+/** Tolerance for grouping form fields into the same Y row */
+const FIELD_ROW_TOLERANCE = 8;
+
+/** Tolerance for X-alignment of columns across rows */
+const FIELD_COL_TOLERANCE = 15;
+
+/** Tolerance for associating text labels with form field rows */
+const LABEL_Y_TOLERANCE = 10;
+
+/**
+ * A row of spatially-aligned form fields.
+ */
+interface FieldRow {
+  centerY: number;
+  fields: FormField[];
+}
+
+/**
+ * Cluster form fields by Y position into rows.
+ * Fields within FIELD_ROW_TOLERANCE of each other's center Y are grouped together.
+ */
+function clusterFieldsByY(fields: FormField[]): FieldRow[] {
+  if (fields.length === 0) return [];
+
+  const sorted = [...fields].sort((a, b) => a.y - b.y);
+  const rows: FieldRow[] = [];
+
+  for (const field of sorted) {
+    const centerY = field.y + field.height / 2;
+    let assigned = false;
+
+    for (const row of rows) {
+      if (Math.abs(centerY - row.centerY) <= FIELD_ROW_TOLERANCE) {
+        row.fields.push(field);
+        // Update center to running mean
+        row.centerY = row.fields.reduce((s, f) => s + f.y + f.height / 2, 0) / row.fields.length;
+        assigned = true;
+        break;
+      }
+    }
+
+    if (!assigned) {
+      rows.push({ centerY, fields: [field] });
+    }
+  }
+
+  // Sort fields within each row by X
+  for (const row of rows) {
+    row.fields.sort((a, b) => a.x - b.x);
+  }
+
+  return rows.sort((a, b) => a.centerY - b.centerY);
+}
+
+/**
+ * Check if two field rows have matching X-alignment (same column structure).
+ * Columns match when the X-start positions are within FIELD_COL_TOLERANCE.
+ */
+function rowsAlignX(rowA: FieldRow, rowB: FieldRow): boolean {
+  if (rowA.fields.length !== rowB.fields.length) return false;
+
+  for (let c = 0; c < rowA.fields.length; c++) {
+    if (Math.abs(rowA.fields[c].x - rowB.fields[c].x) > FIELD_COL_TOLERANCE) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Find text elements that form a header row above a field table.
+ * Returns texts matching the column positions of the first field row.
+ *
+ * Excludes section headers — texts that span multiple columns or have a
+ * significantly larger font size than the column header candidates.
+ */
+function findTableHeaderTexts(
+  firstRow: FieldRow,
+  allTexts: TextElement[],
+): TextElement[] {
+  const tableTopY = firstRow.fields[0].y;
+
+  // Look for text items just above the table (within ~30pt above)
+  const candidates = allTexts.filter(t => {
+    const textBottom = t.y + t.height;
+    const gap = tableTopY - textBottom;
+    return gap >= -2 && gap <= 30;
+  });
+
+  if (candidates.length === 0) return [];
+
+  // Compute average single-column width for filtering
+  const avgColWidth = firstRow.fields.reduce((s, f) => s + f.width, 0) / firstRow.fields.length;
+
+  // Check if candidate texts align with the table columns
+  const matched: TextElement[] = [];
+
+  for (const text of candidates) {
+    // Exclude texts that span wider than 1.5x a single column (section headers)
+    if (text.width > avgColWidth * 1.5) continue;
+
+    const textCenterX = text.x + text.width / 2;
+
+    // Check if text center falls within any column's X range
+    for (const field of firstRow.fields) {
+      const colLeft = field.x - FIELD_COL_TOLERANCE;
+      const colRight = field.x + field.width + FIELD_COL_TOLERANCE;
+
+      if (textCenterX >= colLeft && textCenterX <= colRight) {
+        matched.push(text);
+        break;
+      }
+    }
+  }
+
+  // Exclude candidates with significantly different font sizes (section headers)
+  if (matched.length >= 2) {
+    const fontSizes = matched.map(t => t.fontSize);
+    const medianFontSize = fontSizes.sort((a, b) => a - b)[Math.floor(fontSizes.length / 2)];
+
+    const filtered = matched.filter(t =>
+      Math.abs(t.fontSize - medianFontSize) / medianFontSize < 0.2 // within 20%
+    );
+
+    if (filtered.length >= 2) {
+      return filtered;
+    }
+  }
+
+  // Only return if we found headers matching the column structure
+  if (matched.length >= 2) {
+    return matched;
+  }
+  return [];
+}
+
+/**
+ * Build a DetectedTable from spatially-aligned form field rows.
+ *
+ * Creates a table grid where:
+ * - Each field row becomes a table row
+ * - Columns are derived from the X positions of the fields
+ * - Optionally includes a text header row above the fields
+ * - Text labels near cells are assigned by coordinate proximity
+ */
+function buildTableFromFieldRows(
+  fieldRows: FieldRow[],
+  allTexts: TextElement[],
+  headerTexts: TextElement[],
+  nCols: number,
+): DetectedTable | null {
+  if (fieldRows.length === 0 || nCols < 2) return null;
+
+  // Compute column boundaries from the first row's field positions
+  // Each column spans from field.x to field.x + field.width
+  const colStarts: number[] = [];
+  const colEnds: number[] = [];
+
+  for (let c = 0; c < nCols; c++) {
+    // Average X-start and width across all rows for this column
+    let sumX = 0;
+    let sumRight = 0;
+    let count = 0;
+
+    for (const row of fieldRows) {
+      if (c < row.fields.length) {
+        sumX += row.fields[c].x;
+        sumRight += row.fields[c].x + row.fields[c].width;
+        count++;
+      }
+    }
+
+    colStarts.push(count > 0 ? sumX / count : 0);
+    colEnds.push(count > 0 ? sumRight / count : 0);
+  }
+
+  // Column boundaries: use midpoints between consecutive field starts.
+  // Extend left/right edges to capture text labels that are outside the field boxes.
+  const colBounds: number[] = [];
+
+  // Find nearby texts in the table's Y range for better left boundary
+  const tableMinY = fieldRows[0].fields[0].y - 5;
+  const tableMaxY = fieldRows[fieldRows.length - 1].fields[0].y +
+                    fieldRows[fieldRows.length - 1].fields[0].height + 5;
+  const nearbyTexts = allTexts.filter(t => {
+    const ty = t.y + t.height / 2;
+    return ty >= tableMinY && ty <= tableMaxY;
+  });
+
+  // Left boundary: minimum of first column field start, header texts, and nearby labels
+  const leftCandidates = [colStarts[0]];
+  if (headerTexts.length > 0) leftCandidates.push(...headerTexts.map(t => t.x));
+  for (const t of nearbyTexts) {
+    if (t.x < colStarts[0]) leftCandidates.push(t.x);
+  }
+  colBounds.push(Math.min(...leftCandidates) - 2);
+
+  for (let c = 0; c < nCols - 1; c++) {
+    // Boundary between column c and c+1: midpoint between end of c and start of c+1
+    colBounds.push((colEnds[c] + colStarts[c + 1]) / 2);
+  }
+  colBounds.push(colEnds[nCols - 1] + 2);
+
+  // Row boundaries
+  const rowBounds: number[] = [];
+  const hasHeader = headerTexts.length > 0;
+
+  if (hasHeader) {
+    // Header row starts above the header texts
+    const headerTopY = Math.min(...headerTexts.map(t => t.y)) - 2;
+    rowBounds.push(headerTopY);
+
+    // Boundary between header and first field row
+    const headerBottomY = Math.max(...headerTexts.map(t => t.y + t.height));
+    const firstFieldTopY = fieldRows[0].fields[0].y;
+    rowBounds.push((headerBottomY + firstFieldTopY) / 2);
+  } else {
+    rowBounds.push(fieldRows[0].fields[0].y - 2);
+  }
+
+  // Field row boundaries
+  for (let r = 0; r < fieldRows.length - 1; r++) {
+    const thisBottom = Math.max(...fieldRows[r].fields.map(f => f.y + f.height));
+    const nextTop = Math.min(...fieldRows[r + 1].fields.map(f => f.y));
+    rowBounds.push((thisBottom + nextTop) / 2);
+  }
+
+  // Last row bottom
+  const lastFields = fieldRows[fieldRows.length - 1].fields;
+  rowBounds.push(Math.max(...lastFields.map(f => f.y + f.height)) + 2);
+
+  const numRows = rowBounds.length - 1;
+  const numCols2 = colBounds.length - 1;
+
+  // Build cells
+  const cells: DetectedCell[] = [];
+
+  for (let r = 0; r < numRows; r++) {
+    for (let c = 0; c < numCols2; c++) {
+      const cellX = colBounds[c];
+      const cellY = rowBounds[r];
+      const cellW = colBounds[c + 1] - colBounds[c];
+      const cellH = rowBounds[r + 1] - rowBounds[r];
+
+      cells.push({
+        row: r,
+        col: c,
+        rowSpan: 1,
+        colSpan: 1,
+        x: cellX,
+        y: cellY,
+        width: cellW,
+        height: cellH,
+        fillColor: null,
+        texts: [],
+        formFields: [],
+      });
+    }
+  }
+
+  // Assign header texts to header row cells
+  if (hasHeader) {
+    for (const text of headerTexts) {
+      const textCenterX = text.x + text.width / 2;
+      for (const cell of cells) {
+        if (cell.row !== 0) continue;
+        if (textCenterX >= cell.x - FIELD_COL_TOLERANCE &&
+            textCenterX <= cell.x + cell.width + FIELD_COL_TOLERANCE) {
+          cell.texts.push(text);
+          break;
+        }
+      }
+    }
+  }
+
+  // Assign form fields to cells
+  for (let ri = 0; ri < fieldRows.length; ri++) {
+    const tableRow = hasHeader ? ri + 1 : ri;
+    for (const field of fieldRows[ri].fields) {
+      const fieldCenterX = field.x + field.width / 2;
+      for (const cell of cells) {
+        if (cell.row !== tableRow) continue;
+        if (fieldCenterX >= cell.x - FIELD_COL_TOLERANCE &&
+            fieldCenterX <= cell.x + cell.width + FIELD_COL_TOLERANCE) {
+          cell.formFields.push(field);
+          break;
+        }
+      }
+    }
+  }
+
+  // Assign nearby text labels to data cells (labels just left of or above the field)
+  // Determine typical body font size to exclude section headers
+  const bodyFontSizes = allTexts.filter(t => !headerTexts.includes(t)).map(t => t.fontSize);
+  const typicalBodyFontSize = bodyFontSizes.length > 0
+    ? bodyFontSizes.sort((a, b) => a - b)[Math.floor(bodyFontSizes.length / 2)]
+    : 12;
+
+  for (const text of allTexts) {
+    if (headerTexts.includes(text)) continue;
+
+    // Skip section headers (font size >20% larger than typical body text)
+    if (text.fontSize > typicalBodyFontSize * 1.2) continue;
+
+    const textCenterX = text.x + text.width / 2;
+    const textCenterY = text.y + text.height / 2;
+
+    for (const cell of cells) {
+      // Check if text is within the cell's vertical band
+      if (textCenterY >= cell.y - LABEL_Y_TOLERANCE &&
+          textCenterY <= cell.y + cell.height + LABEL_Y_TOLERANCE) {
+        // Check if text is within or just left of the cell's horizontal band
+        if (textCenterX >= cell.x - FIELD_COL_TOLERANCE &&
+            textCenterX <= cell.x + cell.width + FIELD_COL_TOLERANCE) {
+          cell.texts.push(text);
+          break;
+        }
+      }
+    }
+  }
+
+  // Column widths and row heights
+  const columnWidths = colBounds.slice(1).map((b, i) => b - colBounds[i]);
+  const rowHeights = rowBounds.slice(1).map((b, i) => b - rowBounds[i]);
+
+  return {
+    cells,
+    rows: numRows,
+    cols: numCols2,
+    columnWidths,
+    rowHeights,
+    x: colBounds[0],
+    y: rowBounds[0],
+    width: colBounds[numCols2] - colBounds[0],
+    height: rowBounds[numRows] - rowBounds[0],
+  };
+}
+
+/**
+ * Detect tables from form field spatial arrangement.
+ *
+ * Activates when the scene has form fields. Clusters text input (Tx) fields
+ * by Y position into rows, then finds consecutive rows with matching column
+ * count and X-alignment — these form tables.
+ *
+ * Also looks for text header rows immediately above field tables (e.g.,
+ * "Model | Serial Number | Problem Observed" above a grid of input fields).
+ */
+function detectFormFieldTables(
+  scene: PageScene,
+  allTexts: TextElement[],
+): DetectedTable[] {
+  // Get text input fields (the rectangular input boxes)
+  const txFields = scene.formFields.filter(f => f.fieldType === 'Tx');
+  if (txFields.length < 4) return []; // Need at least 4 fields (2x2 minimum)
+
+  const rows = clusterFieldsByY(txFields);
+  const tables: DetectedTable[] = [];
+
+  let runStart = 0;
+
+  while (runStart < rows.length) {
+    // Skip rows with fewer than 2 fields (not tabular)
+    if (rows[runStart].fields.length < 2) {
+      runStart++;
+      continue;
+    }
+
+    // Find consecutive rows with same column count and aligned X positions
+    const nCols = rows[runStart].fields.length;
+    let runEnd = runStart + 1;
+
+    while (runEnd < rows.length) {
+      if (rows[runEnd].fields.length !== nCols) break;
+      if (!rowsAlignX(rows[runStart], rows[runEnd])) break;
+      runEnd++;
+    }
+
+    // Need at least 2 rows to form a meaningful table
+    // (1 header + 1 data, or 2+ data rows)
+    if (runEnd - runStart >= 2) {
+      const headerTexts = findTableHeaderTexts(rows[runStart], allTexts);
+      const table = buildTableFromFieldRows(
+        rows.slice(runStart, runEnd),
+        allTexts,
+        headerTexts,
+        nCols,
+      );
+      if (table) tables.push(table);
+    } else if (runEnd - runStart === 1) {
+      // Single row with 2+ fields: check if there's a text header above
+      const headerTexts = findTableHeaderTexts(rows[runStart], allTexts);
+      if (headerTexts.length >= 2) {
+        const table = buildTableFromFieldRows(
+          rows.slice(runStart, runEnd),
+          allTexts,
+          headerTexts,
+          nCols,
+        );
+        if (table) tables.push(table);
+      }
+    }
+
+    runStart = runEnd;
+  }
+
+  // Also detect two-column paired layouts:
+  // Rows with exactly 2 Tx fields where both halves repeat across rows
+  // (e.g., "Service Contact" left + "Bill to" right)
+  const twoFieldRows = rows.filter(r => r.fields.length === 2);
+  if (twoFieldRows.length >= 2) {
+    // Check if these rows are already consumed by tables above
+    const consumedFields = new Set<FormField>();
+    for (const table of tables) {
+      for (const cell of table.cells) {
+        for (const f of cell.formFields) consumedFields.add(f);
+      }
+    }
+
+    const unconsumedTwoFieldRows = twoFieldRows.filter(r =>
+      r.fields.every(f => !consumedFields.has(f))
+    );
+
+    // Find consecutive aligned 2-field rows
+    let i = 0;
+    while (i < unconsumedTwoFieldRows.length) {
+      let j = i + 1;
+      while (j < unconsumedTwoFieldRows.length &&
+             rowsAlignX(unconsumedTwoFieldRows[i], unconsumedTwoFieldRows[j])) {
+        j++;
+      }
+
+      if (j - i >= 2) {
+        // Build a 2-column table from these rows
+        // Include text labels in the cells for proper rendering
+        const fieldRowSlice = unconsumedTwoFieldRows.slice(i, j);
+        const table = buildTableFromFieldRows(fieldRowSlice, allTexts, [], 2);
+        if (table) tables.push(table);
+      }
+
+      i = j;
+    }
+  }
+
+  return tables;
+}
+
 // ─── Main Entry Point ────────────────────────────────────────
 
 /**
@@ -785,6 +1241,7 @@ function finalizeParagraphGroup(
  * Pipeline:
  * 1. Classify rectangles by visual role
  * 2. Detect tables from border rects (vector-based grid detection)
+ * 2b. If no vector tables found, detect tables from form field spatial arrangement
  * 3. Collect consumed text/field sets from table cells
  * 4. Collect genuine images
  * 5. Group remaining (non-table) texts and fields into paragraphs
@@ -797,6 +1254,7 @@ export const _testExports = {
   findContainingCell,
   classifyRectangles,
   detectTables,
+  detectFormFieldTables,
   rectsOverlap,
   groupIntoParagraphs,
   EDGE_CLUSTER_TOLERANCE,
@@ -806,8 +1264,16 @@ export function buildPageLayout(scene: PageScene): PageLayout {
   // Step 1: Classify all rectangles
   const rectRoles = classifyRectangles(scene);
 
-  // Step 2: Detect tables
+  // Step 2: Detect tables from vector borders
   const tables = detectTables(scene, rectRoles);
+
+  // Step 2b: If no vector tables found, try form field spatial detection
+  const allTexts = scene.elements.filter((e): e is TextElement => e.kind === 'text');
+
+  if (tables.length === 0 && scene.formFields.length >= 4) {
+    const formTables = detectFormFieldTables(scene, allTexts);
+    tables.push(...formTables);
+  }
 
   // Step 3: Determine which texts and form fields are consumed by table cells
   const consumedTexts = new Set<TextElement>();

@@ -1077,8 +1077,9 @@ function buildTableFromFieldRows(
     }
   }
 
-  // Assign nearby text labels to data cells (labels just left of or above the field)
-  // Determine typical body font size to exclude section headers
+  // Assign nearby text labels to data cells by finding the CLOSEST matching cell.
+  // Uses closest-match to prevent labels at column boundaries from being assigned
+  // to the wrong column when tolerances cause overlap.
   const bodyFontSizes = allTexts.filter(t => !headerTexts.includes(t)).map(t => t.fontSize);
   const typicalBodyFontSize = bodyFontSizes.length > 0
     ? bodyFontSizes.sort((a, b) => a - b)[Math.floor(bodyFontSizes.length / 2)]
@@ -1093,17 +1094,35 @@ function buildTableFromFieldRows(
     const textCenterX = text.x + text.width / 2;
     const textCenterY = text.y + text.height / 2;
 
+    // Find the closest cell that matches in Y band
+    let bestCell: DetectedCell | null = null;
+    let bestDist = Infinity;
+
     for (const cell of cells) {
-      // Check if text is within the cell's vertical band
-      if (textCenterY >= cell.y - LABEL_Y_TOLERANCE &&
-          textCenterY <= cell.y + cell.height + LABEL_Y_TOLERANCE) {
-        // Check if text is within or just left of the cell's horizontal band
-        if (textCenterX >= cell.x - FIELD_COL_TOLERANCE &&
-            textCenterX <= cell.x + cell.width + FIELD_COL_TOLERANCE) {
-          cell.texts.push(text);
-          break;
-        }
+      // Check vertical band
+      if (textCenterY < cell.y - LABEL_Y_TOLERANCE ||
+          textCenterY > cell.y + cell.height + LABEL_Y_TOLERANCE) {
+        continue;
       }
+      // Check horizontal band (with tolerance for labels just outside the cell)
+      if (textCenterX < cell.x - FIELD_COL_TOLERANCE ||
+          textCenterX > cell.x + cell.width + FIELD_COL_TOLERANCE) {
+        continue;
+      }
+
+      // Distance from text center to cell center
+      const cellCenterX = cell.x + cell.width / 2;
+      const cellCenterY = cell.y + cell.height / 2;
+      const dist = Math.abs(textCenterX - cellCenterX) + Math.abs(textCenterY - cellCenterY);
+
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestCell = cell;
+      }
+    }
+
+    if (bestCell) {
+      bestCell.texts.push(text);
     }
   }
 

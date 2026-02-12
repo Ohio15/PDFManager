@@ -38,9 +38,6 @@ const BASELINE_TOLERANCE = 3;
 /** Paragraph gap threshold as a multiplier of average font size */
 const PARA_GAP_FACTOR = 1.5;
 
-/** Form field Y proximity tolerance for paragraph association */
-const FORM_FIELD_Y_TOLERANCE = 5;
-
 // ─── Helper Functions ────────────────────────────────────────
 
 /**
@@ -719,37 +716,34 @@ function groupIntoParagraphs(
     paragraphs.push(finalizeParagraphGroup(paraLines));
   }
 
-  // Step 3: Associate form fields with paragraphs by Y proximity
-  const consumedFieldIndices = new Set<number>();
+  // Step 3: Associate form fields with paragraphs by CLOSEST TEXT MATCH.
+  // For each field, find the paragraph containing the text element whose
+  // center Y is closest to the field's center Y. This prevents fields from
+  // being mis-assigned to the first-matching paragraph (e.g., a section header
+  // grabbing a field that belongs to the next data line).
+  const MAX_FIELD_TEXT_DISTANCE = 25; // ~2 line heights for 12pt text
 
-  for (const para of paragraphs) {
-    for (let fi = 0; fi < formFields.length; fi++) {
-      if (consumedFieldIndices.has(fi)) continue;
-      const field = formFields[fi];
+  for (const field of formFields) {
+    const fieldCenterY = field.y + field.height / 2;
 
-      // Check if the field's baseline is within tolerance of the paragraph's Y range
-      const paraYMin = para.y;
-      // Compute paragraph Y extent from the texts
-      let paraYMax = para.y;
+    let bestPara: ParagraphGroup | null = null;
+    let bestDist = Infinity;
+
+    for (const para of paragraphs) {
       for (const text of para.texts) {
-        const textBottom = text.y + text.height;
-        if (textBottom > paraYMax) paraYMax = textBottom;
-      }
-
-      const fieldCenterY = field.y + field.height / 2;
-
-      if (fieldCenterY >= paraYMin - FORM_FIELD_Y_TOLERANCE &&
-          fieldCenterY <= paraYMax + FORM_FIELD_Y_TOLERANCE) {
-        para.formFields.push(field);
-        consumedFieldIndices.add(fi);
+        const textCenterY = text.y + text.height / 2;
+        const dist = Math.abs(fieldCenterY - textCenterY);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestPara = para;
+        }
       }
     }
-  }
 
-  // Any remaining orphan form fields get their own paragraph groups
-  for (let fi = 0; fi < formFields.length; fi++) {
-    if (!consumedFieldIndices.has(fi)) {
-      const field = formFields[fi];
+    if (bestPara && bestDist <= MAX_FIELD_TEXT_DISTANCE) {
+      bestPara.formFields.push(field);
+    } else {
+      // Orphan field — no nearby text; gets its own paragraph
       paragraphs.push({
         texts: [],
         formFields: [field],
@@ -759,10 +753,15 @@ function groupIntoParagraphs(
     }
   }
 
-  // Sort all paragraphs by Y
-  paragraphs.sort((a, b) => a.y - b.y);
+  // Step 4: Split large paragraphs that span multiple visual lines into
+  // per-line sub-paragraphs. This handles form sections (address areas,
+  // checkbox groups) where tightly-spaced lines weren't split by gap analysis.
+  const splitResult = splitFormFieldParagraphs(paragraphs);
 
-  return paragraphs;
+  // Sort all paragraphs by Y
+  splitResult.sort((a, b) => a.y - b.y);
+
+  return splitResult;
 }
 
 /**
@@ -782,6 +781,97 @@ function finalizeParagraphGroup(
     y: lines[0].y,
     x: Math.min(...lines.map(l => l.minX)),
   };
+}
+
+// ─── Per-Line Paragraph Splitting ─────────────────────────────
+
+/**
+ * Split paragraphs that contain many items across multiple visual lines
+ * into per-line sub-paragraphs.
+ *
+ * This handles form sections (address areas, checkbox groups) where
+ * tightly-spaced rows weren't separated during initial gap-based paragraph
+ * grouping. Items are clustered by Y center into bands, and each band
+ * becomes its own paragraph.
+ */
+function splitFormFieldParagraphs(paragraphs: ParagraphGroup[]): ParagraphGroup[] {
+  const result: ParagraphGroup[] = [];
+  const BAND_TOLERANCE = 8; // Same as FIELD_ROW_TOLERANCE
+
+  for (const para of paragraphs) {
+    // Only split paragraphs with enough items to warrant it
+    if (para.formFields.length < 2 ||
+        (para.texts.length + para.formFields.length) < 4) {
+      result.push(para);
+      continue;
+    }
+
+    // Collect all items with Y positions
+    interface YItem {
+      y: number;
+      height: number;
+      text?: TextElement;
+      field?: FormField;
+    }
+
+    const items: YItem[] = [];
+    for (const t of para.texts) {
+      items.push({ y: t.y, height: t.height, text: t });
+    }
+    for (const f of para.formFields) {
+      items.push({ y: f.y, height: f.height, field: f });
+    }
+
+    items.sort((a, b) => a.y - b.y);
+
+    // Cluster by Y center into visual bands
+    const bands: YItem[][] = [[items[0]]];
+
+    for (let i = 1; i < items.length; i++) {
+      const lastBand = bands[bands.length - 1];
+      const bandCenterY = lastBand.reduce((s, it) => s + it.y + it.height / 2, 0) / lastBand.length;
+      const itemCenterY = items[i].y + items[i].height / 2;
+
+      if (Math.abs(itemCenterY - bandCenterY) <= BAND_TOLERANCE) {
+        lastBand.push(items[i]);
+      } else {
+        bands.push([items[i]]);
+      }
+    }
+
+    // If only 1 band, nothing to split
+    if (bands.length <= 1) {
+      result.push(para);
+      continue;
+    }
+
+    // Emit one sub-paragraph per band
+    for (const band of bands) {
+      const texts: TextElement[] = [];
+      const fields: FormField[] = [];
+
+      for (const item of band) {
+        if (item.text) texts.push(item.text);
+        if (item.field) fields.push(item.field);
+      }
+
+      // Sort by X within each band for reading order
+      texts.sort((a, b) => a.x - b.x);
+      fields.sort((a, b) => a.x - b.x);
+
+      const yValues = band.map(it => it.y);
+      const xValues = [...texts.map(t => t.x), ...fields.map(f => f.x)];
+
+      result.push({
+        texts,
+        formFields: fields,
+        y: Math.min(...yValues),
+        x: xValues.length > 0 ? Math.min(...xValues) : 0,
+      });
+    }
+  }
+
+  return result;
 }
 
 // ─── Form Field Spatial Table Detection ──────────────────────

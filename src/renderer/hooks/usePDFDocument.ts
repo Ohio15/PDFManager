@@ -154,6 +154,9 @@ export function usePDFDocument() {
   }>({ document: null, modified: false, history: [], historyIndex: -1, activeTabId: null, tabs: [] });
   stateRef.current = { document, modified, history, historyIndex, activeTabId, tabs };
 
+  // Lock set to prevent race conditions when opening the same file concurrently
+  const openingFilesRef = useRef<Set<string>>(new Set());
+
   const canUndo = historyIndex >= 0;
   const canRedo = historyIndex < history.length - 1;
 
@@ -260,6 +263,11 @@ export function usePDFDocument() {
         switchTab(existingTab.id);
         return;
       }
+      // Prevent concurrent opens of the same file (race condition guard)
+      if (openingFilesRef.current.has(filePath)) {
+        return;
+      }
+      openingFilesRef.current.add(filePath);
     }
     setLoading(true);
     try {
@@ -430,6 +438,9 @@ export function usePDFDocument() {
       throw error;
     } finally {
       setLoading(false);
+      if (filePath) {
+        openingFilesRef.current.delete(filePath);
+      }
     }
   }, [saveCurrentTabState, switchTab]);
 

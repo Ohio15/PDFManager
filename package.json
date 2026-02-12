@@ -13,7 +13,9 @@
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux"
+    "dist:linux": "npm run build && electron-builder --linux",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@types/pako": "^2.0.4",
@@ -36,6 +38,7 @@
     "react-dom": "^18.2.0",
     "typescript": "^5.3.3",
     "vite": "^5.0.10",
+    "vitest": "^4.0.18",
     "wait-on": "^9.0.3"
   },
   "build": {
@@ -53,7 +56,9 @@
       {
         "from": "update-config.json",
         "to": "update-config.json",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "fileAssociations": [
@@ -76,7 +81,9 @@
     "linux": {
       "target": "AppImage",
       "icon": "build/icon.png",
-      "mimeTypes": ["application/pdf"]
+      "mimeTypes": [
+        "application/pdf"
+      ]
     },
     "publish": {
       "provider": "github",

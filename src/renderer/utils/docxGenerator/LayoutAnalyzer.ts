@@ -279,8 +279,32 @@ function buildTableFromBorderGroup(
   }
 
   // Step 2: Cluster to grid lines
-  const colBounds = clusterValues(xEdges, EDGE_CLUSTER_TOLERANCE);
-  const rowBounds = clusterValues(yEdges, EDGE_CLUSTER_TOLERANCE);
+  const rawColBounds = clusterValues(xEdges, EDGE_CLUSTER_TOLERANCE);
+  const rawRowBounds = clusterValues(yEdges, EDGE_CLUSTER_TOLERANCE);
+
+  // Step 2b: Collapse tiny gap rows and columns.
+  // PDF forms often have visual spacing (~7pt) between adjacent field boxes,
+  // creating alternating data/gap patterns. Remove bounds that are too close
+  // to the previous bound, merging gaps into the preceding data cell.
+  const MIN_CELL_SIZE = 10;
+
+  const colBounds: number[] = [rawColBounds[0]];
+  for (let i = 1; i < rawColBounds.length; i++) {
+    const gap = rawColBounds[i] - colBounds[colBounds.length - 1];
+    if (gap < MIN_CELL_SIZE && i < rawColBounds.length - 1) {
+      continue;
+    }
+    colBounds.push(rawColBounds[i]);
+  }
+
+  const rowBounds: number[] = [rawRowBounds[0]];
+  for (let i = 1; i < rawRowBounds.length; i++) {
+    const gap = rawRowBounds[i] - rowBounds[rowBounds.length - 1];
+    if (gap < MIN_CELL_SIZE && i < rawRowBounds.length - 1) {
+      continue;
+    }
+    rowBounds.push(rawRowBounds[i]);
+  }
 
   // Step 3: Validate minimum grid
   if (colBounds.length < 3 || rowBounds.length < 3) {
@@ -363,6 +387,9 @@ function buildTableFromBorderGroup(
 
   // Build a set of horizontal border segments and vertical border segments
   // from the actual border rects for precise edge detection.
+  // After gap collapse, border rects may be offset from cell boundaries by
+  // up to MIN_CELL_SIZE, so use a larger tolerance for span checks.
+  const spanTolerance = MIN_CELL_SIZE + EDGE_CLUSTER_TOLERANCE;
   const hasBorderBetween = (
     x1: number, y1: number, x2: number, y2: number,
     isHorizontal: boolean,
@@ -382,14 +409,14 @@ function buildTableFromBorderGroup(
         const rRight = rx + rw;
 
         // Check top edge
-        if (Math.abs(topEdge - y1) <= EDGE_CLUSTER_TOLERANCE) {
-          if (rLeft <= x1 + EDGE_CLUSTER_TOLERANCE && rRight >= x2 - EDGE_CLUSTER_TOLERANCE) {
+        if (Math.abs(topEdge - y1) <= spanTolerance) {
+          if (rLeft <= x1 + spanTolerance && rRight >= x2 - spanTolerance) {
             return true;
           }
         }
         // Check bottom edge
-        if (Math.abs(bottomEdge - y1) <= EDGE_CLUSTER_TOLERANCE) {
-          if (rLeft <= x1 + EDGE_CLUSTER_TOLERANCE && rRight >= x2 - EDGE_CLUSTER_TOLERANCE) {
+        if (Math.abs(bottomEdge - y1) <= spanTolerance) {
+          if (rLeft <= x1 + spanTolerance && rRight >= x2 - spanTolerance) {
             return true;
           }
         }
@@ -401,14 +428,14 @@ function buildTableFromBorderGroup(
         const rBottom = ry + rh;
 
         // Check left edge
-        if (Math.abs(leftEdge - x1) <= EDGE_CLUSTER_TOLERANCE) {
-          if (rTop <= y1 + EDGE_CLUSTER_TOLERANCE && rBottom >= y2 - EDGE_CLUSTER_TOLERANCE) {
+        if (Math.abs(leftEdge - x1) <= spanTolerance) {
+          if (rTop <= y1 + spanTolerance && rBottom >= y2 - spanTolerance) {
             return true;
           }
         }
         // Check right edge
-        if (Math.abs(rightEdge - x1) <= EDGE_CLUSTER_TOLERANCE) {
-          if (rTop <= y1 + EDGE_CLUSTER_TOLERANCE && rBottom >= y2 - EDGE_CLUSTER_TOLERANCE) {
+        if (Math.abs(rightEdge - x1) <= spanTolerance) {
+          if (rTop <= y1 + spanTolerance && rBottom >= y2 - spanTolerance) {
             return true;
           }
         }
@@ -542,10 +569,145 @@ function buildTableFromBorderGroup(
     }
   }
 
+  // Step 10: Capture text labels positioned to the LEFT of the table.
+  // Many PDF forms draw labels (e.g., "Name", "Email") to the left of bordered
+  // input field boxes. These labels fall outside the grid's column bounds.
+  // Assign them to the leftmost cell of the matching row.
+  const LABEL_CAPTURE_DISTANCE = 120; // max pt distance left of table
+  const assignedTexts = new Set<TextElement>();
+  for (const cell of cells) {
+    for (const t of cell.texts) assignedTexts.add(t);
+  }
+
+  const tableLeft = colBounds[0];
+  let leftExtension = 0;
+
+  for (const text of allTexts) {
+    if (assignedTexts.has(text)) continue;
+
+    const textCenterX = text.x + text.width / 2;
+    const textCenterY = text.y + text.height / 2;
+
+    // Only capture text whose center is to the left of the first column
+    if (textCenterX >= colBounds[0]) continue;
+    if (text.x < colBounds[0] - LABEL_CAPTURE_DISTANCE) continue;
+
+    // Find the row this text belongs to
+    let matchRow = -1;
+    for (let r = 0; r < numRows; r++) {
+      if (textCenterY >= rowBounds[r] - EDGE_CLUSTER_TOLERANCE &&
+          textCenterY <= rowBounds[r + 1] + EDGE_CLUSTER_TOLERANCE) {
+        matchRow = r;
+        break;
+      }
+    }
+
+    if (matchRow < 0) continue;
+
+    // Find the leftmost cell in this row (accounting for merges)
+    const targetCell = cells.find(cell =>
+      matchRow >= cell.row && matchRow < cell.row + cell.rowSpan &&
+      cell.col === 0
+    );
+
+    if (targetCell) {
+      targetCell.texts.push(text);
+      assignedTexts.add(text);
+      const extension = colBounds[0] - text.x;
+      if (extension > leftExtension) leftExtension = extension;
+    }
+  }
+
+  // If labels were captured, extend first column to accommodate them
+  if (leftExtension > 0) {
+    leftExtension += 4; // small padding
+    for (const cell of cells) {
+      if (cell.col === 0) {
+        cell.x -= leftExtension;
+        cell.width += leftExtension;
+      }
+    }
+  }
+
+  // Step 11: Capture column header text positioned ABOVE the table.
+  // Column headers (e.g., "Model", "Serial Number") may sit just above the
+  // top border row. Assign them to the first row by matching X to columns.
+  const HEADER_CAPTURE_DISTANCE = 20; // max pt distance above/below table
+  const tableTop = rowBounds[0];
+  const tableBottom = rowBounds[rowBounds.length - 1];
+
+  for (const text of allTexts) {
+    if (assignedTexts.has(text)) continue;
+
+    const textCenterX = text.x + text.width / 2;
+    const textBottom = text.y + text.height;
+
+    // Text just ABOVE the table (bottom edge within tolerance of table top)
+    if (textBottom >= tableTop - HEADER_CAPTURE_DISTANCE &&
+        textBottom <= tableTop + EDGE_CLUSTER_TOLERANCE) {
+      // Find which column this text belongs to by X center
+      let matchCol = -1;
+      for (let c = 0; c < numCols; c++) {
+        if (textCenterX >= colBounds[c] - EDGE_CLUSTER_TOLERANCE &&
+            textCenterX <= colBounds[c + 1] + EDGE_CLUSTER_TOLERANCE) {
+          matchCol = c;
+          break;
+        }
+      }
+      // Also check extended left column
+      if (matchCol < 0 && leftExtension > 0 &&
+          textCenterX >= colBounds[0] - leftExtension &&
+          textCenterX <= colBounds[1] + EDGE_CLUSTER_TOLERANCE) {
+        matchCol = 0;
+      }
+
+      if (matchCol >= 0) {
+        const targetCell = cells.find(cell =>
+          0 >= cell.row && 0 < cell.row + cell.rowSpan &&
+          matchCol >= cell.col && matchCol < cell.col + cell.colSpan
+        );
+        if (targetCell) {
+          targetCell.texts.push(text);
+          assignedTexts.add(text);
+        }
+      }
+    }
+
+    // Text just BELOW the table (top edge within tolerance of table bottom)
+    if (text.y >= tableBottom - EDGE_CLUSTER_TOLERANCE &&
+        text.y <= tableBottom + HEADER_CAPTURE_DISTANCE) {
+      let matchCol = -1;
+      for (let c = 0; c < numCols; c++) {
+        if (textCenterX >= colBounds[c] - EDGE_CLUSTER_TOLERANCE &&
+            textCenterX <= colBounds[c + 1] + EDGE_CLUSTER_TOLERANCE) {
+          matchCol = c;
+          break;
+        }
+      }
+      if (matchCol < 0 && leftExtension > 0 &&
+          textCenterX >= colBounds[0] - leftExtension &&
+          textCenterX <= colBounds[1] + EDGE_CLUSTER_TOLERANCE) {
+        matchCol = 0;
+      }
+
+      if (matchCol >= 0) {
+        const lastRow = numRows - 1;
+        const targetCell = cells.find(cell =>
+          lastRow >= cell.row && lastRow < cell.row + cell.rowSpan &&
+          matchCol >= cell.col && matchCol < cell.col + cell.colSpan
+        );
+        if (targetCell) {
+          targetCell.texts.push(text);
+          assignedTexts.add(text);
+        }
+      }
+    }
+  }
+
   // Compute table bounding box
-  const tableX = colBounds[0];
+  const tableX = colBounds[0] - leftExtension;
   const tableY = rowBounds[0];
-  const tableW = colBounds[colBounds.length - 1] - colBounds[0];
+  const tableW = colBounds[colBounds.length - 1] - colBounds[0] + leftExtension;
   const tableH = rowBounds[rowBounds.length - 1] - rowBounds[0];
 
   // Column widths and row heights
@@ -553,6 +715,11 @@ function buildTableFromBorderGroup(
   for (let c = 0; c < numCols; c++) {
     columnWidths.push(colBounds[c + 1] - colBounds[c]);
   }
+  // Add the label extension to first column
+  if (leftExtension > 0) {
+    columnWidths[0] += leftExtension;
+  }
+
   const rowHeights: number[] = [];
   for (let r = 0; r < numRows; r++) {
     rowHeights.push(rowBounds[r + 1] - rowBounds[r]);

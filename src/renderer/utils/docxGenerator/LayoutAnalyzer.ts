@@ -39,6 +39,13 @@ const BASELINE_TOLERANCE = 3;
 /** Paragraph gap threshold as a multiplier of average font size */
 const PARA_GAP_FACTOR = 1.5;
 
+/**
+ * Tolerance for connecting border rects into table groups.
+ * Many PDF forms use consistent spacing (~7pt) between adjacent field boxes.
+ * This tolerance bridges those gaps so the rects form connected table groups.
+ */
+const TABLE_GROUP_TOLERANCE = 8;
+
 // ─── Helper Functions ────────────────────────────────────────
 
 /**
@@ -159,7 +166,9 @@ function identifySeparateTables(borderRects: RectElement[]): RectElement[][] {
     }
   }
 
-  // Merge rects that share edges or overlap
+  // Merge rects that share edges or overlap.
+  // Uses TABLE_GROUP_TOLERANCE to bridge consistent spacing between adjacent
+  // form field boxes (typically ~7pt in many PDF forms).
   for (let i = 0; i < borderRects.length; i++) {
     const a = borderRects[i];
     for (let j = i + 1; j < borderRects.length; j++) {
@@ -167,7 +176,7 @@ function identifySeparateTables(borderRects: RectElement[]): RectElement[][] {
       if (rectsShareEdgeOrOverlap(
         a.x, a.y, a.width, a.height,
         b.x, b.y, b.width, b.height,
-        EDGE_CLUSTER_TOLERANCE * 2,
+        TABLE_GROUP_TOLERANCE,
       )) {
         union(i, j);
       }
@@ -1520,12 +1529,30 @@ export function buildPageLayout(scene: PageScene): PageLayout {
   // Step 2: Detect tables from vector borders
   const tables = detectTables(scene, rectRoles);
 
-  // Step 2b: If no vector tables found, try form field spatial detection
+  // Step 2b: Also try form field spatial detection for uncaptured fields.
+  // Form-field tables complement vector tables by detecting tabular field
+  // arrangements that may not have vector borders (e.g., annotation-only fields).
   const allTexts = scene.elements.filter((e): e is TextElement => e.kind === 'text');
 
-  if (tables.length === 0 && scene.formFields.length >= 4) {
-    const formTables = detectFormFieldTables(scene, allTexts);
-    tables.push(...formTables);
+  if (scene.formFields.length >= 4) {
+    // Determine which form fields are already captured by vector tables
+    const capturedFields = new Set<FormField>();
+    for (const table of tables) {
+      for (const cell of table.cells) {
+        for (const f of cell.formFields) capturedFields.add(f);
+      }
+    }
+
+    // Only run form-field detection on uncaptured fields
+    const uncapturedFields = scene.formFields.filter(f => !capturedFields.has(f));
+    if (uncapturedFields.length >= 4) {
+      const sceneForFormTables: PageScene = {
+        ...scene,
+        formFields: uncapturedFields,
+      };
+      const formTables = detectFormFieldTables(sceneForFormTables, allTexts);
+      tables.push(...formTables);
+    }
   }
 
   // Step 3: Determine which texts and form fields are consumed by table cells

@@ -883,6 +883,7 @@ const App: React.FC = () => {
       Object.keys(menuActions).forEach((action) => {
         window.electronAPI.removeMenuListener(action);
       });
+      window.electronAPI.removeFileOpenedListener();
     };
   }, [
     handleSave,

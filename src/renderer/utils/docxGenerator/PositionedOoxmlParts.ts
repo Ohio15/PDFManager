@@ -79,6 +79,8 @@ export function generatePositionedDocumentXml(
   scenes: PageScene[],
   images: ImageFile[],
   styleCollector: StyleCollector,
+  pageBackgrounds: ImageFile[] = [],
+  editableTextSets: Set<number>[] = [],
 ): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += `<w:document ${DOC_NS}>\n`;
@@ -97,37 +99,96 @@ export function generatePositionedDocumentXml(
     // Collect all positioned elements for this page
     const positionedElements: string[] = [];
 
-    // ─── Background Rectangles (Z: 0-999) ───────────────
-    let rectZ = 0;
-    for (const elem of scene.elements) {
-      if (elem.kind !== 'rect') continue;
-      const rect = elem as RectElement;
-      // Only emit filled rects (backgrounds, shading)
-      if (!rect.fillColor) continue;
-      // Skip tiny rects (likely borders, not backgrounds)
-      if (rect.width < 5 || rect.height < 5) continue;
+    // ─── Full-Page Background Image (Z: 0) ──────────────
+    // Rendered from the PDF page via canvas — captures all vector graphics,
+    // borders, logos, paths, and decorative elements for 1:1 fidelity.
+    const bgImage = pageBackgrounds.find(bg => bg.resourceName === `__page_bg_${pageIdx}`);
+    if (bgImage) {
+      let bgXml = '<w:drawing>\n';
+      bgXml += `<wp:anchor simplePos="false" relativeHeight="0" behindDoc="true" locked="false" layoutInCell="true" allowOverlap="true">\n`;
+      bgXml += '<wp:simplePos x="0" y="0"/>\n';
+      bgXml += '<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>\n';
+      bgXml += '<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>\n';
+      bgXml += `<wp:extent cx="${bgImage.widthEmu}" cy="${bgImage.heightEmu}"/>\n`;
+      bgXml += '<wp:effectExtent l="0" t="0" r="0" b="0"/>\n';
+      bgXml += '<wp:wrapNone/>\n';
+      bgXml += `<wp:docPr id="${docPrId}" name="PageBackground ${pageIdx + 1}"/>\n`;
+      docPrId++;
 
-      const shapeXml = generatePositionedRect(rect, docPrId++, rectZ++);
-      positionedElements.push(shapeXml);
+      bgXml += '<a:graphic>\n';
+      bgXml += '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\n';
+      bgXml += '<pic:pic>\n';
+      bgXml += '<pic:nvPicPr>\n';
+      bgXml += `  <pic:cNvPr id="${docPrId - 1}" name="${escXml(bgImage.fileName)}"/>\n`;
+      bgXml += '  <pic:cNvPicPr/>\n';
+      bgXml += '</pic:nvPicPr>\n';
+      bgXml += '<pic:blipFill>\n';
+      bgXml += `  <a:blip r:embed="${bgImage.rId}"/>\n`;
+      bgXml += '  <a:stretch><a:fillRect/></a:stretch>\n';
+      bgXml += '</pic:blipFill>\n';
+      bgXml += '<pic:spPr>\n';
+      bgXml += '  <a:xfrm>\n';
+      bgXml += '    <a:off x="0" y="0"/>\n';
+      bgXml += `    <a:ext cx="${bgImage.widthEmu}" cy="${bgImage.heightEmu}"/>\n`;
+      bgXml += '  </a:xfrm>\n';
+      bgXml += '  <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>\n';
+      bgXml += '</pic:spPr>\n';
+      bgXml += '</pic:pic>\n';
+      bgXml += '</a:graphicData>\n';
+      bgXml += '</a:graphic>\n';
+      bgXml += '</wp:anchor>\n';
+      bgXml += '</w:drawing>\n';
+
+      positionedElements.push(bgXml);
+      console.log(`[PositionedOoxmlParts] Page ${pageIdx}: background image ${bgImage.fileName} (${bgImage.data.length} bytes, rId=${bgImage.rId})`);
     }
 
-    // ─── Images (Z: 1000-1999) ──────────────────────────
-    let imgZ = 1000;
-    for (const elem of scene.elements) {
-      if (elem.kind !== 'image') continue;
-      const imgElem = elem as ImageElement;
-      if (!imgElem.isGenuine || !imgElem.data) continue;
+    // ─── Background Rectangles (Z: 1-999) ──────────────
+    // When a full-page background image is present, skip individual rects
+    // (they're already captured in the rasterized background).
+    if (!bgImage) {
+      let rectZ = 1;
+      for (const elem of scene.elements) {
+        if (elem.kind !== 'rect') continue;
+        const rect = elem as RectElement;
+        if (!rect.fillColor) continue;
+        if (rect.width < 5 || rect.height < 5) continue;
+        const shapeXml = generatePositionedRect(rect, docPrId++, rectZ++);
+        positionedElements.push(shapeXml);
+      }
+    }
 
-      const imgXml = generatePositionedImage(imgElem, images, docPrId++, imgZ++);
-      if (imgXml) {
-        positionedElements.push(imgXml);
+    // ─── Standalone Images (Z: 1000-1999) ────────────────
+    // When a full-page background is present, bitmap images are already
+    // captured in the rasterized background. Only emit standalone images
+    // when there's no background (fallback).
+    if (!bgImage) {
+      let imgZ = 1000;
+      for (const elem of scene.elements) {
+        if (elem.kind !== 'image') continue;
+        const imgElem = elem as ImageElement;
+        if (!imgElem.data) continue;
+        const imgXml = generatePositionedImage(imgElem, images, docPrId++, imgZ++);
+        if (imgXml) positionedElements.push(imgXml);
       }
     }
 
     // ─── Text Boxes (Z: 2000+) ──────────────────────────
+    // Only create text box overlays for "editable" text elements — text that was
+    // erased from the background image. Text inside graphical regions (logos,
+    // diagrams) stays in the background image and is NOT made editable.
     let textZ = 2000;
-    const textElements = scene.elements.filter(e => e.kind === 'text') as TextElement[];
-    const textGroups = groupAdjacentTextElements(textElements);
+    const editableIndices = editableTextSets[pageIdx] || new Set<number>();
+
+    // Filter to only editable text elements
+    const editableTextElements: TextElement[] = [];
+    for (let ei = 0; ei < scene.elements.length; ei++) {
+      if (scene.elements[ei].kind === 'text' && editableIndices.has(ei)) {
+        editableTextElements.push(scene.elements[ei] as TextElement);
+      }
+    }
+
+    const textGroups = groupAdjacentTextElements(editableTextElements);
 
     for (const group of textGroups) {
       const tbXml = generatePositionedTextBox(
@@ -137,24 +198,26 @@ export function generatePositionedDocumentXml(
     }
 
     // ─── Form Fields (Z: 3000+) ─────────────────────────
+    // Form field areas are erased from the background image, so these
+    // functional form field overlays provide editability.
     let formZ = 3000;
     for (const field of scene.formFields) {
       const ffXml = generatePositionedFormField(field, docPrId++, formZ++);
       positionedElements.push(ffXml);
     }
 
-    // Emit all positioned elements as paragraphs
-    // Each anchor must be inside a <w:r> inside a <w:p>
+    // Emit ALL positioned elements inside a SINGLE paragraph per page.
+    // Since wp:anchor with wrapNone doesn't consume inline space, all elements
+    // float freely at their absolute coordinates. Using one paragraph avoids
+    // the flow-space problem where hundreds of <w:p> elements push content
+    // to subsequent pages.
+    xml += '<w:p>\n';
     for (const elemXml of positionedElements) {
-      xml += '<w:p>\n<w:r>\n';
+      xml += '<w:r>\n';
       xml += elemXml;
-      xml += '</w:r>\n</w:p>\n';
+      xml += '</w:r>\n';
     }
-
-    // Emit at least one paragraph per page (Word requires non-empty sections)
-    if (positionedElements.length === 0) {
-      xml += '<w:p/>\n';
-    }
+    xml += '</w:p>\n';
 
     // Section properties for this page (continuous sections, zero margins)
     // Last page: final sectPr goes outside the loop (in w:body)
@@ -287,11 +350,12 @@ function generatePositionedTextBox(
   docPrId: number,
   zOrder: number,
 ): string {
-  const xEmu = Math.round(group.x * PT_TO_EMU);
-  const yEmu = Math.round(group.y * PT_TO_EMU);
-  // Add small padding to prevent text clipping
-  const wEmu = Math.round(group.width * PT_TO_EMU) + 6350; // +0.5pt buffer
-  const hEmu = Math.round(group.height * PT_TO_EMU) + 6350; // +0.5pt buffer
+  // Match eraser origin: eraser uses 3pt padding from top-left of text group
+  const xEmu = Math.round((group.x - 3) * PT_TO_EMU);
+  const yEmu = Math.round((group.y - 3) * PT_TO_EMU);
+  // Match eraser extent: eraser adds 6pt total (3pt each side)
+  const wEmu = Math.round((group.width + 6) * PT_TO_EMU);
+  const hEmu = Math.round((group.height + 6) * PT_TO_EMU);
 
   let xml = '<w:drawing>\n';
   xml += `<wp:anchor simplePos="false" relativeHeight="${zOrder}" behindDoc="false" locked="false" layoutInCell="true" allowOverlap="true">\n`;
@@ -329,8 +393,8 @@ function generatePositionedTextBox(
   xml += '</w:txbxContent>\n';
   xml += '</wps:txbx>\n';
 
-  // Body properties: no internal margins, top anchor, square wrap
-  xml += '<wps:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t">\n';
+  // Body properties: 3pt insets to offset text within the expanded box (matches eraser padding)
+  xml += '<wps:bodyPr wrap="square" lIns="38100" tIns="38100" rIns="38100" bIns="0" anchor="t">\n';
   xml += '  <a:noAutofit/>\n';
   xml += '</wps:bodyPr>\n';
 
@@ -484,10 +548,12 @@ function generatePositionedFormField(
   docPrId: number,
   zOrder: number,
 ): string {
-  const xEmu = Math.round(field.x * PT_TO_EMU);
-  const yEmu = Math.round(field.y * PT_TO_EMU);
-  const wEmu = Math.round(field.width * PT_TO_EMU) + 12700; // +1pt buffer for field chrome
-  const hEmu = Math.round(field.height * PT_TO_EMU) + 6350;
+  // Match eraser origin: eraser uses 3pt padding from top-left of form field
+  const xEmu = Math.round((field.x - 3) * PT_TO_EMU);
+  const yEmu = Math.round((field.y - 3) * PT_TO_EMU);
+  // Match eraser extent: eraser adds 6pt total (3pt each side)
+  const wEmu = Math.round((field.width + 6) * PT_TO_EMU);
+  const hEmu = Math.round((field.height + 6) * PT_TO_EMU);
 
   let xml = '<w:drawing>\n';
   xml += `<wp:anchor simplePos="false" relativeHeight="${zOrder}" behindDoc="false" locked="false" layoutInCell="true" allowOverlap="true">\n`;
@@ -522,7 +588,8 @@ function generatePositionedFormField(
   xml += '</w:txbxContent>\n';
   xml += '</wps:txbx>\n';
 
-  xml += '<wps:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t">\n';
+  // 3pt insets to offset content within the expanded box (matches eraser padding)
+  xml += '<wps:bodyPr wrap="square" lIns="38100" tIns="38100" rIns="38100" bIns="0" anchor="t">\n';
   xml += '  <a:noAutofit/>\n';
   xml += '</wps:bodyPr>\n';
 

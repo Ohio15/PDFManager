@@ -44,6 +44,181 @@ import { generatePositionedDocumentXml } from './PositionedOoxmlParts';
 // Ensure pdfjs worker is configured
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
+/** Rasterized page background for positioned mode */
+interface PageBackground {
+  data: Uint8Array;
+  widthEmu: number;
+  heightEmu: number;
+  /** Indices into scene.elements that are editable text (not part of images) */
+  editableTextIndices: Set<number>;
+}
+
+/**
+ * Determine the background color at a given position from filled rects.
+ * Checks largest containing filled rect (most likely to be the background).
+ */
+function findBgColor(
+  x: number, y: number, w: number, h: number,
+  filledRects: Array<import('./types').RectElement>,
+): string {
+  let bestArea = 0;
+  let bgColor = '#ffffff';
+  for (const rect of filledRects) {
+    // Check if the rect contains the target area (with tolerance)
+    if (
+      x >= rect.x - 2 &&
+      y >= rect.y - 2 &&
+      x + w <= rect.x + rect.width + 2 &&
+      y + h <= rect.y + rect.height + 2
+    ) {
+      const area = rect.width * rect.height;
+      if (area > bestArea) {
+        bestArea = area;
+        const c = rect.fillColor!;
+        bgColor = `rgb(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)})`;
+      }
+    }
+  }
+  return bgColor;
+}
+
+/**
+ * Check if a text element is inside a graphical region (logo, diagram, etc.)
+ * by counting how many path elements overlap with it.
+ * Text inside dense path clusters is likely part of an image and should NOT
+ * be made editable — it stays as part of the background image.
+ */
+function isTextInGraphicRegion(
+  textX: number, textY: number, textW: number, textH: number,
+  pathElements: Array<import('./types').PathElement>,
+): boolean {
+  // Expand the search area slightly beyond the text bounds
+  const margin = 5; // 5pt search radius
+  const searchX = textX - margin;
+  const searchY = textY - margin;
+  const searchR = textX + textW + margin;
+  const searchB = textY + textH + margin;
+
+  let overlappingPaths = 0;
+  for (const path of pathElements) {
+    if (path.points.length === 0) continue;
+
+    // Compute path bounding box
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const pt of path.points) {
+      if (pt.x < minX) minX = pt.x;
+      if (pt.y < minY) minY = pt.y;
+      if (pt.x > maxX) maxX = pt.x;
+      if (pt.y > maxY) maxY = pt.y;
+    }
+
+    // Check overlap between search area and path bounding box
+    if (maxX >= searchX && minX <= searchR && maxY >= searchY && minY <= searchB) {
+      overlappingPaths++;
+    }
+
+    // If many paths overlap this text, it's inside a graphic region
+    if (overlappingPaths >= 4) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Render a pdfjs page to PNG bytes using canvas, with text areas erased.
+ *
+ * Creates a "text-free" background image for positioned mode:
+ *   1. Render the full PDF page to canvas (including text)
+ *   2. Identify which text elements are "editable" vs "in images"
+ *   3. Erase only editable text areas (paint background color over them)
+ *   4. Leave text that's part of graphical regions (logos, diagrams) intact
+ *   5. Export the modified canvas as PNG
+ *
+ * Returns the PNG data and a set of text element indices that were erased
+ * (so the caller knows which text elements to create overlays for).
+ */
+async function renderPageToPng(
+  page: any,
+  scene: PageScene,
+  scale: number = 2.0,
+): Promise<{ pngData: Uint8Array; editableTextIndices: Set<number> }> {
+  const viewport = page.getViewport({ scale });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d')!;
+
+  // White background
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Render the full PDF page (including text)
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  // Collect filled rects and path elements from the scene graph
+  const filledRects = scene.elements.filter(
+    (e): e is import('./types').RectElement => e.kind === 'rect' && e.fillColor !== null
+  );
+  const pathElements = scene.elements.filter(
+    (e): e is import('./types').PathElement => e.kind === 'path'
+  );
+
+  // Classify text elements: editable (normal body text) vs graphic (part of logo/diagram)
+  const editableTextIndices = new Set<number>();
+  const textElements = scene.elements.filter(e => e.kind === 'text');
+
+  for (let ti = 0; ti < scene.elements.length; ti++) {
+    const elem = scene.elements[ti];
+    if (elem.kind !== 'text') continue;
+
+    // Check if this text is inside a dense graphical region
+    if (isTextInGraphicRegion(elem.x, elem.y, elem.width, elem.height, pathElements)) {
+      // Text is part of an image/logo — leave it in the background, don't make editable
+      continue;
+    }
+
+    // This text is normal body text — mark for erasure and overlay
+    editableTextIndices.add(ti);
+
+    // Erase from canvas: paint background color over the text area
+    const bgColor = findBgColor(elem.x, elem.y, elem.width, elem.height, filledRects);
+    // Generous padding (3pt) ensures complete text coverage by the overlay text box
+    const pad = 3;
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(
+      (elem.x - pad) * scale,
+      (elem.y - pad) * scale,
+      (elem.width + pad * 2) * scale,
+      (elem.height + pad * 2) * scale,
+    );
+  }
+
+  console.log(`[DocxGenerator] Text classification: ${editableTextIndices.size} editable, ${textElements.length - editableTextIndices.size} in graphics (preserved in background)`);
+
+  // Erase form field areas (they'll be overlaid as editable form fields)
+  for (const field of scene.formFields) {
+    const bgColor = findBgColor(field.x, field.y, field.width, field.height, filledRects);
+    const pad = 3;
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(
+      (field.x - pad) * scale,
+      (field.y - pad) * scale,
+      (field.width + pad * 2) * scale,
+      (field.height + pad * 2) * scale,
+    );
+  }
+
+  const blob = await new Promise<Blob>((resolve) => {
+    canvas.toBlob((b) => resolve(b!), 'image/png');
+  });
+
+  return {
+    pngData: new Uint8Array(await blob.arrayBuffer()),
+    editableTextIndices,
+  };
+}
+
 /**
  * Fast non-crypto hash for image deduplication.
  * Uses FNV-1a (32-bit) with length suffix to minimize collision risk.
@@ -60,11 +235,18 @@ function fastHash(data: Uint8Array): string {
 /**
  * Collect and deduplicate images from an array of ImageElement sources.
  * Shared between positioned and flow modes.
+ *
+ * @param includeAll - When true (positioned mode), include ALL images with data,
+ *   not just genuine ones. This ensures 1:1 visual fidelity.
+ * @param skipDimConstraint - When true (positioned mode), don't constrain image
+ *   dimensions since exact sizing is needed for absolute positioning.
  */
 function collectImages(
   imageElements: ImageElement[],
   imageScale: number,
   maxImageDimEmu: number,
+  includeAll: boolean = false,
+  skipDimConstraint: boolean = false,
 ): { allImages: ImageFile[]; uniqueImages: ImageFile[] } {
   // rIds 1-3 are reserved: styles, settings, fontTable
   let nextRId = 4;
@@ -82,13 +264,13 @@ function collectImages(
   for (const imgElem of imageElements) {
     totalImages++;
 
-    if (!imgElem.isGenuine) {
+    if (!includeAll && !imgElem.isGenuine) {
       console.log(`[DocxGenerator] Skipping non-genuine image: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
       continue;
     }
     genuineImages++;
     if (!imgElem.data) {
-      console.warn(`[DocxGenerator] Genuine image has NULL data: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
+      console.warn(`[DocxGenerator] Image has NULL data: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
       continue;
     }
     withDataImages++;
@@ -115,15 +297,18 @@ function collectImages(
     let widthEmu = Math.round(imgElem.width * PT_TO_EMU * imageScale);
     let heightEmu = Math.round(imgElem.height * PT_TO_EMU * imageScale);
 
-    if (widthEmu > maxImageDimEmu) {
-      const ratio = maxImageDimEmu / widthEmu;
-      widthEmu = maxImageDimEmu;
-      heightEmu = Math.round(heightEmu * ratio);
-    }
-    if (heightEmu > maxImageDimEmu) {
-      const ratio = maxImageDimEmu / heightEmu;
-      heightEmu = maxImageDimEmu;
-      widthEmu = Math.round(widthEmu * ratio);
+    // In positioned mode, skip dimension constraints to preserve exact sizing
+    if (!skipDimConstraint) {
+      if (widthEmu > maxImageDimEmu) {
+        const ratio = maxImageDimEmu / widthEmu;
+        widthEmu = maxImageDimEmu;
+        heightEmu = Math.round(heightEmu * ratio);
+      }
+      if (heightEmu > maxImageDimEmu) {
+        const ratio = maxImageDimEmu / heightEmu;
+        heightEmu = maxImageDimEmu;
+        widthEmu = Math.round(widthEmu * ratio);
+      }
     }
 
     const imageFile: ImageFile = {
@@ -215,12 +400,38 @@ export async function generateDocx(
   // ─── Phase 2: Analyze all pages into scene graphs (SHARED) ─
 
   const scenes: PageScene[] = [];
+  const pageBackgrounds: PageBackground[] = [];
+
+  const extractAllImages = conversionMode === 'positioned';
+  // In positioned mode, image bytes are redundant — the page background PNG captures everything.
+  // Images still appear in the scene graph (needed for isTextInGraphicRegion classification)
+  // but skip the expensive extractImageData/handleFlateImage decompression.
+  const extractImageBytes = conversionMode !== 'positioned';
 
   for (let pageIdx = 0; pageIdx < numPages; pageIdx++) {
     const page = await pdfJsDoc.getPage(pageIdx + 1);
 
-    const scene = await analyzePage(page, pdfLibDoc, pageIdx);
+    const scene = await analyzePage(page, pdfLibDoc, pageIdx, extractAllImages, extractImageBytes);
     scenes.push(scene);
+
+    // In positioned mode, render each page to a PNG background image.
+    // This captures ALL visual elements (vector paths, borders, logos, etc.)
+    // that can't be individually converted to OOXML shapes.
+    if (conversionMode === 'positioned') {
+      try {
+        const result = await renderPageToPng(page, scene, 3.0); // 3× = 216 DPI
+        pageBackgrounds.push({
+          data: result.pngData,
+          widthEmu: Math.round(scene.width * PT_TO_EMU),
+          heightEmu: Math.round(scene.height * PT_TO_EMU),
+          editableTextIndices: result.editableTextIndices,
+        });
+        console.log(`[DocxGenerator] Page ${pageIdx} background: ${result.pngData.length} bytes PNG`);
+      } catch (e) {
+        console.warn(`[DocxGenerator] Page ${pageIdx} background render failed:`, e);
+        pageBackgrounds.push({ data: new Uint8Array(0), widthEmu: 0, heightEmu: 0, editableTextIndices: new Set() });
+      }
+    }
 
     page.cleanup();
   }
@@ -237,14 +448,38 @@ export async function generateDocx(
   if (conversionMode === 'positioned') {
     // ─── POSITIONED MODE: Skip LayoutAnalyzer, use scenes directly ─
 
-    // Phase 4: Collect images directly from scenes
+    // Phase 4: Collect images directly from scenes (include ALL images for 1:1 fidelity)
     const imageElements = extractImagesFromScenes(scenes);
-    const collected = collectImages(imageElements, imageScale, maxImageDimEmu);
+    console.log(`[DocxGenerator] Positioned mode: ${imageElements.length} image elements from scenes, ${imageElements.filter(e => e.data !== null).length} with data, ${imageElements.filter(e => e.isGenuine).length} genuine`);
+    const collected = collectImages(imageElements, imageScale, maxImageDimEmu, true, true);
     allImages = collected.allImages;
     uniqueImages = collected.uniqueImages;
 
+    // Create ImageFile entries for page background images (rIds continue from last image)
+    const bgNextRId = 4 + uniqueImages.length;
+    const bgImages: ImageFile[] = [];
+    for (let pi = 0; pi < pageBackgrounds.length; pi++) {
+      const bg = pageBackgrounds[pi];
+      if (bg.data.length === 0) continue;
+      const bgFile: ImageFile = {
+        rId: `rId${bgNextRId + pi}`,
+        data: bg.data,
+        mimeType: 'image/png',
+        fileName: `page_bg_${pi + 1}.png`,
+        resourceName: `__page_bg_${pi}`,
+        widthEmu: bg.widthEmu,
+        heightEmu: bg.heightEmu,
+      };
+      bgImages.push(bgFile);
+      uniqueImages.push(bgFile);
+    }
+    console.log(`[DocxGenerator] Positioned mode: ${allImages.length} allImages, ${uniqueImages.length} uniqueImages (${bgImages.length} page backgrounds)`);
+
+    // Build per-page editable text index sets for the OOXML generator
+    const editableTextSets = pageBackgrounds.map(bg => bg.editableTextIndices);
+
     // Phase 5a: Generate positioned document XML
-    documentXml = generatePositionedDocumentXml(scenes, allImages, styleCollector);
+    documentXml = generatePositionedDocumentXml(scenes, allImages, styleCollector, bgImages, editableTextSets);
 
   } else {
     // ─── FLOW MODE: Full pipeline with LayoutAnalyzer ─────────

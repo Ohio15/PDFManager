@@ -415,10 +415,82 @@ export function generateDropdownRuns(field: FormField): string {
 /**
  * Generate form field runs (w:r elements only, no w:p wrapper).
  * Dispatches to the appropriate generator based on field type.
+ * These produce functional Word legacy form fields (FORMTEXT, FORMCHECKBOX, FORMDROPDOWN).
  */
 export function generateFormFieldRuns(field: FormField): string {
   if (field.fieldType === 'Tx') return generateTextFieldRuns(field);
   if (field.fieldType === 'Btn') return generateCheckBoxRuns(field);
   if (field.fieldType === 'Ch') return generateDropdownRuns(field);
+  return '';
+}
+
+/**
+ * Generate VISUAL-ONLY form field runs for positioned mode (1:1 visual fidelity).
+ *
+ * Instead of Word legacy form fields (which add their own chrome and look different
+ * from the PDF), this renders the field's current value as styled text that matches
+ * the PDF's visual appearance:
+ *   - Text fields: value with bottom border (underline) to indicate fillable area
+ *   - Checkboxes: Unicode checkbox symbol matching checked/unchecked state
+ *   - Radio buttons: Unicode radio symbol matching selected/unselected state
+ *   - Dropdowns: selected option displayed as plain text
+ */
+export function generateVisualFormFieldRuns(field: FormField, heightPt: number): string {
+  // Estimate font size from field height (typically field height ≈ 1.3× font size)
+  const fontSizeHp = Math.max(12, Math.round((heightPt / 1.3) * 2)); // half-points
+
+  if (field.fieldType === 'Tx') {
+    // Text field: show value (or empty underlined space)
+    let value = field.fieldValue || '';
+    if (value.trim().length === 0) {
+      value = '               '; // 15 spaces for visible empty field
+    }
+    return [
+      '<w:r>',
+      '<w:rPr>',
+      `<w:sz w:val="${fontSizeHp}"/>`,
+      `<w:szCs w:val="${fontSizeHp}"/>`,
+      '<w:u w:val="single" w:color="808080"/>',
+      '</w:rPr>',
+      `<w:t xml:space="preserve">${escXml(value)}</w:t>`,
+      '</w:r>',
+    ].join('\n');
+  }
+
+  if (field.fieldType === 'Btn') {
+    // Checkbox / radio button: Unicode symbol
+    let symbol: string;
+    if (field.isRadioButton) {
+      symbol = field.isChecked ? '\u25CF' : '\u25CB'; // filled / empty circle
+    } else {
+      symbol = field.isChecked ? '\u2611' : '\u2610'; // checked / unchecked box
+    }
+    return [
+      '<w:r>',
+      '<w:rPr>',
+      '<w:rFonts w:ascii="Segoe UI Symbol" w:hAnsi="Segoe UI Symbol" w:cs="Segoe UI Symbol"/>',
+      `<w:sz w:val="${fontSizeHp}"/>`,
+      `<w:szCs w:val="${fontSizeHp}"/>`,
+      '</w:rPr>',
+      `<w:t>${symbol}</w:t>`,
+      '</w:r>',
+    ].join('\n');
+  }
+
+  if (field.fieldType === 'Ch') {
+    // Dropdown: show selected value text
+    const selectedOpt = field.options.find(o => o.exportValue === field.fieldValue);
+    const displayText = selectedOpt?.displayValue || selectedOpt?.exportValue || field.fieldValue || '';
+    return [
+      '<w:r>',
+      '<w:rPr>',
+      `<w:sz w:val="${fontSizeHp}"/>`,
+      `<w:szCs w:val="${fontSizeHp}"/>`,
+      '</w:rPr>',
+      `<w:t xml:space="preserve">${escXml(displayText)}</w:t>`,
+      '</w:r>',
+    ].join('\n');
+  }
+
   return '';
 }

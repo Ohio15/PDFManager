@@ -39,6 +39,7 @@ export interface ElectronAPI {
   getStore: (key: string) => Promise<unknown>;
   setStore: (key: string, value: unknown) => Promise<void>;
   onFileOpened: (callback: (data: FileData) => void) => void;
+  removeFileOpenedListener: () => void;
   onMenuAction: (action: string, callback: () => void) => void;
   removeMenuListener: (action: string) => void;
   // Auto-update methods
@@ -92,6 +93,9 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('set-store', key, value),
   onFileOpened: (callback: (data: FileData) => void) => {
     ipcRenderer.on('file-opened', (_event, data) => callback(data));
+  },
+  removeFileOpenedListener: () => {
+    ipcRenderer.removeAllListeners('file-opened');
   },
   onMenuAction: (action: string, callback: () => void) => {
     ipcRenderer.on(`menu-${action}`, callback);

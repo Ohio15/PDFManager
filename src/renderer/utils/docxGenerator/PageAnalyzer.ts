@@ -58,6 +58,12 @@ const OPS = {
   setFillRGBColor: 59,
   setStrokeCMYKColor: 60,
   setFillCMYKColor: 61,
+  beginText: 34,
+  endText: 35,
+  showText: 36,
+  showSpacedText: 37,
+  setFont: 38,
+  setTextMatrix: 43,
   paintJpegXObject: 82,
   paintImageXObject: 85,
   constructPath: 91,
@@ -891,6 +897,22 @@ interface GraphicsState {
   ctm: Matrix;
 }
 
+/** Position-keyed text color entry from operator list analysis */
+interface TextColorEntry {
+  /** X position (PDF user-space, bottom-left origin) */
+  tx: number;
+  /** Y position converted to top-left origin */
+  ty: number;
+  /** Fill color active at the time of text rendering */
+  color: RGB;
+}
+
+/** Result of operator list parsing including text color map */
+interface ParseOperatorListResult {
+  elements: SceneElement[];
+  textColorMap: TextColorEntry[];
+}
+
 interface PathOp {
   type: 'moveTo' | 'lineTo' | 'curveTo' | 'closePath' | 'rectangle';
   args: number[];
@@ -911,8 +933,9 @@ function parseOperatorList(
   pdfLibDoc: any,
   pageIndex: number,
   pdfjsPage: any,
-): SceneElement[] {
+): ParseOperatorListResult {
   const elements: SceneElement[] = [];
+  const textColorMap: TextColorEntry[] = [];
   const { fnArray, argsArray } = opList;
 
   // Build resource info map for image classification (filter, bpc, etc.)
@@ -1420,8 +1443,22 @@ function parseOperatorList(
         break;
       }
 
-      // All other ops (text ops, color space setting, etc.) are ignored here.
-      // Text is extracted separately via getTextContent() for accuracy.
+      // ── Text rendering ops — capture fill color at text position ──
+      // Text content is still extracted via getTextContent() for accuracy,
+      // but we record the fill color active during text rendering for cross-reference.
+      case OPS.showText:
+      case OPS.showSpacedText: {
+        // Record current position and fill color for text color recovery
+        const tx = state.ctm[4];
+        const ty = pageHeight - state.ctm[5];
+        textColorMap.push({
+          tx,
+          ty,
+          color: { ...state.fillColor },
+        });
+        break;
+      }
+
       default:
         break;
     }
@@ -1432,7 +1469,7 @@ function parseOperatorList(
     flushPath(false, false);
   }
 
-  return elements;
+  return { elements, textColorMap };
 }
 
 /**
@@ -1469,6 +1506,7 @@ function getLastPathPoint(pathOps: PathOp[]): { x: number; y: number } {
 function convertTextItems(
   textContent: any,
   pageHeight: number,
+  textColorMap: TextColorEntry[] = [],
 ): TextElement[] {
   const results: TextElement[] = [];
 
@@ -1509,10 +1547,22 @@ function convertTextItems(
     const bold = isBoldFont(resolvedFontFamily);
     const italic = isItalicFont(resolvedFontFamily);
 
-    // pdfjs textContent does not expose color directly; default to black.
-    // The operator list could theoretically be cross-referenced for color,
-    // but text positioning from textContent is far more reliable.
-    const color = rgbToHex(0, 0, 0);
+    // Cross-reference operator list color map for text color recovery.
+    // Find the closest color map entry by position (Euclidean distance).
+    let color = '000000'; // fallback to black
+    if (textColorMap.length > 0) {
+      let bestDist = Infinity;
+      const tolerance = fontSize * 2; // generous tolerance
+      for (const entry of textColorMap) {
+        const dx = x - entry.tx;
+        const dy = y - entry.ty;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < bestDist && dist <= tolerance) {
+          bestDist = dist;
+          color = rgbToHex(entry.color.r, entry.color.g, entry.color.b);
+        }
+      }
+    }
 
     results.push({
       kind: 'text',
@@ -1649,8 +1699,8 @@ export async function analyzePage(
     extractFormFields(page, pageHeight),
   ]);
 
-  // Parse operator list for graphics (rects, paths, images)
-  const graphicsElements = parseOperatorList(
+  // Parse operator list for graphics (rects, paths, images) and text color map
+  const { elements: graphicsElements, textColorMap } = parseOperatorList(
     opList,
     pageWidth,
     pageHeight,
@@ -1659,8 +1709,8 @@ export async function analyzePage(
     page,
   );
 
-  // Convert text content items to TextElements
-  const textElements = convertTextItems(textContent, pageHeight);
+  // Convert text content items to TextElements, cross-referencing color map
+  const textElements = convertTextItems(textContent, pageHeight, textColorMap);
 
   // Merge all scene elements
   const elements: SceneElement[] = [

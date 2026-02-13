@@ -240,6 +240,12 @@ export function generateDocumentXml(
 
   const normalStyle = styleCollector.getNormalStyle();
 
+  // Compute page left margin for indentation reference
+  const boundsForMargin = layouts.filter(l => l.contentBounds);
+  const pageLeftMarginPt = boundsForMargin.length > 0
+    ? boundsForMargin.reduce((s, l) => s + l.contentBounds!.left, 0) / boundsForMargin.length
+    : 72;
+
   for (let pageIdx = 0; pageIdx < layouts.length; pageIdx++) {
     const layout = layouts[pageIdx];
 
@@ -248,11 +254,11 @@ export function generateDocumentXml(
       if (elem.type === 'table') {
         xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector);
       } else if (elem.type === 'paragraph') {
-        xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector);
+        xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt);
       } else if (elem.type === 'image') {
         xml += generateImageXml(elem.element, images);
       } else if (elem.type === 'two-column') {
-        xml += generateTwoColumnXml(elem.element, images, normalStyle, styleCollector);
+        xml += generateTwoColumnXml(elem.element, images, normalStyle, styleCollector, pageLeftMarginPt);
       }
     }
 
@@ -267,9 +273,28 @@ export function generateDocumentXml(
   const pgW = lastLayout ? Math.round(lastLayout.width * PT_TO_TWIPS) : 12240; // 8.5" default
   const pgH = lastLayout ? Math.round(lastLayout.height * PT_TO_TWIPS) : 15840; // 11" default
 
+  // Compute aggregate margins from content bounds across all pages
+  let marginTopTwips = 1440; // 1" default
+  let marginBottomTwips = 1440;
+  let marginLeftTwips = 1440;
+  let marginRightTwips = 1440;
+
+  const boundsPages = layouts.filter(l => l.contentBounds);
+  if (boundsPages.length > 0) {
+    const avgLeft = boundsPages.reduce((s, l) => s + l.contentBounds!.left, 0) / boundsPages.length;
+    const avgTop = boundsPages.reduce((s, l) => s + l.contentBounds!.top, 0) / boundsPages.length;
+    const avgRight = boundsPages.reduce((s, l) => s + l.contentBounds!.right, 0) / boundsPages.length;
+    const avgBottom = boundsPages.reduce((s, l) => s + l.contentBounds!.bottom, 0) / boundsPages.length;
+
+    marginLeftTwips = Math.round(avgLeft * PT_TO_TWIPS);
+    marginTopTwips = Math.round(avgTop * PT_TO_TWIPS);
+    marginRightTwips = Math.round(avgRight * PT_TO_TWIPS);
+    marginBottomTwips = Math.round(avgBottom * PT_TO_TWIPS);
+  }
+
   xml += '<w:sectPr>\n';
   xml += `  <w:pgSz w:w="${pgW}" w:h="${pgH}"/>\n`;
-  xml += '  <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>\n';
+  xml += `  <w:pgMar w:top="${marginTopTwips}" w:right="${marginRightTwips}" w:bottom="${marginBottomTwips}" w:left="${marginLeftTwips}" w:header="720" w:footer="720" w:gutter="0"/>\n`;
   xml += '  <w:cols w:space="720"/>\n';
   xml += '</w:sectPr>\n';
 
@@ -299,17 +324,24 @@ function generateTableFromDetected(
 ): string {
   let xml = '<w:tbl>\n';
 
-  // Table properties with borders
+  // Table properties with borders (use actual border data if available)
+  const borderSz = table.borderWidthPt
+    ? String(Math.max(Math.round(table.borderWidthPt * 8), 2))
+    : '4';
+  const borderColor = table.borderColor
+    ? rgbToHex(table.borderColor)
+    : 'auto';
+
   xml += '  <w:tblPr>\n';
   xml += '    <w:tblStyle w:val="TableGrid"/>\n';
   xml += '    <w:tblW w:w="0" w:type="auto"/>\n';
   xml += '    <w:tblBorders>\n';
-  xml += '      <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
-  xml += '      <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
-  xml += '      <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
-  xml += '      <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
-  xml += '      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
-  xml += '      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>\n';
+  xml += `      <w:top w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
+  xml += `      <w:left w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
+  xml += `      <w:bottom w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
+  xml += `      <w:right w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
+  xml += `      <w:insideH w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
+  xml += `      <w:insideV w:val="single" w:sz="${borderSz}" w:space="0" w:color="${borderColor}"/>\n`;
   xml += '    </w:tblBorders>\n';
   xml += '    <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>\n';
   xml += '  </w:tblPr>\n';
@@ -575,7 +607,8 @@ function renderCellContent(
 function generateParagraphGroupXml(
   group: ParagraphGroup,
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  pageLeftMarginPt: number = 72,
 ): string {
   if (group.texts.length === 0 && group.formFields.length === 0) {
     return '<w:p/>\n';
@@ -653,13 +686,57 @@ function generateParagraphGroupXml(
 
     xml += '<w:p>\n';
 
-    // Paragraph properties (alignment, background shading, borders)
-    const needsPPr = alignment !== 'left' || group.backgroundColor || group.bottomBorder;
+    // Compute paragraph indentation from X offset vs page left margin
+    const leftIndentPt = group.x - pageLeftMarginPt;
+    const hasIndent = leftIndentPt > 5; // ignore tiny rounding offsets
+
+    // First-line indent detection: compare first line X to subsequent lines
+    let firstLineIndentTwips = 0;
+    let hangingTwips = 0;
+    if (paraLines.length >= 2) {
+      const firstLineMinX = Math.min(...paraLines[0].map(t => t.x));
+      const restMinXs = paraLines.slice(1).map(line => Math.min(...line.map(t => t.x)));
+      const avgRestX = restMinXs.reduce((s, v) => s + v, 0) / restMinXs.length;
+      const diff = firstLineMinX - avgRestX;
+      if (diff > 10) {
+        firstLineIndentTwips = Math.round(diff * PT_TO_TWIPS);
+      } else if (diff < -10) {
+        hangingTwips = Math.round(Math.abs(diff) * PT_TO_TWIPS);
+      }
+    }
+
+    // Line spacing from paragraph group
+    let lineSpacingTwips = 0;
+    if (group.lineSpacingPt && group.lineSpacingPt > 0) {
+      lineSpacingTwips = Math.round(group.lineSpacingPt * PT_TO_TWIPS);
+    }
+
+    // Paragraph properties (heading style, alignment, indentation, spacing, background, borders)
+    const needsPPr = group.headingLevel || alignment !== 'left' || hasIndent
+      || firstLineIndentTwips > 0 || hangingTwips > 0
+      || lineSpacingTwips > 0
+      || group.backgroundColor || group.bottomBorder;
     if (needsPPr) {
       xml += '  <w:pPr>\n';
+      if (group.headingLevel) {
+        xml += `    <w:pStyle w:val="Heading${group.headingLevel}"/>\n`;
+      }
       if (alignment !== 'left') {
         const jcVal = alignment === 'justify' ? 'both' : alignment;
         xml += `    <w:jc w:val="${jcVal}"/>\n`;
+      }
+      if (hasIndent || firstLineIndentTwips > 0 || hangingTwips > 0) {
+        const leftTwips = hasIndent ? Math.round(leftIndentPt * PT_TO_TWIPS) : 0;
+        let indAttr = `w:left="${leftTwips}"`;
+        if (firstLineIndentTwips > 0) {
+          indAttr += ` w:firstLine="${firstLineIndentTwips}"`;
+        } else if (hangingTwips > 0) {
+          indAttr += ` w:hanging="${hangingTwips}"`;
+        }
+        xml += `    <w:ind ${indAttr}/>\n`;
+      }
+      if (lineSpacingTwips > 0) {
+        xml += `    <w:spacing w:line="${lineSpacingTwips}" w:lineRule="exact"/>\n`;
       }
       if (group.backgroundColor) {
         const bgHex = rgbToHex(group.backgroundColor);
@@ -1026,10 +1103,11 @@ function generateTwoColumnXml(
   region: TwoColumnRegion,
   images: ImageFile[],
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  pageLeftMarginPt: number = 72,
 ): string {
-  // Compute column widths from gapX and page margins (1 inch = 72pt each side)
-  const marginPt = 72;
+  // Compute column widths from gapX and actual page margins
+  const marginPt = pageLeftMarginPt;
   const contentWidth = region.pageWidth - marginPt * 2;
   const leftWidthPt = region.gapX - marginPt;
   const rightWidthPt = contentWidth - leftWidthPt;
@@ -1066,7 +1144,7 @@ function generateTwoColumnXml(
   xml += '      <w:tcPr>\n';
   xml += `        <w:tcW w:w="${leftWidthTwips}" w:type="dxa"/>\n`;
   xml += '      </w:tcPr>\n';
-  const leftContent = renderColumnContent(region.leftElements, images, normalStyle, styleCollector);
+  const leftContent = renderColumnContent(region.leftElements, images, normalStyle, styleCollector, pageLeftMarginPt);
   xml += leftContent || '      <w:p/>\n';
   xml += '    </w:tc>\n';
 
@@ -1075,7 +1153,7 @@ function generateTwoColumnXml(
   xml += '      <w:tcPr>\n';
   xml += `        <w:tcW w:w="${rightWidthTwips}" w:type="dxa"/>\n`;
   xml += '      </w:tcPr>\n';
-  const rightContent = renderColumnContent(region.rightElements, images, normalStyle, styleCollector);
+  const rightContent = renderColumnContent(region.rightElements, images, normalStyle, styleCollector, pageLeftMarginPt);
   xml += rightContent || '      <w:p/>\n';
   xml += '    </w:tc>\n';
 
@@ -1095,13 +1173,14 @@ function renderColumnContent(
   elements: LayoutElement[],
   images: ImageFile[],
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  pageLeftMarginPt: number = 72,
 ): string {
   let xml = '';
   let lastType: string = '';
   for (const elem of elements) {
     if (elem.type === 'paragraph') {
-      xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector);
+      xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt);
       lastType = 'paragraph';
     } else if (elem.type === 'image') {
       xml += generateImageXml(elem.element, images);
@@ -1290,6 +1369,32 @@ export function generateStylesXml(styleCollector: StyleCollector): string {
   xml += '    <w:name w:val="Normal"/>\n';
   xml += '    <w:qFormat/>\n';
   xml += '  </w:style>\n';
+
+  // Heading styles (Heading 1-3)
+  const headingDefs = [
+    { level: 1, name: 'heading 1', sizeFactor: 2.0, spacingBefore: 240 },
+    { level: 2, name: 'heading 2', sizeFactor: 1.6, spacingBefore: 200 },
+    { level: 3, name: 'heading 3', sizeFactor: 1.3, spacingBefore: 160 },
+  ];
+
+  for (const h of headingDefs) {
+    const headingSizeHp = Math.round(normal.fontSize * h.sizeFactor);
+    xml += `  <w:style w:type="paragraph" w:styleId="Heading${h.level}">\n`;
+    xml += `    <w:name w:val="${h.name}"/>\n`;
+    xml += '    <w:basedOn w:val="Normal"/>\n';
+    xml += '    <w:next w:val="Normal"/>\n';
+    xml += '    <w:qFormat/>\n';
+    xml += '    <w:pPr>\n';
+    xml += '      <w:keepNext/>\n';
+    xml += `      <w:spacing w:before="${h.spacingBefore}"/>\n`;
+    xml += '    </w:pPr>\n';
+    xml += '    <w:rPr>\n';
+    xml += '      <w:b/>\n';
+    xml += `      <w:sz w:val="${headingSizeHp}"/>\n`;
+    xml += `      <w:szCs w:val="${headingSizeHp}"/>\n`;
+    xml += '    </w:rPr>\n';
+    xml += '  </w:style>\n';
+  }
 
   // Only emit styles that are actually used and differ from Normal
   for (const style of usedStyles) {

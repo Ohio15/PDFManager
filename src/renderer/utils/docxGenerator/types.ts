@@ -169,6 +169,10 @@ export interface DetectedTable {
   y: number;
   width: number;
   height: number;
+  /** Median border stroke color from source rects */
+  borderColor?: RGB;
+  /** Median border line width in PDF points */
+  borderWidthPt?: number;
 }
 
 /** A group of text elements forming a paragraph */
@@ -181,6 +185,10 @@ export interface ParagraphGroup {
   backgroundColor?: RGB | null;
   /** Bottom border from overlapping separator rect */
   bottomBorder?: { color: RGB; widthPt: number } | null;
+  /** Average inter-line spacing in PDF points */
+  lineSpacingPt?: number;
+  /** Heading level: 1, 2, or 3; undefined = normal body text */
+  headingLevel?: number;
 }
 
 /** A two-column region detected from side-by-side paragraph groups */
@@ -211,6 +219,8 @@ export interface PageLayout {
   width: number;
   /** Page height in PDF points */
   height: number;
+  /** Bounding box of all content on the page in PDF points */
+  contentBounds?: { left: number; top: number; right: number; bottom: number };
 }
 
 // ─── DOCX Run / Paragraph Types (used by OoxmlParts) ──────────

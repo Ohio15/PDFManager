@@ -728,6 +728,31 @@ function buildTableFromBorderGroup(
     rowHeights.push(rowBounds[r + 1] - rowBounds[r]);
   }
 
+  // Extract median border color and width from source rects
+  const strokeColors: RGB[] = [];
+  const lineWidths: number[] = [];
+  for (const rect of borderRects) {
+    if (rect.strokeColor) {
+      strokeColors.push(rect.strokeColor);
+    }
+    if (rect.lineWidth > 0) {
+      lineWidths.push(rect.lineWidth);
+    }
+  }
+
+  let borderColor: RGB | undefined;
+  if (strokeColors.length > 0) {
+    // Median color: sort by luminance and pick middle
+    strokeColors.sort((a, b) => (a.r + a.g + a.b) - (b.r + b.g + b.b));
+    borderColor = strokeColors[Math.floor(strokeColors.length / 2)];
+  }
+
+  let borderWidthPt: number | undefined;
+  if (lineWidths.length > 0) {
+    lineWidths.sort((a, b) => a - b);
+    borderWidthPt = lineWidths[Math.floor(lineWidths.length / 2)];
+  }
+
   return {
     cells,
     rows: numRows,
@@ -738,6 +763,8 @@ function buildTableFromBorderGroup(
     y: tableY,
     width: tableW,
     height: tableH,
+    borderColor,
+    borderWidthPt,
   };
 }
 
@@ -992,11 +1019,23 @@ function finalizeParagraphGroup(
     allTexts.push(...line.texts);
   }
 
+  // Compute inter-line spacing from consecutive line Y deltas
+  let lineSpacingPt: number | undefined;
+  if (lines.length >= 2) {
+    const deltas: number[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      deltas.push(lines[i].y - lines[i - 1].y);
+    }
+    // Average the deltas
+    lineSpacingPt = deltas.reduce((sum, d) => sum + d, 0) / deltas.length;
+  }
+
   return {
     texts: allTexts,
     formFields: [],
     y: lines[0].y,
     x: Math.min(...lines.map(l => l.minX)),
+    lineSpacingPt,
   };
 }
 
@@ -2094,10 +2133,92 @@ export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
     return yA - yB;
   });
 
+  // Compute content bounding box from all text elements and form fields
+  let contentLeft = scene.width;
+  let contentTop = scene.height;
+  let contentRight = 0;
+  let contentBottom = 0;
+  let hasContent = false;
+
+  for (const el of scene.elements) {
+    if (el.kind === 'text') {
+      const t = el as TextElement;
+      contentLeft = Math.min(contentLeft, t.x);
+      contentTop = Math.min(contentTop, t.y);
+      contentRight = Math.max(contentRight, t.x + t.width);
+      contentBottom = Math.max(contentBottom, t.y + t.height);
+      hasContent = true;
+    }
+  }
+  for (const f of scene.formFields) {
+    contentLeft = Math.min(contentLeft, f.x);
+    contentTop = Math.min(contentTop, f.y);
+    contentRight = Math.max(contentRight, f.x + f.width);
+    contentBottom = Math.max(contentBottom, f.y + f.height);
+    hasContent = true;
+  }
+
+  // Clamp to reasonable margin range: 36pt (0.5") to 108pt (1.5")
+  let contentBounds: { left: number; top: number; right: number; bottom: number } | undefined;
+  if (hasContent) {
+    contentBounds = {
+      left: Math.max(36, Math.min(108, contentLeft)),
+      top: Math.max(36, Math.min(108, contentTop)),
+      right: Math.max(36, Math.min(108, scene.width - contentRight)),
+      bottom: Math.max(36, Math.min(108, scene.height - contentBottom)),
+    };
+  }
+
+  // Heading detection: classify paragraphs by font size relative to body text
+  const fontSizeCounts = new Map<number, number>();
+  for (const el of finalElements) {
+    if (el.type === 'paragraph') {
+      const para = el.element as ParagraphGroup;
+      if (para.texts.length > 0) {
+        // Use rounded font size of first text as representative
+        const size = Math.round(para.texts[0].fontSize * 2) / 2; // round to 0.5pt
+        fontSizeCounts.set(size, (fontSizeCounts.get(size) || 0) + 1);
+      }
+    }
+  }
+
+  // Find body font size (most common)
+  let bodyFontSize = 10;
+  let maxCount = 0;
+  for (const [size, count] of fontSizeCounts) {
+    if (count > maxCount) {
+      maxCount = count;
+      bodyFontSize = size;
+    }
+  }
+
+  // Classify heading levels
+  for (const el of finalElements) {
+    if (el.type !== 'paragraph') continue;
+    const para = el.element as ParagraphGroup;
+    if (para.texts.length === 0) continue;
+
+    const firstTextSize = para.texts[0].fontSize;
+    const ratio = firstTextSize / bodyFontSize;
+
+    // Only short paragraphs (≤3 lines by Y grouping) qualify as headings
+    const uniqueYs = new Set(para.texts.map(t => Math.round(t.y)));
+    if (uniqueYs.size > 3) continue;
+
+    if (ratio >= 1.5) {
+      para.headingLevel = 1;
+    } else if (ratio >= 1.25) {
+      para.headingLevel = 2;
+    } else if (ratio >= 1.1 && para.texts[0].bold) {
+      para.headingLevel = 3;
+    }
+  }
+
   return {
     elements: finalElements,
     width: scene.width,
     height: scene.height,
+    contentBounds,
   };
 }
 

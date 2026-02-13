@@ -863,6 +863,43 @@ function groupIntoParagraphs(
     line.texts.sort((a, b) => a.x - b.x);
   }
 
+  // Step 1b: Split lines at large X gaps.
+  // Text elements at the same baseline may come from different columns
+  // (e.g., "Evaluation" at x=26 and "Rush Job" at x=245). If the gap
+  // between consecutive elements exceeds 30pt, split into separate lines
+  // so they become independent paragraphs.
+  const X_GAP_SPLIT_THRESHOLD = 30;
+  const splitLines: TextLine[] = [];
+  for (const line of lines) {
+    if (line.texts.length <= 1) {
+      splitLines.push(line);
+      continue;
+    }
+    let segStart = 0;
+    for (let i = 1; i < line.texts.length; i++) {
+      const prev = line.texts[i - 1];
+      const prevRight = prev.x + prev.width;
+      const gap = line.texts[i].x - prevRight;
+      if (gap > X_GAP_SPLIT_THRESHOLD) {
+        // Emit segment [segStart..i-1]
+        const seg = line.texts.slice(segStart, i);
+        const avgFS = seg.reduce((s, t) => s + t.fontSize, 0) / seg.length;
+        const minX = Math.min(...seg.map(t => t.x));
+        splitLines.push({ texts: seg, y: line.y, avgFontSize: avgFS, minX });
+        segStart = i;
+      }
+    }
+    // Emit final segment
+    const seg = line.texts.slice(segStart);
+    const avgFS = seg.reduce((s, t) => s + t.fontSize, 0) / seg.length;
+    const minX = Math.min(...seg.map(t => t.x));
+    splitLines.push({ texts: seg, y: line.y, avgFontSize: avgFS, minX });
+  }
+
+  // Replace lines with split lines for subsequent paragraph grouping
+  lines.length = 0;
+  lines.push(...splitLines);
+
   // Step 2: Group lines into paragraphs by gap analysis AND font size changes
   const paragraphs: ParagraphGroup[] = [];
   let paraLines: TextLine[] = [lines[0]];
@@ -1685,7 +1722,7 @@ function applyRectStylingToParagraphs(
 /** Minimum X gap between columns to trigger two-column detection */
 const TWO_COL_MIN_GAP = 40;
 
-/** Minimum number of elements per side to qualify as two-column */
+/** Minimum number of elements per side to qualify as two-column (unused after rewrite, kept for tests) */
 const TWO_COL_MIN_ELEMENTS = 2;
 
 /**
@@ -1724,137 +1761,174 @@ function getElementBottom(el: LayoutElement): number {
 }
 
 /**
- * Detect side-by-side paragraph/image groups and merge them into
- * TwoColumnRegion elements. Tables are never included in column detection.
+ * Detect side-by-side element groups and merge them into TwoColumnRegion
+ * elements. ALL element types (tables, paragraphs, images) participate.
  *
  * Algorithm:
- * 1. Collect non-table elements with their X positions
- * 2. Find a consistent X gap dividing the page into two halves
- * 3. For elements in overlapping Y ranges across both columns, group into regions
- * 4. Replace original elements with TwoColumnRegion entries
+ * 1. Collect ALL non-two-column elements with their positions
+ * 2. Group elements into Y-bands of vertically overlapping elements
+ * 3. For each band with ≥2 elements, find the largest X gap
+ * 4. If gap > threshold, split band into left/right columns → TwoColumnRegion
+ * 5. Support multiple independent two-column regions per page
  */
 function detectTwoColumnRegions(
   layoutElements: LayoutElement[],
   pageWidth: number
 ): LayoutElement[] {
-  // Only consider paragraphs and images for column detection
-  const candidates: Array<{ elem: LayoutElement; idx: number; x: number; y: number; bottom: number }> = [];
+  // Collect ALL elements (including tables) as candidates
+  interface Candidate {
+    elem: LayoutElement;
+    idx: number;
+    x: number;
+    rightEdge: number;
+    y: number;
+    bottom: number;
+  }
+
+  const candidates: Candidate[] = [];
   for (let i = 0; i < layoutElements.length; i++) {
     const el = layoutElements[i];
-    if (el.type === 'table' || el.type === 'two-column') continue;
+    if (el.type === 'two-column') continue;
+    const x = getElementX(el);
+    let rightEdge: number;
+    if (el.type === 'paragraph') {
+      const texts = el.element.texts;
+      if (texts.length > 0) {
+        rightEdge = Math.max(...texts.map(t => t.x + t.width));
+      } else if (el.element.formFields.length > 0) {
+        rightEdge = Math.max(...el.element.formFields.map(f => f.x + f.width));
+      } else {
+        rightEdge = x + 100;
+      }
+    } else if (el.type === 'image') {
+      rightEdge = el.element.x + el.element.width;
+    } else if (el.type === 'table') {
+      rightEdge = el.element.x + el.element.width;
+    } else {
+      rightEdge = x + 100;
+    }
     candidates.push({
       elem: el,
       idx: i,
-      x: getElementX(el),
+      x,
+      rightEdge,
       y: getElementY(el),
       bottom: getElementBottom(el),
     });
   }
 
-  if (candidates.length < TWO_COL_MIN_ELEMENTS * 2) return layoutElements;
+  if (candidates.length < 2) return layoutElements;
 
-  // Find X clusters: group elements by their X position into left/right bands
-  const xValues = candidates.map(c => c.x);
-  const pageMidX = pageWidth / 2;
+  // Sort by Y for band detection
+  const sorted = [...candidates].sort((a, b) => a.y - b.y);
 
-  const leftCandidates = candidates.filter(c => c.x < pageMidX - TWO_COL_MIN_GAP / 2);
-  const rightCandidates = candidates.filter(c => c.x >= pageMidX + TWO_COL_MIN_GAP / 2);
-
-  // Need sufficient elements on each side
-  if (leftCandidates.length < TWO_COL_MIN_ELEMENTS || rightCandidates.length < TWO_COL_MIN_ELEMENTS) {
-    return layoutElements;
+  // Build Y-bands: groups of elements that overlap vertically (tolerance 20pt)
+  const Y_BAND_TOLERANCE = 20;
+  interface YBand {
+    items: Candidate[];
+    top: number;
+    bottom: number;
   }
 
-  // Verify there's a clear gap: rightMin - leftMax > TWO_COL_MIN_GAP
-  // Use median X of each side for robustness
-  const leftXs = leftCandidates.map(c => c.x).sort((a, b) => a - b);
-  const rightXs = rightCandidates.map(c => c.x).sort((a, b) => a - b);
-  const leftMaxX = Math.max(...leftCandidates.map(c => {
-    if (c.elem.type === 'paragraph') {
-      const texts = c.elem.element.texts;
-      if (texts.length > 0) return Math.max(...texts.map(t => t.x + t.width));
+  const bands: YBand[] = [];
+  const assigned = new Set<number>(); // candidate indices already in a band
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (assigned.has(i)) continue;
+    const band: Candidate[] = [sorted[i]];
+    assigned.add(i);
+    let bandTop = sorted[i].y;
+    let bandBottom = sorted[i].bottom;
+
+    // Expand band with overlapping elements
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let j = i + 1; j < sorted.length; j++) {
+        if (assigned.has(j)) continue;
+        // Element overlaps band if its top is within the band's bottom + tolerance
+        if (sorted[j].y <= bandBottom + Y_BAND_TOLERANCE &&
+            sorted[j].bottom >= bandTop - Y_BAND_TOLERANCE) {
+          band.push(sorted[j]);
+          assigned.add(j);
+          bandTop = Math.min(bandTop, sorted[j].y);
+          bandBottom = Math.max(bandBottom, sorted[j].bottom);
+          changed = true;
+        }
+      }
     }
-    if (c.elem.type === 'image') return c.elem.element.x + c.elem.element.width;
-    return c.x + 100; // fallback
-  }));
-  const rightMinX = Math.min(...rightXs);
 
-  const gapX = (leftMaxX + rightMinX) / 2;
-  const gapWidth = rightMinX - leftMaxX;
+    if (band.length >= 2) {
+      bands.push({ items: band, top: bandTop, bottom: bandBottom });
+    }
+  }
 
-  if (gapWidth < TWO_COL_MIN_GAP) return layoutElements;
-
-  // Find Y-overlapping regions between left and right elements
-  // Strategy: find Y ranges where both sides have content
+  // For each band, check for X-gap based two-column structure
   const consumedIndices = new Set<number>();
-  const twoColElements: Array<{ elem: LayoutElement; insertY: number }> = [];
+  const twoColRegions: Array<{ region: TwoColumnRegion; y: number }> = [];
 
-  // Sort both sides by Y
-  const leftSorted = [...leftCandidates].sort((a, b) => a.y - b.y);
-  const rightSorted = [...rightCandidates].sort((a, b) => a.y - b.y);
+  for (const band of bands) {
+    // Sort band items by X
+    const byX = [...band.items].sort((a, b) => a.x - b.x);
 
-  // Greedy matching: for each left element, find right elements in overlapping Y range
-  let rIdx = 0;
-  let regionLeftElems: LayoutElement[] = [];
-  let regionRightElems: LayoutElement[] = [];
-  let regionTop = Infinity;
-  let regionBottom = -Infinity;
-  const usedRight = new Set<number>();
-
-  for (const leftItem of leftSorted) {
-    // Find right elements whose Y overlaps with this left element (within tolerance)
-    const tolerance = 15; // Y overlap tolerance
-    const matchingRight: typeof rightSorted = [];
-    for (const rightItem of rightSorted) {
-      if (usedRight.has(rightItem.idx)) continue;
-      // Check Y overlap
-      const overlapTop = Math.max(leftItem.y, rightItem.y);
-      const overlapBottom = Math.min(leftItem.bottom, rightItem.bottom);
-      if (overlapBottom >= overlapTop - tolerance) {
-        matchingRight.push(rightItem);
+    // Find largest X gap between consecutive element right-edges and next left-edges
+    let bestGap = 0;
+    let bestGapIdx = -1;
+    for (let i = 0; i < byX.length - 1; i++) {
+      const gap = byX[i + 1].x - byX[i].rightEdge;
+      if (gap > bestGap) {
+        bestGap = gap;
+        bestGapIdx = i;
       }
     }
 
-    if (matchingRight.length > 0) {
-      regionLeftElems.push(leftItem.elem);
-      consumedIndices.add(leftItem.idx);
-      regionTop = Math.min(regionTop, leftItem.y);
-      regionBottom = Math.max(regionBottom, leftItem.bottom);
+    if (bestGap < TWO_COL_MIN_GAP || bestGapIdx < 0) continue;
 
-      for (const rm of matchingRight) {
-        regionRightElems.push(rm.elem);
-        consumedIndices.add(rm.idx);
-        usedRight.add(rm.idx);
-        regionTop = Math.min(regionTop, rm.y);
-        regionBottom = Math.max(regionBottom, rm.bottom);
-      }
-    }
-  }
+    // Split into left (0..bestGapIdx) and right (bestGapIdx+1..end)
+    const leftItems = byX.slice(0, bestGapIdx + 1);
+    const rightItems = byX.slice(bestGapIdx + 1);
 
-  // If we have a valid two-column region, emit it
-  if (regionLeftElems.length >= 1 && regionRightElems.length >= 1) {
+    if (leftItems.length < 1 || rightItems.length < 1) continue;
+
+    // Compute gapX as midpoint between left right-edge and right left-edge
+    const leftMaxRight = Math.max(...leftItems.map(c => c.rightEdge));
+    const rightMinLeft = Math.min(...rightItems.map(c => c.x));
+    const gapX = (leftMaxRight + rightMinLeft) / 2;
+
+    const regionTop = Math.min(...band.items.map(c => c.y));
+    const regionBottom = Math.max(...band.items.map(c => c.bottom));
+
     const twoColRegion: TwoColumnRegion = {
-      leftElements: regionLeftElems,
-      rightElements: regionRightElems,
+      leftElements: leftItems.map(c => c.elem),
+      rightElements: rightItems.map(c => c.elem),
       gapX,
       y: regionTop,
       height: regionBottom - regionTop,
       pageWidth,
     };
 
-    // Build new element list: unconsumed elements + two-column region
-    const result: LayoutElement[] = [];
-    for (let i = 0; i < layoutElements.length; i++) {
-      if (!consumedIndices.has(i)) {
-        result.push(layoutElements[i]);
-      }
-    }
-    result.push({ type: 'two-column', element: twoColRegion });
+    twoColRegions.push({ region: twoColRegion, y: regionTop });
 
-    return result;
+    // Mark all items in this band as consumed
+    for (const item of band.items) {
+      consumedIndices.add(item.idx);
+    }
   }
 
-  return layoutElements;
+  if (twoColRegions.length === 0) return layoutElements;
+
+  // Build new element list: unconsumed elements + two-column regions
+  const result: LayoutElement[] = [];
+  for (let i = 0; i < layoutElements.length; i++) {
+    if (!consumedIndices.has(i)) {
+      result.push(layoutElements[i]);
+    }
+  }
+  for (const { region } of twoColRegions) {
+    result.push({ type: 'two-column', element: region });
+  }
+
+  return result;
 }
 
 // These are exported for unit testing only. Do not use in production code.
@@ -1935,7 +2009,7 @@ export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
   }
 
   if (pathElements.length > 0) {
-    const pathGroups = groupNearbyPaths(pathElements, 5);
+    const pathGroups = groupNearbyPaths(pathElements, 25);
     let pathGroupIdx = 0;
     for (const group of pathGroups) {
       try {

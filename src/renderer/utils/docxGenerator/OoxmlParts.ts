@@ -1086,7 +1086,10 @@ function generateTwoColumnXml(
 
 /**
  * Render a list of LayoutElements into OOXML content for a table cell.
- * Handles paragraphs and images within a column of a two-column layout.
+ * Handles paragraphs, images, and nested tables within a column of a two-column layout.
+ *
+ * OOXML requires every w:tc to contain at least one w:p. When the last element
+ * in the cell is a nested table, we append an empty paragraph to satisfy this.
  */
 function renderColumnContent(
   elements: LayoutElement[],
@@ -1095,14 +1098,22 @@ function renderColumnContent(
   styleCollector: StyleCollector
 ): string {
   let xml = '';
+  let lastType: string = '';
   for (const elem of elements) {
     if (elem.type === 'paragraph') {
       xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector);
+      lastType = 'paragraph';
     } else if (elem.type === 'image') {
       xml += generateImageXml(elem.element, images);
+      lastType = 'image';
     } else if (elem.type === 'table') {
       xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector);
+      lastType = 'table';
     }
+  }
+  // OOXML: w:tc must end with a w:p — add trailing paragraph after nested table
+  if (lastType === 'table') {
+    xml += '      <w:p/>\n';
   }
   return xml;
 }

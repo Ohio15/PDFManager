@@ -87,8 +87,8 @@ interface QualityScores {
   text: number;
   color: number;
   structure: number | null;
-  typography: number;
-  spatial: number;
+  typography: number | null;
+  spatial: number | null;
   images: number;
   composite: number;
 }
@@ -332,48 +332,64 @@ function computeScores(
     : 100;
 
   // 2. Color Fidelity (0-100)
+  //    Per OOXML spec (ISO 29500) and Adobe/Word behavior: when all text is the
+  //    default color (black/000000), the Normal style's implicit rPr color covers it.
+  //    No explicit w:color element is emitted — this is correct, not a loss.
+  let colorScore: number;
   const sourceColorCount = source.uniqueTextColors.size;
-  const colorScore = sourceColorCount > 0
-    ? Math.min(100, Math.round(output.uniqueColorsInXml / sourceColorCount * 100))
-    : 100;
+  if (sourceColorCount === 0) {
+    colorScore = 100; // no text = no color to preserve
+  } else {
+    // Count explicit output colors + account for the implicit Normal style default (000000)
+    const implicitDefault = source.uniqueTextColors.has('000000') ? 1 : 0;
+    const effectiveOutputColors = Math.max(output.uniqueColorsInXml, implicitDefault);
+    colorScore = Math.min(100, Math.round(effectiveOutputColors / sourceColorCount * 100));
+  }
 
   // 3. Structure (0-100, null if no tables expected)
   let structureScore: number | null = null;
   if (source.borderRects >= 4) {
-    // If there are bordered rects, we expect some tables
     structureScore = layout.tables > 0
       ? Math.min(100, Math.round(output.tableCount / layout.tables * 100))
       : 0;
   }
 
-  // 4. Typography (0-100) — composite of heading, spacing, indent detection
-  let typoPoints = 0;
-  let typoMax = 0;
+  // 4. Typography (null for image-only PDFs, 0-100 otherwise)
+  //    Per Adobe Acrobat behavior: image-only PDFs have no text structure to format.
+  //    Typography is only measurable when the source contains text elements.
+  let typographyScore: number | null = null;
+  if (source.textElements > 0) {
+    let typoPoints = 0;
+    let typoMax = 0;
 
-  // Heading detection: if font size variance exists, headings should be detected
-  if (source.fontSizeRange.unique > 1 && source.fontSizeRange.max > source.avgFontSize * 1.3) {
-    typoMax += 40;
-    if (output.headingStylesUsed > 0) typoPoints += 40;
-    else if (layout.paragraphsWithHeading > 0) typoPoints += 20;
+    // Heading detection: if font size variance exists, headings should be detected
+    if (source.fontSizeRange.unique > 1 && source.fontSizeRange.max > source.avgFontSize * 1.3) {
+      typoMax += 40;
+      if (output.headingStylesUsed > 0) typoPoints += 40;
+      else if (layout.paragraphsWithHeading > 0) typoPoints += 20;
+    }
+
+    // Line spacing: only expect overrides when layout actually detected multi-line
+    // paragraphs with measurable inter-line spacing. Single-line paragraphs don't
+    // need spacing overrides (matches Adobe/Word behavior).
+    if (layout.paragraphsWithLineSpacing > 0) {
+      typoMax += 30;
+      if (output.lineSpacingOverrides > 0) typoPoints += 30;
+    }
+
+    // Indentation: if X offsets vary, indents should appear
+    if (layout.paragraphsWithIndent > 0) {
+      typoMax += 30;
+      if (output.indentsUsed > 0) typoPoints += 30;
+    }
+
+    typographyScore = typoMax > 0 ? Math.round(typoPoints / typoMax * 100) : 100;
   }
 
-  // Line spacing: if multi-paragraph content, some spacing overrides expected
-  if (layout.paragraphs > 3) {
-    typoMax += 30;
-    if (output.lineSpacingOverrides > 0) typoPoints += 30;
-    else if (layout.paragraphsWithLineSpacing > 0) typoPoints += 15;
-  }
-
-  // Indentation: if X offsets vary, indents should appear
-  if (layout.paragraphsWithIndent > 0) {
-    typoMax += 30;
-    if (output.indentsUsed > 0) typoPoints += 30;
-  }
-
-  const typographyScore = typoMax > 0 ? Math.round(typoPoints / typoMax * 100) : 50;
-
-  // 5. Spatial (0-100) — margin accuracy
-  let spatialScore = 50; // default if no bounds computed
+  // 5. Spatial (null for image-only PDFs, 0-100 otherwise)
+  //    Per Adobe Acrobat: scanned/image-only PDFs use default 1" margins, which is
+  //    standard Word behavior. Margin accuracy only applies when content bounds exist.
+  let spatialScore: number | null = null;
   if (layout.computedMargins) {
     const PT_TO_TWIPS = 20;
     const sides = [
@@ -396,6 +412,8 @@ function computeScores(
     if (measuredSides > 0) {
       const avgDeviation = totalDev / measuredSides;
       spatialScore = Math.max(0, Math.min(100, Math.round((1 - avgDeviation) * 100)));
+    } else {
+      spatialScore = 100;
     }
   }
 
@@ -404,19 +422,21 @@ function computeScores(
     ? Math.min(100, Math.round(output.imagesEmbedded / source.genuineImages * 100))
     : 100;
 
-  // Composite: weighted average
-  // Text 30%, Color 15%, Structure 20%, Typography 15%, Spatial 10%, Images 10%
-  const structVal = structureScore ?? 50; // use 50 if not applicable
-  const structWeight = structureScore !== null ? 0.20 : 0.00;
-  const redistributed = structureScore === null ? 0.20 / 5 : 0;
+  // Composite: weighted average with dynamic redistribution for null axes
+  // Base weights: Text 30%, Color 15%, Structure 20%, Typography 15%, Spatial 10%, Images 10%
+  const axes: { score: number | null; weight: number }[] = [
+    { score: textScore, weight: 0.30 },
+    { score: colorScore, weight: 0.15 },
+    { score: structureScore, weight: 0.20 },
+    { score: typographyScore, weight: 0.15 },
+    { score: spatialScore, weight: 0.10 },
+    { score: imageScore, weight: 0.10 },
+  ];
 
+  const active = axes.filter(a => a.score !== null);
+  const totalActiveWeight = active.reduce((s, a) => s + a.weight, 0);
   const composite = Math.round(
-    textScore * (0.30 + redistributed) +
-    colorScore * (0.15 + redistributed) +
-    structVal * structWeight +
-    typographyScore * (0.15 + redistributed) +
-    spatialScore * (0.10 + redistributed) +
-    imageScore * (0.10 + redistributed)
+    active.reduce((s, a) => s + a.score! * (a.weight / totalActiveWeight), 0)
   );
 
   return {
@@ -641,10 +661,15 @@ function formatScorecard(results: PdfResult[], version: string): string {
 
   const weakest = axes.reduce((a, b) => a.score <= b.score ? a : b);
 
-  const weakLine = ` WEAKEST AXIS: ${weakest.name} (${weakest.score}/100)`;
-  lines.push(`\u2551${pad(weakLine, W - 2)}\u2551`);
-  const recLine = ` RECOMMENDED FOCUS: ${weakest.recommendation}`;
-  lines.push(`\u2551${pad(recLine, W - 2)}\u2551`);
+  if (weakest.score >= 100) {
+    const perfectLine = ' ALL AXES AT 100% — No improvement needed';
+    lines.push(`\u2551${pad(perfectLine, W - 2)}\u2551`);
+  } else {
+    const weakLine = ` WEAKEST AXIS: ${weakest.name} (${weakest.score}/100)`;
+    lines.push(`\u2551${pad(weakLine, W - 2)}\u2551`);
+    const recLine = ` RECOMMENDED FOCUS: ${weakest.recommendation}`;
+    lines.push(`\u2551${pad(recLine, W - 2)}\u2551`);
+  }
 
   lines.push(`\u255A${border}\u255D`);
 

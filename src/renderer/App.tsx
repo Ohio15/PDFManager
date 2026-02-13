@@ -817,14 +817,15 @@ const App: React.FC = () => {
 
   // Convert PDF to DOCX handler
   const handleConvertToDocx = useCallback(async (
-    outputDir: string
+    outputDir: string,
+    mode: 'positioned' | 'flow' = 'flow'
   ): Promise<{ count: number; folder: string }> => {
     if (!document) return { count: 0, folder: outputDir };
 
     const { generateDocx } = await import('./utils/docxGenerator/DocxGenerator');
 
     const baseName = document.fileName.replace(/\.pdf$/i, '');
-    const result = await generateDocx(document.pdfData);
+    const result = await generateDocx(document.pdfData, { conversionMode: mode });
 
     console.log(`[DOCX] Generated ${result.data.length} bytes, ${result.pageCount} pages`);
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);

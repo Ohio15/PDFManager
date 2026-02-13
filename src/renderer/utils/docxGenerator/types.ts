@@ -141,6 +141,12 @@ export interface PageScene {
 /** Classification of a rectangle's structural role */
 export type RectRole = 'table-border' | 'cell-fill' | 'page-background' | 'separator' | 'decorative';
 
+/** Per-edge border specification */
+export interface CellBorder {
+  color: RGB;
+  widthPt: number;
+}
+
 /** A single cell within a DetectedTable */
 export interface DetectedCell {
   row: number;
@@ -154,6 +160,18 @@ export interface DetectedCell {
   fillColor: RGB | null;
   texts: TextElement[];
   formFields: FormField[];
+  /** Per-cell border overrides (when individual cells differ from table border) */
+  borderTop?: CellBorder;
+  borderBottom?: CellBorder;
+  borderLeft?: CellBorder;
+  borderRight?: CellBorder;
+  /** Padding in PDF points from cell edge to text content */
+  paddingTop?: number;
+  paddingBottom?: number;
+  paddingLeft?: number;
+  paddingRight?: number;
+  /** Vertical alignment of text within the cell */
+  vAlign?: 'top' | 'center' | 'bottom';
 }
 
 /** A table detected from vector borders */
@@ -189,6 +207,12 @@ export interface ParagraphGroup {
   lineSpacingPt?: number;
   /** Heading level: 1, 2, or 3; undefined = normal body text */
   headingLevel?: number;
+  /** Spacing before this paragraph in PDF points */
+  spacingBeforePt?: number;
+  /** Spacing after this paragraph in PDF points */
+  spacingAfterPt?: number;
+  /** Right edge X position in PDF points (for right indent calculation) */
+  rightX?: number;
 }
 
 /** A two-column region detected from side-by-side paragraph groups */
@@ -292,8 +316,13 @@ export interface ImageFile {
   heightEmu: number;
 }
 
+/** Conversion mode: positioned = 1:1 visual match, flow = editable flowing text */
+export type ConversionMode = 'positioned' | 'flow';
+
 /** Options for the conversion process */
 export interface ConvertOptions {
+  /** Conversion mode: 'positioned' for 1:1 visual match, 'flow' for editable text (default: 'flow') */
+  conversionMode?: ConversionMode;
   /** Insert page breaks between pages (default: true) */
   preservePageBreaks?: boolean;
   /** Scale factor for image dimensions (default: 1.0) */

@@ -1,15 +1,24 @@
 /**
  * DOCX Generator — Main Orchestrator
  *
- * Thin orchestration layer for the 5-phase PDF-to-DOCX pipeline:
+ * Thin orchestration layer for the dual-mode PDF-to-DOCX pipeline:
+ *
+ * SHARED (both modes):
  *   Phase 1: Load PDF with pdfjs-dist + pdf-lib
  *   Phase 2: Analyze each page into a scene graph (PageAnalyzer)
- *   Phase 3: Build structural layouts from scene graphs (LayoutAnalyzer)
- *   Phase 4: Collect and deduplicate genuine images
- *   Phase 5: Generate OOXML parts and package into ZIP
  *
- * All heavy logic lives in PageAnalyzer, LayoutAnalyzer, and OoxmlParts.
- * This file only wires the phases together.
+ * POSITIONED mode ("Retain Page Layout"):
+ *   Skip Phase 3 — uses scene graph directly
+ *   Phase 4: Collect images from scenes
+ *   Phase 5a: Generate positioned OOXML (absolute text boxes)
+ *
+ * FLOW mode ("Retain Flowing Text"):
+ *   Phase 3: Build structural layouts from scene graphs (LayoutAnalyzer)
+ *   Phase 4: Collect images from layouts
+ *   Phase 5b: Generate flow OOXML (paragraphs, tables)
+ *
+ * All heavy logic lives in PageAnalyzer, LayoutAnalyzer, OoxmlParts,
+ * and PositionedOoxmlParts. This file only wires the phases together.
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
@@ -30,6 +39,7 @@ import {
   generateSettingsXml,
   generateFontTableXml,
 } from './OoxmlParts';
+import { generatePositionedDocumentXml } from './PositionedOoxmlParts';
 
 // Ensure pdfjs worker is configured
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -48,13 +58,134 @@ function fastHash(data: Uint8Array): string {
 }
 
 /**
+ * Collect and deduplicate images from an array of ImageElement sources.
+ * Shared between positioned and flow modes.
+ */
+function collectImages(
+  imageElements: ImageElement[],
+  imageScale: number,
+  maxImageDimEmu: number,
+): { allImages: ImageFile[]; uniqueImages: ImageFile[] } {
+  // rIds 1-3 are reserved: styles, settings, fontTable
+  let nextRId = 4;
+  let imageCounter = 0;
+
+  const resourceDedup = new Map<string, ImageFile>();
+  const contentDedup = new Map<string, ImageFile>();
+  const allImages: ImageFile[] = [];
+  const uniqueImages: ImageFile[] = [];
+
+  let totalImages = 0;
+  let genuineImages = 0;
+  let withDataImages = 0;
+
+  for (const imgElem of imageElements) {
+    totalImages++;
+
+    if (!imgElem.isGenuine) {
+      console.log(`[DocxGenerator] Skipping non-genuine image: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
+      continue;
+    }
+    genuineImages++;
+    if (!imgElem.data) {
+      console.warn(`[DocxGenerator] Genuine image has NULL data: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
+      continue;
+    }
+    withDataImages++;
+
+    const existingByResource = resourceDedup.get(imgElem.resourceName);
+    if (existingByResource) {
+      allImages.push(existingByResource);
+      continue;
+    }
+
+    const hash = fastHash(imgElem.data);
+    const existingByContent = contentDedup.get(hash);
+    if (existingByContent) {
+      resourceDedup.set(imgElem.resourceName, existingByContent);
+      allImages.push(existingByContent);
+      continue;
+    }
+
+    imageCounter++;
+    const rId = `rId${nextRId++}`;
+    const ext = imgElem.mimeType === 'image/jpeg' ? 'jpeg' : 'png';
+    const fileName = `image${imageCounter}.${ext}`;
+
+    let widthEmu = Math.round(imgElem.width * PT_TO_EMU * imageScale);
+    let heightEmu = Math.round(imgElem.height * PT_TO_EMU * imageScale);
+
+    if (widthEmu > maxImageDimEmu) {
+      const ratio = maxImageDimEmu / widthEmu;
+      widthEmu = maxImageDimEmu;
+      heightEmu = Math.round(heightEmu * ratio);
+    }
+    if (heightEmu > maxImageDimEmu) {
+      const ratio = maxImageDimEmu / heightEmu;
+      heightEmu = maxImageDimEmu;
+      widthEmu = Math.round(widthEmu * ratio);
+    }
+
+    const imageFile: ImageFile = {
+      rId,
+      data: imgElem.data,
+      mimeType: imgElem.mimeType,
+      fileName,
+      resourceName: imgElem.resourceName,
+      widthEmu,
+      heightEmu,
+    };
+
+    resourceDedup.set(imgElem.resourceName, imageFile);
+    contentDedup.set(hash, imageFile);
+    allImages.push(imageFile);
+    uniqueImages.push(imageFile);
+  }
+
+  console.log(`[DocxGenerator] Image summary: ${totalImages} total, ${genuineImages} genuine, ${withDataImages} with data, ${uniqueImages.length} unique in ZIP`);
+
+  return { allImages, uniqueImages };
+}
+
+/**
+ * Extract all ImageElements from PageScene[] (for positioned mode).
+ */
+function extractImagesFromScenes(scenes: PageScene[]): ImageElement[] {
+  const images: ImageElement[] = [];
+  for (const scene of scenes) {
+    for (const elem of scene.elements) {
+      if (elem.kind === 'image') {
+        images.push(elem);
+      }
+    }
+  }
+  return images;
+}
+
+/**
+ * Extract all ImageElements from PageLayout[] (for flow mode).
+ */
+function extractImagesFromLayouts(layouts: PageLayout[]): ImageElement[] {
+  const images: ImageElement[] = [];
+  for (const layout of layouts) {
+    for (const layoutElem of layout.elements) {
+      if (layoutElem.type === 'image') {
+        images.push(layoutElem.element);
+      }
+    }
+  }
+  return images;
+}
+
+/**
  * Main DOCX generation function.
  *
- * Converts raw PDF bytes into a valid DOCX file by running the unified
- * scene-graph pipeline: analyze -> layout -> generate OOXML -> package.
+ * Converts raw PDF bytes into a valid DOCX file. Supports two modes:
+ *   - 'positioned': 1:1 visual match using absolute text box positioning
+ *   - 'flow': editable flowing text with paragraphs and tables (default)
  *
  * @param pdfData - Raw PDF bytes
- * @param options - Conversion options
+ * @param options - Conversion options including mode
  * @returns DOCX file as Uint8Array and the page count
  */
 export async function generateDocx(
@@ -62,11 +193,12 @@ export async function generateDocx(
   options: ConvertOptions = {}
 ): Promise<{ data: Uint8Array; pageCount: number }> {
   const {
+    conversionMode = 'flow',
     imageScale = 1.0,
     maxImageDimEmu = 6858000, // ~7.5 inches max width
   } = options;
 
-  // ─── Phase 1: Load documents ────────────────────────────────
+  // ─── Phase 1: Load documents (SHARED) ─────────────────────
 
   const pdfJsDoc = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
 
@@ -80,7 +212,7 @@ export async function generateDocx(
   const numPages = pdfJsDoc.numPages;
   const styleCollector = new StyleCollector();
 
-  // ─── Phase 2: Analyze all pages into scene graphs ───────────
+  // ─── Phase 2: Analyze all pages into scene graphs (SHARED) ─
 
   const scenes: PageScene[] = [];
 
@@ -93,120 +225,52 @@ export async function generateDocx(
     page.cleanup();
   }
 
-  // ─── Phase 3: Build structural layouts ──────────────────────
-
-  const layouts: PageLayout[] = [];
-
-  for (const scene of scenes) {
-    const layout = await buildPageLayout(scene);
-    layouts.push(layout);
-  }
-
-  // ─── Phase 4: Collect genuine images with dedup ─────────────
-
-  // rIds 1-3 are reserved: styles, settings, fontTable
-  let nextRId = 4;
-  let imageCounter = 0;
-
-  // resourceName -> ImageFile for same-resource dedup across pages
-  const resourceDedup = new Map<string, ImageFile>();
-  // content hash -> ImageFile for byte-identical dedup (different resource names, same content)
-  const contentDedup = new Map<string, ImageFile>();
-  // All images referenced in layouts (may contain duplicates by rId for same resource)
-  const allImages: ImageFile[] = [];
-  // Only unique images for ZIP packaging (one copy per unique content)
-  const uniqueImages: ImageFile[] = [];
-
-  let totalImages = 0;
-  let genuineImages = 0;
-  let withDataImages = 0;
-
-  for (const layout of layouts) {
-    for (const layoutElem of layout.elements) {
-      if (layoutElem.type !== 'image') continue;
-      totalImages++;
-
-      const imgElem: ImageElement = layoutElem.element;
-
-      // Only include genuine images (real photos/diagrams, not UI chrome)
-      if (!imgElem.isGenuine) {
-        console.log(`[DocxGenerator] Skipping non-genuine image: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
-        continue;
-      }
-      genuineImages++;
-      if (!imgElem.data) {
-        console.warn(`[DocxGenerator] Genuine image has NULL data: ${imgElem.resourceName} (${imgElem.intrinsicWidth}x${imgElem.intrinsicHeight})`);
-        continue;
-      }
-      withDataImages++;
-
-      // Check resource-name dedup first (same PDF resource = same image)
-      const existingByResource = resourceDedup.get(imgElem.resourceName);
-      if (existingByResource) {
-        allImages.push(existingByResource);
-        continue;
-      }
-
-      // Check content-hash dedup (different resource name, identical bytes)
-      const hash = fastHash(imgElem.data);
-      const existingByContent = contentDedup.get(hash);
-      if (existingByContent) {
-        // Reuse existing rId/fileName but register under this resource name too
-        resourceDedup.set(imgElem.resourceName, existingByContent);
-        allImages.push(existingByContent);
-        continue;
-      }
-
-      // New unique image: assign rId, fileName, compute EMU dimensions
-      imageCounter++;
-      const rId = `rId${nextRId++}`;
-      const ext = imgElem.mimeType === 'image/jpeg' ? 'jpeg' : 'png';
-      const fileName = `image${imageCounter}.${ext}`;
-
-      // Convert PDF point display size to EMU, apply scale
-      let widthEmu = Math.round(imgElem.width * PT_TO_EMU * imageScale);
-      let heightEmu = Math.round(imgElem.height * PT_TO_EMU * imageScale);
-
-      // Constrain to max dimension while preserving aspect ratio
-      if (widthEmu > maxImageDimEmu) {
-        const ratio = maxImageDimEmu / widthEmu;
-        widthEmu = maxImageDimEmu;
-        heightEmu = Math.round(heightEmu * ratio);
-      }
-      if (heightEmu > maxImageDimEmu) {
-        const ratio = maxImageDimEmu / heightEmu;
-        heightEmu = maxImageDimEmu;
-        widthEmu = Math.round(widthEmu * ratio);
-      }
-
-      const imageFile: ImageFile = {
-        rId,
-        data: imgElem.data,
-        mimeType: imgElem.mimeType,
-        fileName,
-        resourceName: imgElem.resourceName,
-        widthEmu,
-        heightEmu,
-      };
-
-      resourceDedup.set(imgElem.resourceName, imageFile);
-      contentDedup.set(hash, imageFile);
-      allImages.push(imageFile);
-      uniqueImages.push(imageFile);
-    }
-  }
-
-  console.log(`[DocxGenerator] Image summary: ${totalImages} total, ${genuineImages} genuine, ${withDataImages} with data, ${uniqueImages.length} unique in ZIP`);
-
-  // ─── Phase 5: Generate OOXML and package ────────────────────
+  console.log(`[DocxGenerator] Mode: ${conversionMode}, ${numPages} pages`);
 
   // Detect whether any page has form fields (for document protection settings)
   const hasFormFields = scenes.some(scene => scene.formFields.length > 0);
 
+  let documentXml: string;
+  let allImages: ImageFile[];
+  let uniqueImages: ImageFile[];
+
+  if (conversionMode === 'positioned') {
+    // ─── POSITIONED MODE: Skip LayoutAnalyzer, use scenes directly ─
+
+    // Phase 4: Collect images directly from scenes
+    const imageElements = extractImagesFromScenes(scenes);
+    const collected = collectImages(imageElements, imageScale, maxImageDimEmu);
+    allImages = collected.allImages;
+    uniqueImages = collected.uniqueImages;
+
+    // Phase 5a: Generate positioned document XML
+    documentXml = generatePositionedDocumentXml(scenes, allImages, styleCollector);
+
+  } else {
+    // ─── FLOW MODE: Full pipeline with LayoutAnalyzer ─────────
+
+    // Phase 3: Build structural layouts
+    const layouts: PageLayout[] = [];
+    for (const scene of scenes) {
+      const layout = await buildPageLayout(scene);
+      layouts.push(layout);
+    }
+
+    // Phase 4: Collect images from layouts
+    const imageElements = extractImagesFromLayouts(layouts);
+    const collected = collectImages(imageElements, imageScale, maxImageDimEmu);
+    allImages = collected.allImages;
+    uniqueImages = collected.uniqueImages;
+
+    // Phase 5b: Generate flow document XML
+    documentXml = generateDocumentXml(layouts, allImages, styleCollector);
+  }
+
+  // ─── Generate remaining OOXML parts and package (SHARED) ─
+
   const contentTypes = generateContentTypes(allImages);
   const rootRels = generateRootRels();
   const documentRels = generateDocumentRels(uniqueImages);
-  const documentXml = generateDocumentXml(layouts, allImages, styleCollector);
   const stylesXml = generateStylesXml(styleCollector);
   const settingsXml = generateSettingsXml(hasFormFields);
   const fontTableXml = generateFontTableXml(styleCollector.getUsedFonts());

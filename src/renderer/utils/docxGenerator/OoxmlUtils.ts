@@ -1,0 +1,424 @@
+/**
+ * OOXML Shared Utilities
+ *
+ * Common functions and constants shared between flow-mode (OoxmlParts)
+ * and positioned-mode (PositionedOoxmlParts) DOCX generators.
+ */
+
+import type {
+  TextElement,
+  FormField,
+  ImageFile,
+  DocxStyle,
+  RGB,
+} from './types';
+import { StyleCollector } from './StyleCollector';
+
+// ────────────────────────────────────────────────────────────
+// XML Utilities
+// ────────────────────────────────────────────────────────────
+
+/** Escape XML special characters */
+export function escXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// ────────────────────────────────────────────────────────────
+// OOXML Namespace Declarations
+// ────────────────────────────────────────────────────────────
+
+/** OOXML namespace declarations used in document.xml */
+export const DOC_NS = [
+  'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"',
+  'xmlns:mo="http://schemas.microsoft.com/office/mac/office/2008/main"',
+  'xmlns:mv="urn:schemas-microsoft-com:mac:vml"',
+  'xmlns:o="urn:schemas-microsoft-com:office:office"',
+  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+  'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"',
+  'xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"',
+  'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"',
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"',
+  'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"',
+  'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"',
+  'xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"',
+  'xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk"',
+  'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"',
+  'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"',
+  'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"',
+].join(' ');
+
+// ────────────────────────────────────────────────────────────
+// Font Mapping
+// ────────────────────────────────────────────────────────────
+
+/** Common PDF font name to DOCX font name mappings */
+export const FONT_MAP: Record<string, string> = {
+  'ArialMT': 'Arial',
+  'Arial-BoldMT': 'Arial',
+  'Arial-ItalicMT': 'Arial',
+  'Arial-BoldItalicMT': 'Arial',
+  'TimesNewRomanPSMT': 'Times New Roman',
+  'TimesNewRomanPS-BoldMT': 'Times New Roman',
+  'TimesNewRomanPS-ItalicMT': 'Times New Roman',
+  'TimesNewRomanPS-BoldItalicMT': 'Times New Roman',
+  'CourierNewPSMT': 'Courier New',
+  'CourierNewPS-BoldMT': 'Courier New',
+  'Helvetica': 'Arial',
+  'Helvetica-Bold': 'Arial',
+  'Helvetica-Oblique': 'Arial',
+  'Helvetica-BoldOblique': 'Arial',
+  'Symbol': 'Symbol',
+  'ZapfDingbats': 'Wingdings',
+};
+
+/**
+ * Clean up a PDF font name:
+ * - Strip subset prefix (e.g., "ABCDEF+" becomes the base name)
+ * - Map to standard DOCX font name via FONT_MAP
+ * - Strip style suffixes (Bold, Italic, Regular, etc.)
+ * - Default to Calibri if nothing resolves
+ */
+export function mapFontName(pdfFontName: string): string {
+  if (!pdfFontName) return 'Calibri';
+
+  // Strip subset prefix like "BCDFGH+"
+  let name = pdfFontName.replace(/^[A-Z]{6}\+/, '');
+
+  // Check mapped names first
+  if (FONT_MAP[name]) return FONT_MAP[name];
+
+  // Strip common suffixes
+  name = name.replace(
+    /[-,](Bold|Italic|BoldItalic|Regular|Medium|Light|Semibold|Condensed|Narrow|Black|Heavy|Thin|ExtraBold|ExtraLight)$/i,
+    ''
+  );
+  name = name.replace(/MT$/, '');
+  name = name.replace(/PS$/, '');
+
+  // Handle hyphenated compound names
+  if (name.includes('-')) {
+    const parts = name.split('-');
+    if (
+      /^(Bold|Italic|Regular|Medium|Light|Semi|Extra|Condensed)$/i.test(
+        parts[parts.length - 1]
+      )
+    ) {
+      name = parts.slice(0, -1).join('-');
+    }
+  }
+
+  return name || 'Calibri';
+}
+
+// ────────────────────────────────────────────────────────────
+// Color Utilities
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Convert an RGB object (0-1 range) to a 6-char hex string (no '#').
+ */
+export function rgbToHex(color: RGB): string {
+  const r = Math.round(Math.min(1, Math.max(0, color.r)) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  const g = Math.round(Math.min(1, Math.max(0, color.g)) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  const b = Math.round(Math.min(1, Math.max(0, color.b)) * 255)
+    .toString(16)
+    .padStart(2, '0');
+  return `${r}${g}${b}`;
+}
+
+// ────────────────────────────────────────────────────────────
+// Text Grouping
+// ────────────────────────────────────────────────────────────
+
+/** Baseline grouping tolerance in PDF points */
+export const BASELINE_TOL = 3;
+
+/** Word spacing detection: gap > fontSize * WORD_GAP_FACTOR implies a space */
+export const WORD_GAP_FACTOR = 0.3;
+
+/**
+ * Group TextElement[] by Y baseline into lines.
+ * Elements within BASELINE_TOL of each other are considered same line.
+ * Each resulting line is sorted by X position (left to right).
+ */
+export function groupTextsByBaseline(texts: TextElement[]): TextElement[][] {
+  if (texts.length === 0) return [];
+
+  // Sort by Y first, then X
+  const sorted = [...texts].sort((a, b) => {
+    const yDiff = a.y - b.y;
+    if (Math.abs(yDiff) > BASELINE_TOL) return yDiff;
+    return a.x - b.x;
+  });
+
+  const lines: TextElement[][] = [];
+  let currentLine: TextElement[] = [sorted[0]];
+  let currentY = sorted[0].y;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const elem = sorted[i];
+    if (Math.abs(elem.y - currentY) <= BASELINE_TOL) {
+      currentLine.push(elem);
+    } else {
+      currentLine.sort((a, b) => a.x - b.x);
+      lines.push(currentLine);
+      currentLine = [elem];
+      currentY = elem.y;
+    }
+  }
+  if (currentLine.length > 0) {
+    currentLine.sort((a, b) => a.x - b.x);
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+// ────────────────────────────────────────────────────────────
+// Text Run Rendering
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Render a line of TextElement[] as <w:r> runs.
+ *
+ * Detects word gaps (inserts spaces), merges adjacent runs with identical
+ * formatting, maps font names via FONT_MAP, and registers styles with
+ * the StyleCollector. Only emits run properties that differ from Normal.
+ */
+export function renderTextRunsFromElements(
+  texts: TextElement[],
+  normalStyle: DocxStyle,
+  styleCollector: StyleCollector
+): string {
+  if (texts.length === 0) return '';
+
+  interface RunAccum {
+    text: string;
+    fontName: string;
+    fontSize: number; // half-points
+    bold: boolean;
+    italic: boolean;
+    color: string;
+  }
+
+  const runs: RunAccum[] = [];
+
+  for (let i = 0; i < texts.length; i++) {
+    const elem = texts[i];
+    const mappedFont = mapFontName(elem.fontName);
+    const halfPts = Math.round(elem.fontSize * 2);
+    const color = elem.color || '000000';
+
+    // Register with style collector
+    styleCollector.registerRun(mappedFont, halfPts, elem.bold, elem.italic, color);
+
+    // Detect word gap — insert space if gap between items is significant
+    let prefix = '';
+    if (i > 0) {
+      const prevElem = texts[i - 1];
+      const gap = elem.x - (prevElem.x + prevElem.width);
+      if (gap > elem.fontSize * WORD_GAP_FACTOR) {
+        prefix = ' ';
+      } else if (gap > 0.5) {
+        prefix = ' ';
+      }
+    }
+
+    const text = prefix + elem.text;
+
+    // Try to merge with previous run if same formatting
+    if (runs.length > 0) {
+      const prev = runs[runs.length - 1];
+      if (
+        prev.fontName === mappedFont &&
+        prev.fontSize === halfPts &&
+        prev.bold === elem.bold &&
+        prev.italic === elem.italic &&
+        prev.color === color
+      ) {
+        runs[runs.length - 1] = { ...prev, text: prev.text + text };
+        continue;
+      }
+    }
+
+    runs.push({
+      text,
+      fontName: mappedFont,
+      fontSize: halfPts,
+      bold: elem.bold,
+      italic: elem.italic,
+      color,
+    });
+  }
+
+  // Convert accumulated runs to XML
+  let xml = '';
+  for (const run of runs) {
+    xml += '  <w:r>\n';
+
+    // Run properties — only emit what differs from Normal
+    const needsRPr =
+      run.fontName !== normalStyle.fontName ||
+      run.fontSize !== normalStyle.fontSize ||
+      run.bold !== normalStyle.bold ||
+      run.italic !== normalStyle.italic ||
+      run.color !== normalStyle.color;
+
+    if (needsRPr) {
+      xml += '    <w:rPr>\n';
+
+      if (run.fontName !== normalStyle.fontName) {
+        xml += `      <w:rFonts w:ascii="${escXml(run.fontName)}" w:hAnsi="${escXml(run.fontName)}" w:cs="${escXml(run.fontName)}"/>\n`;
+      }
+
+      if (run.bold && !normalStyle.bold) {
+        xml += '      <w:b/>\n';
+      } else if (!run.bold && normalStyle.bold) {
+        xml += '      <w:b w:val="0"/>\n';
+      }
+
+      if (run.italic && !normalStyle.italic) {
+        xml += '      <w:i/>\n';
+      } else if (!run.italic && normalStyle.italic) {
+        xml += '      <w:i w:val="0"/>\n';
+      }
+
+      if (run.color !== normalStyle.color) {
+        xml += `      <w:color w:val="${escXml(run.color)}"/>\n`;
+      }
+
+      if (run.fontSize !== normalStyle.fontSize) {
+        xml += `      <w:sz w:val="${run.fontSize}"/>\n`;
+        xml += `      <w:szCs w:val="${run.fontSize}"/>\n`;
+      }
+
+      xml += '    </w:rPr>\n';
+    }
+
+    xml += `    <w:t xml:space="preserve">${escXml(run.text)}</w:t>\n`;
+    xml += '  </w:r>\n';
+  }
+
+  return xml;
+}
+
+// ────────────────────────────────────────────────────────────
+// Form Field Generators
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Sanitize a PDF field name for OOXML w:name.
+ * Takes the last segment of the dotted path and strips array indices.
+ * Word has a 20-character limit on form field names.
+ */
+export function sanitizeFieldName(fullName: string): string {
+  const last = fullName.split('.').pop() || fullName;
+  return last.replace(/\[\d+\]/g, '').substring(0, 20);
+}
+
+/**
+ * Generate OOXML runs for a text input form field (FORMTEXT).
+ * Adds gray underline and light gray shading to the value run for visual clarity.
+ * Pads empty/whitespace values to at least 15 spaces for minimum field width.
+ */
+export function generateTextFieldRuns(field: FormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  let value = field.fieldValue || '';
+  // Pad to minimum 15 spaces for visible field width
+  if (value.trim().length === 0) {
+    value = '               '; // 15 spaces
+  }
+  return [
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:textInput>${field.maxLength > 0 ? `<w:maxLength w:val="${field.maxLength}"/>` : ''}</w:textInput>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    `<w:r><w:rPr><w:noProof/><w:u w:val="single" w:color="999999"/><w:shd w:val="clear" w:color="auto" w:fill="F0F0F0"/></w:rPr><w:t xml:space="preserve">${escXml(value)}</w:t></w:r>`,
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
+ * Generate OOXML runs for a checkbox form field (FORMCHECKBOX).
+ * Also used for radio buttons (Word legacy forms don't have native radio groups).
+ * Inserts a visible Unicode character before the legacy field for visual clarity:
+ *   Checkbox: checked / unchecked
+ *   Radio:    filled / empty
+ */
+export function generateCheckBoxRuns(field: FormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  const checked = field.isChecked ? '1' : '0';
+
+  // Visible Unicode indicator run (Segoe UI Symbol, gray)
+  let symbol: string;
+  if (field.isRadioButton) {
+    symbol = field.isChecked ? '\u25CF' : '\u25CB'; // filled / empty circle
+  } else {
+    symbol = field.isChecked ? '\u2611' : '\u2610'; // checked / unchecked box
+  }
+  const symbolRun = `<w:r><w:rPr><w:rFonts w:ascii="Segoe UI Symbol" w:hAnsi="Segoe UI Symbol" w:cs="Segoe UI Symbol"/><w:color w:val="404040"/></w:rPr><w:t>${symbol}</w:t></w:r>`;
+
+  return [
+    symbolRun,
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:checkBox><w:sizeAuto/><w:default w:val="${checked}"/></w:checkBox>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMCHECKBOX </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
+ * Generate OOXML runs for a dropdown form field (FORMDROPDOWN).
+ */
+export function generateDropdownRuns(field: FormField): string {
+  const name = sanitizeFieldName(field.fieldName);
+  const selectedIdx = Math.max(0, field.options.findIndex(
+    o => o.exportValue === field.fieldValue
+  ));
+  const entries = field.options.map(
+    o => `<w:listEntry w:val="${escXml(o.displayValue || o.exportValue)}"/>`
+  ).join('');
+  return [
+    '<w:r><w:fldChar w:fldCharType="begin">',
+    '<w:ffData>',
+    `<w:name w:val="${escXml(name)}"/>`,
+    '<w:enabled/>',
+    `<w:ddList><w:result w:val="${selectedIdx}"/>${entries}</w:ddList>`,
+    '</w:ffData>',
+    '</w:fldChar></w:r>',
+    '<w:r><w:instrText xml:space="preserve"> FORMDROPDOWN </w:instrText></w:r>',
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
+  ].join('\n');
+}
+
+/**
+ * Generate form field runs (w:r elements only, no w:p wrapper).
+ * Dispatches to the appropriate generator based on field type.
+ */
+export function generateFormFieldRuns(field: FormField): string {
+  if (field.fieldType === 'Tx') return generateTextFieldRuns(field);
+  if (field.fieldType === 'Btn') return generateCheckBoxRuns(field);
+  if (field.fieldType === 'Ch') return generateDropdownRuns(field);
+  return '';
+}

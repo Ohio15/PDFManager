@@ -753,6 +753,117 @@ function buildTableFromBorderGroup(
     borderWidthPt = lineWidths[Math.floor(lineWidths.length / 2)];
   }
 
+  // Step 12: Per-cell border detection from individual border rects
+  // Check which border rects overlap each cell's edges for per-cell styling
+  for (const cell of cells) {
+    const cellLeft = cell.x;
+    const cellRight = cell.x + cell.width;
+    const cellTop = cell.y;
+    const cellBottom = cell.y + cell.height;
+    const edgeTol = EDGE_CLUSTER_TOLERANCE + 1;
+
+    // Check each border rect for overlap with cell edges
+    const topBorders: { color: RGB; width: number }[] = [];
+    const bottomBorders: { color: RGB; width: number }[] = [];
+    const leftBorders: { color: RGB; width: number }[] = [];
+    const rightBorders: { color: RGB; width: number }[] = [];
+
+    for (const rect of borderRects) {
+      const rLeft = rect.x;
+      const rRight = rect.x + rect.width;
+      const rTop = rect.y;
+      const rBottom = rect.y + rect.height;
+      const isHorizontal = rect.width > rect.height * 2;
+      const isVertical = rect.height > rect.width * 2;
+
+      if (isHorizontal) {
+        // Check if this horizontal line overlaps with cell top or bottom
+        const xOverlap = Math.max(0, Math.min(rRight, cellRight) - Math.max(rLeft, cellLeft));
+        if (xOverlap > cell.width * 0.3) {
+          if (Math.abs(rTop - cellTop) < edgeTol || Math.abs(rBottom - cellTop) < edgeTol) {
+            if (rect.strokeColor) topBorders.push({ color: rect.strokeColor, width: rect.lineWidth || Math.abs(rect.height) });
+          }
+          if (Math.abs(rTop - cellBottom) < edgeTol || Math.abs(rBottom - cellBottom) < edgeTol) {
+            if (rect.strokeColor) bottomBorders.push({ color: rect.strokeColor, width: rect.lineWidth || Math.abs(rect.height) });
+          }
+        }
+      }
+      if (isVertical) {
+        // Check if this vertical line overlaps with cell left or right
+        const yOverlap = Math.max(0, Math.min(rBottom, cellBottom) - Math.max(rTop, cellTop));
+        if (yOverlap > cell.height * 0.3) {
+          if (Math.abs(rLeft - cellLeft) < edgeTol || Math.abs(rRight - cellLeft) < edgeTol) {
+            if (rect.strokeColor) leftBorders.push({ color: rect.strokeColor, width: rect.lineWidth || Math.abs(rect.width) });
+          }
+          if (Math.abs(rLeft - cellRight) < edgeTol || Math.abs(rRight - cellRight) < edgeTol) {
+            if (rect.strokeColor) rightBorders.push({ color: rect.strokeColor, width: rect.lineWidth || Math.abs(rect.width) });
+          }
+        }
+      }
+    }
+
+    // Set per-cell borders if they differ from the table default
+    if (topBorders.length > 0) {
+      const b = topBorders[0];
+      cell.borderTop = { color: b.color, widthPt: b.width };
+    }
+    if (bottomBorders.length > 0) {
+      const b = bottomBorders[0];
+      cell.borderBottom = { color: b.color, widthPt: b.width };
+    }
+    if (leftBorders.length > 0) {
+      const b = leftBorders[0];
+      cell.borderLeft = { color: b.color, widthPt: b.width };
+    }
+    if (rightBorders.length > 0) {
+      const b = rightBorders[0];
+      cell.borderRight = { color: b.color, widthPt: b.width };
+    }
+  }
+
+  // Step 13: Per-cell padding and vertical alignment from text positions
+  for (const cell of cells) {
+    if (cell.texts.length === 0) continue;
+
+    const textMinX = Math.min(...cell.texts.map(t => t.x));
+    const textMinY = Math.min(...cell.texts.map(t => t.y));
+    const textMaxX = Math.max(...cell.texts.map(t => t.x + t.width));
+    const textMaxY = Math.max(...cell.texts.map(t => t.y + t.height));
+
+    // Padding: gap from cell boundary to text boundary
+    const padLeft = Math.max(0, textMinX - cell.x);
+    const padTop = Math.max(0, textMinY - cell.y);
+    const padRight = Math.max(0, (cell.x + cell.width) - textMaxX);
+    const padBottom = Math.max(0, (cell.y + cell.height) - textMaxY);
+
+    // Only set padding if it's meaningful (> 2pt to avoid noise)
+    if (padLeft > 2) cell.paddingLeft = padLeft;
+    if (padTop > 2) cell.paddingTop = padTop;
+    if (padRight > 2) cell.paddingRight = padRight;
+    if (padBottom > 2) cell.paddingBottom = padBottom;
+
+    // Vertical alignment: detect from text Y position within cell
+    const cellHeight = cell.height;
+    const textCenter = (textMinY + textMaxY) / 2;
+    const cellCenter = cell.y + cellHeight / 2;
+    const textHeight = textMaxY - textMinY;
+    const availableSpace = cellHeight - textHeight;
+
+    if (availableSpace > 6) { // Only set vAlign if there's meaningful space
+      const topGap = textMinY - cell.y;
+      const bottomGap = (cell.y + cellHeight) - textMaxY;
+      const ratio = topGap / (topGap + bottomGap);
+
+      if (ratio < 0.3) {
+        cell.vAlign = 'top';
+      } else if (ratio > 0.7) {
+        cell.vAlign = 'bottom';
+      } else {
+        cell.vAlign = 'center';
+      }
+    }
+  }
+
   return {
     cells,
     rows: numRows,
@@ -2211,6 +2322,48 @@ export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
       para.headingLevel = 2;
     } else if (ratio >= 1.1 && para.texts[0].bold) {
       para.headingLevel = 3;
+    }
+  }
+
+  // Paragraph spacing: compute spacingBefore/After from Y gaps between consecutive paragraphs
+  // Also compute rightX for right indent calculation
+  const paraElements = finalElements
+    .map((el, idx) => ({ el, idx }))
+    .filter(({ el }) => el.type === 'paragraph');
+
+  for (let i = 0; i < paraElements.length; i++) {
+    const para = paraElements[i].el.element as ParagraphGroup;
+
+    // Right edge X for right indent
+    if (para.texts.length > 0) {
+      para.rightX = Math.max(...para.texts.map(t => t.x + t.width));
+    }
+
+    // Spacing before: gap from previous element bottom to this paragraph top
+    if (i > 0) {
+      const prevPara = paraElements[i - 1].el.element as ParagraphGroup;
+      if (prevPara.texts.length > 0 && para.texts.length > 0) {
+        const prevBottom = Math.max(...prevPara.texts.map(t => t.y + t.height));
+        const currTop = Math.min(...para.texts.map(t => t.y));
+        const gap = currTop - prevBottom;
+        // Only set meaningful spacing (> 2pt to avoid noise)
+        if (gap > 2) {
+          para.spacingBeforePt = gap;
+        }
+      }
+    }
+
+    // Spacing after: gap from this paragraph bottom to next element top
+    if (i < paraElements.length - 1) {
+      const nextPara = paraElements[i + 1].el.element as ParagraphGroup;
+      if (para.texts.length > 0 && nextPara.texts.length > 0) {
+        const currBottom = Math.max(...para.texts.map(t => t.y + t.height));
+        const nextTop = Math.min(...nextPara.texts.map(t => t.y));
+        const gap = nextTop - currBottom;
+        if (gap > 2) {
+          para.spacingAfterPt = gap;
+        }
+      }
     }
   }
 

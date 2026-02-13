@@ -1,6 +1,6 @@
 {
   "name": "pdf-manager",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "main": "dist/main/main.js",
   "scripts": {
@@ -15,7 +15,8 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:linux": "npm run build && electron-builder --linux",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "quality": "npx tsx test-pdfs/quality-harness.ts"
   },
   "dependencies": {
     "@types/pako": "^2.0.4",

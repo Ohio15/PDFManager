@@ -98,7 +98,7 @@ export async function generateDocx(
   const layouts: PageLayout[] = [];
 
   for (const scene of scenes) {
-    const layout = buildPageLayout(scene);
+    const layout = await buildPageLayout(scene);
     layouts.push(layout);
   }
 

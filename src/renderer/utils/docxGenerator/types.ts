@@ -54,10 +54,19 @@ export interface RectElement {
   lineWidth: number;
 }
 
+/** A structured path drawing operation for Canvas replay */
+export interface PathOperation {
+  type: 'moveTo' | 'lineTo' | 'curveTo' | 'closePath';
+  /** moveTo/lineTo: [x,y]; curveTo: [cp1x,cp1y,cp2x,cp2y,ex,ey]; closePath: [] */
+  args: number[];
+}
+
 /** A general vector path */
 export interface PathElement {
   kind: 'path';
   points: Array<{ x: number; y: number }>;
+  /** Structured drawing operations for Canvas rasterization */
+  operations: PathOperation[];
   strokeColor: RGB | null;
   fillColor: RGB | null;
   lineWidth: number;
@@ -174,11 +183,26 @@ export interface ParagraphGroup {
   bottomBorder?: { color: RGB; widthPt: number } | null;
 }
 
+/** A two-column region detected from side-by-side paragraph groups */
+export interface TwoColumnRegion {
+  leftElements: LayoutElement[];
+  rightElements: LayoutElement[];
+  /** X position of the gap between columns */
+  gapX: number;
+  /** Top Y of the region */
+  y: number;
+  /** Region height */
+  height: number;
+  /** Page width for computing column widths */
+  pageWidth: number;
+}
+
 /** A single element within a PageLayout, tagged by type */
 export type LayoutElement =
   | { type: 'table'; element: DetectedTable }
   | { type: 'paragraph'; element: ParagraphGroup }
-  | { type: 'image'; element: ImageElement };
+  | { type: 'image'; element: ImageElement }
+  | { type: 'two-column'; element: TwoColumnRegion };
 
 /** A page layout produced by the LayoutAnalyzer */
 export interface PageLayout {

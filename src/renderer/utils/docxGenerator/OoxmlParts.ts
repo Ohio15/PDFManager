@@ -22,6 +22,7 @@ import type {
   DetectedTable,
   DetectedCell,
   ParagraphGroup,
+  TwoColumnRegion,
   TextElement,
   ImageElement,
   FormField,
@@ -250,6 +251,8 @@ export function generateDocumentXml(
         xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector);
       } else if (elem.type === 'image') {
         xml += generateImageXml(elem.element, images);
+      } else if (elem.type === 'two-column') {
+        xml += generateTwoColumnXml(elem.element, images, normalStyle, styleCollector);
       }
     }
 
@@ -1011,6 +1014,100 @@ function generateImageXml(image: ImageElement, images: ImageFile[]): string {
 }
 
 // ────────────────────────────────────────────────────────────
+// Two-column region rendering
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Render a TwoColumnRegion as a 2-column invisible-border table.
+ * Left and right elements are placed in separate cells, preserving
+ * side-by-side layout from the original PDF.
+ */
+function generateTwoColumnXml(
+  region: TwoColumnRegion,
+  images: ImageFile[],
+  normalStyle: DocxStyle,
+  styleCollector: StyleCollector
+): string {
+  // Compute column widths from gapX and page margins (1 inch = 72pt each side)
+  const marginPt = 72;
+  const contentWidth = region.pageWidth - marginPt * 2;
+  const leftWidthPt = region.gapX - marginPt;
+  const rightWidthPt = contentWidth - leftWidthPt;
+  const leftWidthTwips = Math.round(Math.max(leftWidthPt, 50) * PT_TO_TWIPS);
+  const rightWidthTwips = Math.round(Math.max(rightWidthPt, 50) * PT_TO_TWIPS);
+
+  let xml = '<w:tbl>\n';
+
+  // Table properties with invisible borders
+  xml += '  <w:tblPr>\n';
+  xml += '    <w:tblW w:w="0" w:type="auto"/>\n';
+  xml += '    <w:tblBorders>\n';
+  xml += '      <w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '      <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>\n';
+  xml += '    </w:tblBorders>\n';
+  xml += '    <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>\n';
+  xml += '  </w:tblPr>\n';
+
+  // Column grid
+  xml += '  <w:tblGrid>\n';
+  xml += `    <w:gridCol w:w="${leftWidthTwips}"/>\n`;
+  xml += `    <w:gridCol w:w="${rightWidthTwips}"/>\n`;
+  xml += '  </w:tblGrid>\n';
+
+  // Single row with two cells
+  xml += '  <w:tr>\n';
+
+  // Left cell
+  xml += '    <w:tc>\n';
+  xml += '      <w:tcPr>\n';
+  xml += `        <w:tcW w:w="${leftWidthTwips}" w:type="dxa"/>\n`;
+  xml += '      </w:tcPr>\n';
+  const leftContent = renderColumnContent(region.leftElements, images, normalStyle, styleCollector);
+  xml += leftContent || '      <w:p/>\n';
+  xml += '    </w:tc>\n';
+
+  // Right cell
+  xml += '    <w:tc>\n';
+  xml += '      <w:tcPr>\n';
+  xml += `        <w:tcW w:w="${rightWidthTwips}" w:type="dxa"/>\n`;
+  xml += '      </w:tcPr>\n';
+  const rightContent = renderColumnContent(region.rightElements, images, normalStyle, styleCollector);
+  xml += rightContent || '      <w:p/>\n';
+  xml += '    </w:tc>\n';
+
+  xml += '  </w:tr>\n';
+  xml += '</w:tbl>\n';
+  return xml;
+}
+
+/**
+ * Render a list of LayoutElements into OOXML content for a table cell.
+ * Handles paragraphs and images within a column of a two-column layout.
+ */
+function renderColumnContent(
+  elements: LayoutElement[],
+  images: ImageFile[],
+  normalStyle: DocxStyle,
+  styleCollector: StyleCollector
+): string {
+  let xml = '';
+  for (const elem of elements) {
+    if (elem.type === 'paragraph') {
+      xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector);
+    } else if (elem.type === 'image') {
+      xml += generateImageXml(elem.element, images);
+    } else if (elem.type === 'table') {
+      xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector);
+    }
+  }
+  return xml;
+}
+
+// ────────────────────────────────────────────────────────────
 // Form field generators (preserved from original)
 // ────────────────────────────────────────────────────────────
 
@@ -1026,10 +1123,16 @@ function sanitizeFieldName(fullName: string): string {
 
 /**
  * Generate OOXML runs for a text input form field (FORMTEXT).
+ * Adds gray underline and light gray shading to the value run for visual clarity.
+ * Pads empty/whitespace values to at least 15 spaces for minimum field width.
  */
 function generateTextFieldRuns(field: FormField): string {
   const name = sanitizeFieldName(field.fieldName);
-  const value = field.fieldValue || '     ';
+  let value = field.fieldValue || '';
+  // Pad to minimum 15 spaces for visible field width
+  if (value.trim().length === 0) {
+    value = '               '; // 15 spaces
+  }
   return [
     '<w:r><w:fldChar w:fldCharType="begin">',
     '<w:ffData>',
@@ -1040,7 +1143,7 @@ function generateTextFieldRuns(field: FormField): string {
     '</w:fldChar></w:r>',
     '<w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r>',
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
-    `<w:r><w:rPr><w:noProof/></w:rPr><w:t xml:space="preserve">${escXml(value)}</w:t></w:r>`,
+    `<w:r><w:rPr><w:noProof/><w:u w:val="single" w:color="999999"/><w:shd w:val="clear" w:color="auto" w:fill="F0F0F0"/></w:rPr><w:t xml:space="preserve">${escXml(value)}</w:t></w:r>`,
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>',
   ].join('\n');
 }
@@ -1048,11 +1151,25 @@ function generateTextFieldRuns(field: FormField): string {
 /**
  * Generate OOXML runs for a checkbox form field (FORMCHECKBOX).
  * Also used for radio buttons (Word legacy forms don't have native radio groups).
+ * Inserts a visible Unicode character before the legacy field for visual clarity:
+ *   Checkbox: ☑ (checked) / ☐ (unchecked)
+ *   Radio:    ● (checked) / ○ (unchecked)
  */
 function generateCheckBoxRuns(field: FormField): string {
   const name = sanitizeFieldName(field.fieldName);
   const checked = field.isChecked ? '1' : '0';
+
+  // Visible Unicode indicator run (Segoe UI Symbol, gray)
+  let symbol: string;
+  if (field.isRadioButton) {
+    symbol = field.isChecked ? '\u25CF' : '\u25CB'; // ● / ○
+  } else {
+    symbol = field.isChecked ? '\u2611' : '\u2610'; // ☑ / ☐
+  }
+  const symbolRun = `<w:r><w:rPr><w:rFonts w:ascii="Segoe UI Symbol" w:hAnsi="Segoe UI Symbol" w:cs="Segoe UI Symbol"/><w:color w:val="404040"/></w:rPr><w:t>${symbol}</w:t></w:r>`;
+
   return [
+    symbolRun,
     '<w:r><w:fldChar w:fldCharType="begin">',
     '<w:ffData>',
     `<w:name w:val="${escXml(name)}"/>`,

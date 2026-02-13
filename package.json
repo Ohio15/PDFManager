@@ -1,6 +1,6 @@
 {
   "name": "pdf-manager",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "main": "dist/main/main.js",
   "scripts": {

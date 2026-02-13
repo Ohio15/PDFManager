@@ -983,23 +983,29 @@ function parseOperatorList(
 
     // General path -> PathElement
     const points: Array<{ x: number; y: number }> = [];
+    const operations: Array<{ type: 'moveTo' | 'lineTo' | 'curveTo' | 'closePath'; args: number[] }> = [];
     let isClosed = false;
 
     for (const op of pathOps) {
       switch (op.type) {
         case 'moveTo': {
           const pt = applyTransform({ x: op.args[0], y: op.args[1] }, state.ctm);
-          points.push({ x: pt.x, y: pageHeight - pt.y });
+          const tx = pt.x;
+          const ty = pageHeight - pt.y;
+          points.push({ x: tx, y: ty });
+          operations.push({ type: 'moveTo', args: [tx, ty] });
           break;
         }
         case 'lineTo': {
           const pt = applyTransform({ x: op.args[0], y: op.args[1] }, state.ctm);
-          points.push({ x: pt.x, y: pageHeight - pt.y });
+          const tx = pt.x;
+          const ty = pageHeight - pt.y;
+          points.push({ x: tx, y: ty });
+          operations.push({ type: 'lineTo', args: [tx, ty] });
           break;
         }
         case 'curveTo': {
-          // Cubic bezier: approximate with the endpoint for the scene graph
-          // (Full bezier control points are rarely needed for DOCX conversion)
+          // Cubic bezier: preserve all control points for Canvas replay
           // args = [x1, y1, x2, y2, x3, y3] (control1, control2, endpoint)
           const cp1 = applyTransform({ x: op.args[0], y: op.args[1] }, state.ctm);
           const cp2 = applyTransform({ x: op.args[2], y: op.args[3] }, state.ctm);
@@ -1007,10 +1013,14 @@ function parseOperatorList(
           points.push({ x: cp1.x, y: pageHeight - cp1.y });
           points.push({ x: cp2.x, y: pageHeight - cp2.y });
           points.push({ x: ep.x, y: pageHeight - ep.y });
+          operations.push({
+            type: 'curveTo',
+            args: [cp1.x, pageHeight - cp1.y, cp2.x, pageHeight - cp2.y, ep.x, pageHeight - ep.y],
+          });
           break;
         }
         case 'rectangle': {
-          // Multi-rect path: expand to 4 corners
+          // Multi-rect path: expand to 4 corners as moveTo + lineTo + close
           const [rx, ry, rw, rh] = op.args;
           const corners = [
             { x: rx, y: ry },
@@ -1018,15 +1028,25 @@ function parseOperatorList(
             { x: rx + rw, y: ry + rh },
             { x: rx, y: ry + rh },
           ];
-          for (const corner of corners) {
+          const transformed = corners.map(corner => {
             const pt = applyTransform(corner, state.ctm);
-            points.push({ x: pt.x, y: pageHeight - pt.y });
+            return { x: pt.x, y: pageHeight - pt.y };
+          });
+          for (const tp of transformed) {
+            points.push(tp);
           }
+          // Emit as moveTo + 3 lineTo + closePath for Canvas replay
+          operations.push({ type: 'moveTo', args: [transformed[0].x, transformed[0].y] });
+          operations.push({ type: 'lineTo', args: [transformed[1].x, transformed[1].y] });
+          operations.push({ type: 'lineTo', args: [transformed[2].x, transformed[2].y] });
+          operations.push({ type: 'lineTo', args: [transformed[3].x, transformed[3].y] });
+          operations.push({ type: 'closePath', args: [] });
           isClosed = true;
           break;
         }
         case 'closePath': {
           isClosed = true;
+          operations.push({ type: 'closePath', args: [] });
           break;
         }
       }
@@ -1036,6 +1056,7 @@ function parseOperatorList(
       elements.push({
         kind: 'path',
         points,
+        operations,
         fillColor: doFill ? { ...state.fillColor } : null,
         strokeColor: doStroke ? { ...state.strokeColor } : null,
         lineWidth: state.lineWidth,

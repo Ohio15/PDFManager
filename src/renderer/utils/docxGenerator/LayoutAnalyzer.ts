@@ -16,17 +16,20 @@
 import type {
   TextElement,
   RectElement,
+  PathElement,
   ImageElement,
   FormField,
   PageScene,
   PageLayout,
   LayoutElement,
+  TwoColumnRegion,
   DetectedTable,
   DetectedCell,
   ParagraphGroup,
   RectRole,
   RGB,
 } from './types';
+import { groupNearbyPaths, rasterizePathGroup } from './PathRasterizer';
 
 // ─── Constants ───────────────────────────────────────────────
 
@@ -1677,6 +1680,183 @@ function applyRectStylingToParagraphs(
  * 6. Combine all layout elements sorted by Y position (reading order)
  */
 // ─── Test Exports ─────────────────────────────────────────────────
+// ─── Two-Column Detection ──────────────────────────────────
+
+/** Minimum X gap between columns to trigger two-column detection */
+const TWO_COL_MIN_GAP = 40;
+
+/** Minimum number of elements per side to qualify as two-column */
+const TWO_COL_MIN_ELEMENTS = 2;
+
+/**
+ * Get the X position of a layout element.
+ */
+function getElementX(el: LayoutElement): number {
+  switch (el.type) {
+    case 'paragraph':
+      return el.element.x;
+    case 'image':
+      return el.element.x;
+    case 'table':
+      return el.element.x;
+    case 'two-column':
+      return 0;
+  }
+}
+
+/**
+ * Get the bottom Y of a layout element.
+ */
+function getElementBottom(el: LayoutElement): number {
+  switch (el.type) {
+    case 'paragraph': {
+      const texts = el.element.texts;
+      if (texts.length === 0) return el.element.y;
+      return Math.max(...texts.map(t => t.y + t.height));
+    }
+    case 'image':
+      return el.element.y + el.element.height;
+    case 'table':
+      return el.element.y + el.element.height;
+    case 'two-column':
+      return el.element.y + el.element.height;
+  }
+}
+
+/**
+ * Detect side-by-side paragraph/image groups and merge them into
+ * TwoColumnRegion elements. Tables are never included in column detection.
+ *
+ * Algorithm:
+ * 1. Collect non-table elements with their X positions
+ * 2. Find a consistent X gap dividing the page into two halves
+ * 3. For elements in overlapping Y ranges across both columns, group into regions
+ * 4. Replace original elements with TwoColumnRegion entries
+ */
+function detectTwoColumnRegions(
+  layoutElements: LayoutElement[],
+  pageWidth: number
+): LayoutElement[] {
+  // Only consider paragraphs and images for column detection
+  const candidates: Array<{ elem: LayoutElement; idx: number; x: number; y: number; bottom: number }> = [];
+  for (let i = 0; i < layoutElements.length; i++) {
+    const el = layoutElements[i];
+    if (el.type === 'table' || el.type === 'two-column') continue;
+    candidates.push({
+      elem: el,
+      idx: i,
+      x: getElementX(el),
+      y: getElementY(el),
+      bottom: getElementBottom(el),
+    });
+  }
+
+  if (candidates.length < TWO_COL_MIN_ELEMENTS * 2) return layoutElements;
+
+  // Find X clusters: group elements by their X position into left/right bands
+  const xValues = candidates.map(c => c.x);
+  const pageMidX = pageWidth / 2;
+
+  const leftCandidates = candidates.filter(c => c.x < pageMidX - TWO_COL_MIN_GAP / 2);
+  const rightCandidates = candidates.filter(c => c.x >= pageMidX + TWO_COL_MIN_GAP / 2);
+
+  // Need sufficient elements on each side
+  if (leftCandidates.length < TWO_COL_MIN_ELEMENTS || rightCandidates.length < TWO_COL_MIN_ELEMENTS) {
+    return layoutElements;
+  }
+
+  // Verify there's a clear gap: rightMin - leftMax > TWO_COL_MIN_GAP
+  // Use median X of each side for robustness
+  const leftXs = leftCandidates.map(c => c.x).sort((a, b) => a - b);
+  const rightXs = rightCandidates.map(c => c.x).sort((a, b) => a - b);
+  const leftMaxX = Math.max(...leftCandidates.map(c => {
+    if (c.elem.type === 'paragraph') {
+      const texts = c.elem.element.texts;
+      if (texts.length > 0) return Math.max(...texts.map(t => t.x + t.width));
+    }
+    if (c.elem.type === 'image') return c.elem.element.x + c.elem.element.width;
+    return c.x + 100; // fallback
+  }));
+  const rightMinX = Math.min(...rightXs);
+
+  const gapX = (leftMaxX + rightMinX) / 2;
+  const gapWidth = rightMinX - leftMaxX;
+
+  if (gapWidth < TWO_COL_MIN_GAP) return layoutElements;
+
+  // Find Y-overlapping regions between left and right elements
+  // Strategy: find Y ranges where both sides have content
+  const consumedIndices = new Set<number>();
+  const twoColElements: Array<{ elem: LayoutElement; insertY: number }> = [];
+
+  // Sort both sides by Y
+  const leftSorted = [...leftCandidates].sort((a, b) => a.y - b.y);
+  const rightSorted = [...rightCandidates].sort((a, b) => a.y - b.y);
+
+  // Greedy matching: for each left element, find right elements in overlapping Y range
+  let rIdx = 0;
+  let regionLeftElems: LayoutElement[] = [];
+  let regionRightElems: LayoutElement[] = [];
+  let regionTop = Infinity;
+  let regionBottom = -Infinity;
+  const usedRight = new Set<number>();
+
+  for (const leftItem of leftSorted) {
+    // Find right elements whose Y overlaps with this left element (within tolerance)
+    const tolerance = 15; // Y overlap tolerance
+    const matchingRight: typeof rightSorted = [];
+    for (const rightItem of rightSorted) {
+      if (usedRight.has(rightItem.idx)) continue;
+      // Check Y overlap
+      const overlapTop = Math.max(leftItem.y, rightItem.y);
+      const overlapBottom = Math.min(leftItem.bottom, rightItem.bottom);
+      if (overlapBottom >= overlapTop - tolerance) {
+        matchingRight.push(rightItem);
+      }
+    }
+
+    if (matchingRight.length > 0) {
+      regionLeftElems.push(leftItem.elem);
+      consumedIndices.add(leftItem.idx);
+      regionTop = Math.min(regionTop, leftItem.y);
+      regionBottom = Math.max(regionBottom, leftItem.bottom);
+
+      for (const rm of matchingRight) {
+        regionRightElems.push(rm.elem);
+        consumedIndices.add(rm.idx);
+        usedRight.add(rm.idx);
+        regionTop = Math.min(regionTop, rm.y);
+        regionBottom = Math.max(regionBottom, rm.bottom);
+      }
+    }
+  }
+
+  // If we have a valid two-column region, emit it
+  if (regionLeftElems.length >= 1 && regionRightElems.length >= 1) {
+    const twoColRegion: TwoColumnRegion = {
+      leftElements: regionLeftElems,
+      rightElements: regionRightElems,
+      gapX,
+      y: regionTop,
+      height: regionBottom - regionTop,
+      pageWidth,
+    };
+
+    // Build new element list: unconsumed elements + two-column region
+    const result: LayoutElement[] = [];
+    for (let i = 0; i < layoutElements.length; i++) {
+      if (!consumedIndices.has(i)) {
+        result.push(layoutElements[i]);
+      }
+    }
+    result.push({ type: 'two-column', element: twoColRegion });
+
+    return result;
+  }
+
+  return layoutElements;
+}
+
 // These are exported for unit testing only. Do not use in production code.
 export const _testExports = {
   clusterValues,
@@ -1686,10 +1866,11 @@ export const _testExports = {
   detectFormFieldTables,
   rectsOverlap,
   groupIntoParagraphs,
+  detectTwoColumnRegions,
   EDGE_CLUSTER_TOLERANCE,
 };
 
-export function buildPageLayout(scene: PageScene): PageLayout {
+export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
   // Step 1: Classify all rectangles
   const rectRoles = classifyRectangles(scene);
 
@@ -1745,6 +1926,53 @@ export function buildPageLayout(scene: PageScene): PageLayout {
     }
   }
 
+  // Step 4b: Rasterize vector paths into synthetic images
+  const pathElements: PathElement[] = [];
+  for (const el of scene.elements) {
+    if (el.kind === 'path') {
+      pathElements.push(el as PathElement);
+    }
+  }
+
+  if (pathElements.length > 0) {
+    const pathGroups = groupNearbyPaths(pathElements, 5);
+    let pathGroupIdx = 0;
+    for (const group of pathGroups) {
+      try {
+        const result = await rasterizePathGroup(group);
+        if (result.data.length > 0 && result.widthPt > 0 && result.heightPt > 0) {
+          // Compute bounding box Y from the group's points for placement
+          let minY = Infinity;
+          let minX = Infinity;
+          for (const path of group) {
+            for (const pt of path.points) {
+              if (pt.y < minY) minY = pt.y;
+              if (pt.x < minX) minX = pt.x;
+            }
+          }
+
+          const syntheticImage: ImageElement = {
+            kind: 'image',
+            x: minX,
+            y: minY,
+            width: result.widthPt,
+            height: result.heightPt,
+            resourceName: `path-group-${pathGroupIdx}`,
+            intrinsicWidth: Math.ceil(result.widthPt * 2),
+            intrinsicHeight: Math.ceil(result.heightPt * 2),
+            isGenuine: true,
+            data: result.data,
+            mimeType: 'image/png',
+          };
+          genuineImages.push(syntheticImage);
+          pathGroupIdx++;
+        }
+      } catch (err) {
+        console.warn(`[LayoutAnalyzer] Failed to rasterize path group:`, err);
+      }
+    }
+  }
+
   // Step 5: Gather remaining (non-table) texts and form fields
   const freeTexts: TextElement[] = [];
   for (const el of scene.elements) {
@@ -1782,15 +2010,18 @@ export function buildPageLayout(scene: PageScene): PageLayout {
     layoutElements.push({ type: 'image', element: img });
   }
 
+  // Step 6b: Detect two-column regions from side-by-side paragraphs/images
+  const finalElements = detectTwoColumnRegions(layoutElements, scene.width);
+
   // Sort by Y position for reading order
-  layoutElements.sort((a, b) => {
+  finalElements.sort((a, b) => {
     const yA = getElementY(a);
     const yB = getElementY(b);
     return yA - yB;
   });
 
   return {
-    elements: layoutElements,
+    elements: finalElements,
     width: scene.width,
     height: scene.height,
   };
@@ -1806,6 +2037,8 @@ function getElementY(el: LayoutElement): number {
     case 'paragraph':
       return el.element.y;
     case 'image':
+      return el.element.y;
+    case 'two-column':
       return el.element.y;
   }
 }

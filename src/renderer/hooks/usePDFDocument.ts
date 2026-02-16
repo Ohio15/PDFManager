@@ -541,9 +541,18 @@ export function usePDFDocument() {
             document.pages.map(async (page, i) => {
               const pdfPage = await pdfDocReload.getPage(i + 1);
               const viewport = pdfPage.getViewport({ scale: 1 });
-              const textContent = await pdfPage.getTextContent();
-              
-                            // Re-extract text items from the saved PDF, split into words
+
+              // Get text content and operator list in parallel (data stream extraction)
+              const [textContent, operatorList] = await Promise.all([
+                pdfPage.getTextContent(),
+                pdfPage.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
+              ]);
+
+              // Build color maps from operator list (source of truth — no hardcoded defaults)
+              const textColorMap = buildTextColorMap(operatorList, viewport.height);
+              const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
+
+              // Re-extract text items from the saved PDF, split into words
               let itemCounter = 0;
               const newTextItems: any[] = [];
 
@@ -556,6 +565,7 @@ export function usePDFDocument() {
                   const height = item.height || fontSize * 1.2;
                   const y = viewport.height - transform[5] - height;
                   const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
+                  const rawFontName = item.fontName || 'default';
 
                   const words = item.str.split(/( +)/);
                   let currentX = baseX;
@@ -565,6 +575,12 @@ export function usePDFDocument() {
                     const wordWidth = word.length * avgCharWidth;
 
                     if (word.trim()) {
+                      // Match colors from operator list data (data stream source of truth)
+                      const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                      const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
+                      const bold = isBoldFontName(rawFontName);
+                      const italic = isItalicFontName(rawFontName);
+
                       newTextItems.push({
                         id: `text-item-${i}-${itemCounter++}`,
                         str: word,
@@ -573,19 +589,21 @@ export function usePDFDocument() {
                         y,
                         width: wordWidth,
                         height,
-                        fontName: item.fontName || 'default',
+                        fontName: rawFontName,
                         fontSize,
                         transform: [...transform.slice(0, 4), currentX, transform[5]],
                         isEdited: false,
-                        backgroundColor: { r: 1, g: 1, b: 1 },
-                        textColor: { r: 0, g: 0, b: 0 },
+                        backgroundColor,
+                        textColor,
+                        bold,
+                        italic,
                       });
                     }
 
                     currentX += wordWidth;
                   });
                 });
-              
+
               return {
                 ...page,
                 textEdits: [],
@@ -593,7 +611,7 @@ export function usePDFDocument() {
               };
             })
           );
-          
+
           setDocument((prev) => {
             if (!prev) return null;
             return {
@@ -784,10 +802,18 @@ export function usePDFDocument() {
             document.pages.map(async (page, i) => {
               const pdfPage = await pdfDocReload.getPage(i + 1);
               const viewport = pdfPage.getViewport({ scale: 1 });
-              const textContent = await pdfPage.getTextContent();
 
-              // Re-extract text items from the saved PDF
-              // Split into words for finer-grained control
+              // Get text content and operator list in parallel (data stream extraction)
+              const [textContent, operatorList] = await Promise.all([
+                pdfPage.getTextContent(),
+                pdfPage.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
+              ]);
+
+              // Build color maps from operator list (source of truth — no hardcoded defaults)
+              const textColorMap = buildTextColorMap(operatorList, viewport.height);
+              const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
+
+              // Re-extract text items from the saved PDF, split into words
               let itemCounter = 0;
               const newTextItems: any[] = [];
 
@@ -800,6 +826,7 @@ export function usePDFDocument() {
                   const height = item.height || fontSize * 1.2;
                   const y = viewport.height - transform[5] - height;
                   const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
+                  const rawFontName = item.fontName || 'default';
 
                   const words = item.str.split(/( +)/);
                   let currentX = baseX;
@@ -809,6 +836,12 @@ export function usePDFDocument() {
                     const wordWidth = word.length * avgCharWidth;
 
                     if (word.trim()) {
+                      // Match colors from operator list data (data stream source of truth)
+                      const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                      const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
+                      const bold = isBoldFontName(rawFontName);
+                      const italic = isItalicFontName(rawFontName);
+
                       newTextItems.push({
                         id: `text-item-${i}-${itemCounter++}`,
                         str: word,
@@ -817,12 +850,14 @@ export function usePDFDocument() {
                         y,
                         width: wordWidth,
                         height,
-                        fontName: item.fontName || 'default',
+                        fontName: rawFontName,
                         fontSize,
                         transform: [...transform.slice(0, 4), currentX, transform[5]],
                         isEdited: false,
-                        backgroundColor: { r: 1, g: 1, b: 1 },
-                        textColor: { r: 0, g: 0, b: 0 },
+                        backgroundColor,
+                        textColor,
+                        bold,
+                        italic,
                       });
                     }
 

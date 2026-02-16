@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile, spawn } from 'child_process';
+
 import Store from 'electron-store';
 
 // Define config schema for type safety
@@ -13,9 +13,7 @@ interface StoreSchema {
   lastOpenDirectory: string;
   lastSaveDirectory: string;
   recentFiles: string[];
-  autoConvertOnDrop: boolean;
   openFolderAfterConversion: boolean;
-  libreOfficePath: string | null;
   theme: 'light' | 'dark' | 'system';
   defaultZoom: number;
 }
@@ -28,9 +26,7 @@ const store = new Store<StoreSchema>({
     lastOpenDirectory: '',
     lastSaveDirectory: '',
     recentFiles: [],
-    autoConvertOnDrop: true,
     openFolderAfterConversion: true,
-    libreOfficePath: null,
     theme: 'system',
     defaultZoom: 100,
   },
@@ -201,12 +197,6 @@ function createWindow(): void {
     mainWindow = null;
   });
 
-  // Send LibreOffice status when DOM is ready
-  mainWindow.webContents.on('dom-ready', () => {
-    const loPath = store.get('libreOfficePath');
-    mainWindow?.webContents.send('libreoffice-status', loPath);
-  });
-
   createMenu();
 
   // Setup auto-updater after window is created
@@ -252,11 +242,6 @@ function createMenu(): void {
         {
           label: 'Extract Pages...',
           click: () => mainWindow?.webContents.send('menu-extract-pages'),
-        },
-        { type: 'separator' },
-        {
-          label: 'Convert Documents to PDF...',
-          click: () => mainWindow?.webContents.send('menu-convert-to-pdf'),
         },
         { type: 'separator' },
         {
@@ -394,11 +379,6 @@ function createMenu(): void {
         {
           label: 'Extract Images...',
           click: () => mainWindow?.webContents.send('menu-extract-images'),
-        },
-        { type: 'separator' },
-        {
-          label: 'Convert Documents to PDF...',
-          click: () => mainWindow?.webContents.send('menu-convert-to-pdf'),
         },
       ],
     },
@@ -774,186 +754,6 @@ ipcMain.handle('clear-recent-files', () => {
   return [];
 });
 
-// LibreOffice detection and conversion
-function detectLibreOffice(): string | null {
-  const possiblePaths: string[] = [];
-
-  // Always check hardcoded common Windows paths first (most reliable)
-  // Use forward slashes - they work on Windows in Node.js
-  const hardcodedWindowsPaths = [
-    'C:/Program Files/LibreOffice/program/soffice.exe',
-    'C:/Program Files (x86)/LibreOffice/program/soffice.exe',
-    'C:/Program Files/LibreOffice 7/program/soffice.exe',
-    'C:/Program Files/LibreOffice 24/program/soffice.exe',
-    'C:/Program Files/LibreOffice 25/program/soffice.exe',
-  ];
-
-  for (const p of hardcodedWindowsPaths) {
-    if (fs.existsSync(p)) {
-      return p;
-    }
-  }
-
-  if (process.platform === 'win32') {
-    // Check common installation paths
-    const programDirs = [
-      process.env['ProgramFiles'] || 'C:\\Program Files',
-      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
-      process.env['LOCALAPPDATA'],
-      process.env['APPDATA'],
-    ].filter(Boolean) as string[];
-
-    // LibreOffice folder names to check
-    const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24', 'LibreOffice 25'];
-
-    for (const base of programDirs) {
-      for (const folder of libreOfficeFolders) {
-        // Direct program path: LibreOffice/program/soffice.exe
-        const directPath = path.join(base, folder, 'program', 'soffice.exe');
-        if (fs.existsSync(directPath)) {
-          possiblePaths.push(directPath);
-        }
-
-        // Also check for version subfolders: LibreOffice/<version>/program/soffice.exe
-        const libreOfficePath = path.join(base, folder);
-        if (fs.existsSync(libreOfficePath)) {
-          try {
-            const items = fs.readdirSync(libreOfficePath);
-            for (const item of items) {
-              if (item !== 'program') {
-                const versionPath = path.join(libreOfficePath, item, 'program', 'soffice.exe');
-                if (fs.existsSync(versionPath)) {
-                  possiblePaths.push(versionPath);
-                }
-              }
-            }
-          } catch (e) {
-            // Ignore errors reading directory
-          }
-        }
-      }
-    }
-
-    // Also try to find via registry (using PowerShell)
-    if (possiblePaths.length === 0) {
-      try {
-        const { execSync } = require('child_process');
-        const result = execSync(
-          'powershell -Command "Get-ItemProperty HKLM:\\\\SOFTWARE\\\\LibreOffice\\\\* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path"',
-          { encoding: 'utf8', timeout: 5000 }
-        ).trim();
-        if (result) {
-          const regPath = path.join(result, 'program', 'soffice.exe');
-          if (fs.existsSync(regPath)) {
-            possiblePaths.push(regPath);
-          }
-        }
-      } catch (e) {
-        // Registry lookup failed, continue with other methods
-      }
-    }
-  } else if (process.platform === 'darwin') {
-    const macPaths = [
-      '/Applications/LibreOffice.app/Contents/MacOS/soffice',
-      path.join(process.env['HOME'] || '', 'Applications/LibreOffice.app/Contents/MacOS/soffice'),
-    ];
-    for (const p of macPaths) {
-      if (fs.existsSync(p)) {
-        possiblePaths.push(p);
-      }
-    }
-  } else {
-    const linuxPaths = [
-      '/usr/bin/libreoffice',
-      '/usr/bin/soffice',
-      '/usr/local/bin/libreoffice',
-      '/usr/local/bin/soffice',
-      '/opt/libreoffice/program/soffice',
-      '/opt/libreoffice7.0/program/soffice',
-      '/snap/bin/libreoffice',
-    ];
-    for (const p of linuxPaths) {
-      if (fs.existsSync(p)) {
-        possiblePaths.push(p);
-      }
-    }
-  }
-
-  return possiblePaths.length > 0 ? possiblePaths[0] : null;
-}
-
-ipcMain.handle('detect-libreoffice', () => {
-  // Simply return the stored path - detection already ran at startup
-  const storedPath = store.get('libreOfficePath');
-
-  // If we have a stored path, return it
-  if (storedPath && typeof storedPath === 'string' && storedPath.length > 0) {
-    return storedPath;
-  }
-
-  // Otherwise run detection now
-  const detected = detectLibreOffice();
-  if (detected) {
-    store.set('libreOfficePath', detected);
-  }
-  return detected;
-});
-
-ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
-  const loPath = store.get('libreOfficePath') || detectLibreOffice();
-  if (!loPath) {
-    return { success: false, error: 'LibreOffice not found' };
-  }
-
-  return new Promise((resolve) => {
-    const args = [
-      '--headless',
-      '--invisible',
-      '--nodefault',
-      '--nolockcheck',
-      '--nologo',
-      '--norestore',
-      '--convert-to', 'pdf',
-      '--outdir', outputDir,
-      inputPath,
-    ];
-
-    execFile(loPath, args, { timeout: 120000 }, (error, stdout, stderr) => {
-      if (error) {
-        resolve({ success: false, error: error.message });
-      } else {
-        const baseName = path.basename(inputPath, path.extname(inputPath));
-        const outputPath = path.join(outputDir, `${baseName}.pdf`);
-        if (fs.existsSync(outputPath)) {
-          const fileData = fs.readFileSync(outputPath);
-          resolve({ success: true, path: outputPath, data: fileData.toString('base64') });
-        } else {
-          resolve({ success: false, error: 'Output file not created' });
-        }
-      }
-    });
-  });
-});
-
-// Document conversion file dialog
-ipcMain.handle('open-documents-dialog', async () => {
-  const lastDir = store.get('lastOpenDirectory') || undefined;
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openFile', 'multiSelections'],
-    defaultPath: lastDir,
-    filters: [
-      { name: 'Documents', extensions: ['doc', 'docx', 'odt', 'rtf', 'txt', 'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods', 'html', 'htm'] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
-  });
-
-  if (!result.canceled && result.filePaths.length > 0) {
-    store.set('lastOpenDirectory', path.dirname(result.filePaths[0]));
-    return result.filePaths;
-  }
-  return null;
-});
-
 // Handle second instance (user double-clicks a PDF while app is already running)
 app.on('second-instance', (_event, commandLine) => {
   const filePath = getFileFromArgs(commandLine);
@@ -1076,11 +876,6 @@ ipcMain.handle('clear-auto-recovery', () => {
 });
 
 app.whenReady().then(() => {
-  // Run LibreOffice detection at startup
-  const detectedPath = detectLibreOffice();
-  if (detectedPath) {
-    store.set('libreOfficePath', detectedPath);
-  }
   createWindow();
 });
 

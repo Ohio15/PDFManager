@@ -9,8 +9,6 @@ import {
   Image,
   ChevronLeft,
   X,
-  ExternalLink,
-  AlertCircle,
 } from 'lucide-react';
 
 interface ToolsPanelProps {
@@ -22,10 +20,8 @@ interface ToolsPanelProps {
   onExtractPages: () => void;
   onExtractImages: () => void;
   onRotateAll: () => void;
-  onConvertToPdf: () => void;
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
-  libreOfficeAvailable: boolean;
 }
 
 const ToolsPanel: React.FC<ToolsPanelProps> = ({
@@ -37,10 +33,8 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onExtractPages,
   onExtractImages,
   onRotateAll,
-  onConvertToPdf,
   onConvertFromPdf,
   onConvertToDocx,
-  libreOfficeAvailable,
 }) => {
   const tools = [
     {
@@ -84,18 +78,6 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
       requiresDoc: true,
     },
   ];
-
-  const conversionTool = {
-    id: 'convert',
-    label: 'Documents to PDF',
-    icon: <FileText size={18} />,
-    onClick: onConvertToPdf,
-    description: libreOfficeAvailable
-      ? 'Convert Word, Excel, PowerPoint to PDF'
-      : 'LibreOffice required',
-    requiresDoc: false,
-    requiresLibreOffice: true,
-  };
 
   if (!visible) {
     return (
@@ -143,15 +125,6 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
           <h4>Document Conversion</h4>
           <button
             className="tool-btn"
-            onClick={conversionTool.onClick}
-            disabled={!libreOfficeAvailable}
-            title={conversionTool.description}
-          >
-            {conversionTool.icon}
-            <span>{conversionTool.label}</span>
-          </button>
-          <button
-            className="tool-btn"
             onClick={onConvertToDocx}
             disabled={disabled}
             title="Convert PDF to Word document (.docx)"
@@ -168,22 +141,6 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
             <Image size={18} />
             <span>PDF to Images</span>
           </button>
-          {!libreOfficeAvailable && (
-            <div className="tools-notice">
-              <div className="tools-notice-header">
-                <AlertCircle size={16} />
-                <span>LibreOffice Required</span>
-              </div>
-              <p>Install LibreOffice to enable document-to-PDF conversion.</p>
-              <button
-                className="tools-notice-link"
-                onClick={() => window.electronAPI.openExternal('https://www.libreoffice.org/download/download/')}
-              >
-                <ExternalLink size={14} />
-                Download LibreOffice
-              </button>
-            </div>
-          )}
         </div>
       </div>
     </div>

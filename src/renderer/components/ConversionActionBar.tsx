@@ -6,7 +6,6 @@ interface ConversionActionBarProps {
   onClose: () => void;
   onConvertToImages: () => void;
   onConvertToDocx: () => void;
-  libreOfficeAvailable?: boolean;
 }
 
 const ConversionActionBar: React.FC<ConversionActionBarProps> = ({

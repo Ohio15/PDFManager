@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Modal from './Modal';
-import { Sun, Moon, Monitor, FolderOpen, Zap } from 'lucide-react';
+import { Sun, Moon, Monitor, FolderOpen } from 'lucide-react';
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -12,9 +12,7 @@ interface SettingsDialogProps {
 const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose }) => {
   const [theme, setTheme] = useState<Theme>('system');
   const [defaultZoom, setDefaultZoom] = useState(100);
-  const [autoConvertOnDrop, setAutoConvertOnDrop] = useState(true);
   const [openFolderAfterConversion, setOpenFolderAfterConversion] = useState(true);
-  const [libreOfficePath, setLibreOfficePath] = useState('');
 
   // Load settings on mount
   useEffect(() => {
@@ -26,14 +24,8 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose }) => {
         const savedZoom = await window.electronAPI.getStore('defaultZoom') as number;
         if (savedZoom) setDefaultZoom(savedZoom);
 
-        const savedAutoConvert = await window.electronAPI.getStore('autoConvertOnDrop') as boolean;
-        if (typeof savedAutoConvert === 'boolean') setAutoConvertOnDrop(savedAutoConvert);
-
         const savedOpenFolder = await window.electronAPI.getStore('openFolderAfterConversion') as boolean;
         if (typeof savedOpenFolder === 'boolean') setOpenFolderAfterConversion(savedOpenFolder);
-
-        const savedLoPath = await window.electronAPI.getStore('libreOfficePath') as string;
-        if (savedLoPath) setLibreOfficePath(savedLoPath);
       } catch (e) {
         console.error('Failed to load settings:', e);
       }
@@ -81,21 +73,9 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose }) => {
     await window.electronAPI.setStore('defaultZoom', value);
   };
 
-  const handleAutoConvertChange = async (value: boolean) => {
-    setAutoConvertOnDrop(value);
-    await window.electronAPI.setStore('autoConvertOnDrop', value);
-  };
-
   const handleOpenFolderChange = async (value: boolean) => {
     setOpenFolderAfterConversion(value);
     await window.electronAPI.setStore('openFolderAfterConversion', value);
-  };
-
-  const handleDetectLibreOffice = async () => {
-    const path = await window.electronAPI.detectLibreOffice();
-    if (path) {
-      setLibreOfficePath(path);
-    }
   };
 
   return (
@@ -157,24 +137,6 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose }) => {
             <label className="settings-checkbox">
               <input
                 type="checkbox"
-                checked={autoConvertOnDrop}
-                onChange={(e) => handleAutoConvertChange(e.target.checked)}
-              />
-              <span className="checkbox-mark"></span>
-              <span className="checkbox-label">
-                <Zap size={16} />
-                Auto-convert documents on drop
-              </span>
-            </label>
-            <p className="settings-help">
-              Automatically convert dropped Word, Excel, or PowerPoint files to PDF
-            </p>
-          </div>
-
-          <div className="settings-item">
-            <label className="settings-checkbox">
-              <input
-                type="checkbox"
                 checked={openFolderAfterConversion}
                 onChange={(e) => handleOpenFolderChange(e.target.checked)}
               />
@@ -186,30 +148,6 @@ const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose }) => {
             </label>
             <p className="settings-help">
               Automatically open the output folder when operations complete
-            </p>
-          </div>
-        </div>
-
-        {/* Advanced Section */}
-        <div className="settings-section">
-          <h3 className="settings-section-title">Advanced</h3>
-
-          <div className="settings-item">
-            <label className="settings-label">LibreOffice Path</label>
-            <div className="input-with-button">
-              <input
-                type="text"
-                value={libreOfficePath}
-                placeholder="Auto-detected..."
-                readOnly
-                className="settings-input"
-              />
-              <button className="btn btn-secondary" onClick={handleDetectLibreOffice}>
-                Detect
-              </button>
-            </div>
-            <p className="settings-help">
-              Required for converting documents to PDF. Leave empty for auto-detection.
             </p>
           </div>
         </div>

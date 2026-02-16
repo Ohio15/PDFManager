@@ -1,12 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { FileText, Upload, FileUp, Clock, X, Trash2 } from 'lucide-react';
+import { FileText, Upload, Clock, Trash2 } from 'lucide-react';
 
 interface WelcomeScreenProps {
   onOpenFile: () => void;
   onFileDropped?: (filePath: string) => void;
-  onNonPdfDropped?: (filePath: string) => void;
-  onConvertToPdf?: () => void;
-  libreOfficeAvailable?: boolean;
   recentFiles?: string[];
   onOpenRecentFile?: (filePath: string) => void;
   onClearRecentFiles?: () => void;
@@ -15,9 +12,6 @@ interface WelcomeScreenProps {
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onOpenFile,
   onFileDropped,
-  onNonPdfDropped,
-  onConvertToPdf,
-  libreOfficeAvailable = false,
   recentFiles = [],
   onOpenRecentFile,
   onClearRecentFiles,
@@ -36,15 +30,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
     setIsDragging(false);
   }, []);
 
-  // Supported document formats for conversion
-  const convertibleExtensions = [
-    'doc', 'docx', 'odt', 'rtf', 'txt',
-    'xls', 'xlsx', 'ods', 'csv',
-    'ppt', 'pptx', 'odp',
-    'html', 'htm', 'xml', 'md',
-    'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'tiff'
-  ];
-
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -56,7 +41,6 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         const file = files[0];
         const filePath = (file as any).path;
         const fileName = file.name.toLowerCase();
-        const extension = fileName.includes('.') ? fileName.split('.').pop() || '' : '';
 
         if (!filePath) {
           // Fallback to dialog if path not available
@@ -64,17 +48,15 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           return;
         }
 
-        // Check for PDF by extension or type
+        // Only accept PDF files
         if (file.type === 'application/pdf' || fileName.endsWith('.pdf')) {
           if (onFileDropped) {
             onFileDropped(filePath);
           }
-        } else if (convertibleExtensions.includes(extension) && onNonPdfDropped) {
-          onNonPdfDropped(filePath);
         }
       }
     },
-    [onOpenFile, onFileDropped, onNonPdfDropped, convertibleExtensions]
+    [onOpenFile, onFileDropped]
   );
 
   const getFileName = (filePath: string) => {
@@ -99,25 +81,13 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <FileText className="welcome-icon" />
         <h1 className="welcome-title">PDF Manager</h1>
         <p className="welcome-text">
-          Open a PDF to edit, or convert documents to PDF format.
-          Add text, images, annotations, merge, split, and more.
+          Open a PDF to edit, annotate, merge, split, and more.
         </p>
         <div className="welcome-buttons">
           <button className="welcome-btn" onClick={onOpenFile}>
             <Upload size={20} />
             Open PDF File
           </button>
-          {onConvertToPdf && (
-            <button
-              className="welcome-btn welcome-btn-secondary"
-              onClick={onConvertToPdf}
-              disabled={!libreOfficeAvailable}
-              title={libreOfficeAvailable ? 'Convert Word, Excel, PowerPoint to PDF' : 'LibreOffice required for conversion'}
-            >
-              <FileUp size={20} />
-              Convert to PDF
-            </button>
-          )}
         </div>
 
         {/* Recent Files */}
@@ -159,16 +129,11 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         )}
 
         <p className="welcome-text" style={{ fontSize: '14px', marginTop: recentFiles.length > 0 ? '8px' : '16px' }}>
-          Drag and drop files here to open or convert
+          Drag and drop a PDF here to open
         </p>
         <p className="welcome-text welcome-formats" style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
-          Supports: PDF, Word, Excel, PowerPoint, images, and more
+          Supports: PDF
         </p>
-        {onConvertToPdf && !libreOfficeAvailable && (
-          <p className="welcome-text welcome-hint" style={{ fontSize: '12px', marginTop: '8px', opacity: 0.7 }}>
-            Install LibreOffice to enable document conversion (Word, Excel, etc.)
-          </p>
-        )}
       </div>
     </div>
   );

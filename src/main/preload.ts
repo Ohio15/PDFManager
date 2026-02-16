@@ -65,11 +65,6 @@ export interface ElectronAPI {
   getRecentFiles: () => Promise<string[]>;
   addRecentFile: (filePath: string) => Promise<string[]>;
   clearRecentFiles: () => Promise<string[]>;
-  // Document conversion
-  detectLibreOffice: () => Promise<string | null>;
-  onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
-  openDocumentsDialog: () => Promise<string[] | null>;
-  convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
   getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
   getLaunchFile: () => Promise<{ path: string; data: string } | null>;
@@ -145,14 +140,6 @@ const electronAPI: ElectronAPI = {
   getRecentFiles: () => ipcRenderer.invoke('get-recent-files'),
   addRecentFile: (filePath: string) => ipcRenderer.invoke('add-recent-file', filePath),
   clearRecentFiles: () => ipcRenderer.invoke('clear-recent-files'),
-  // Document conversion
-  detectLibreOffice: () => ipcRenderer.invoke('detect-libreoffice'),
-  onLibreOfficeStatus: (callback: (path: string | null) => void) => {
-    ipcRenderer.on('libreoffice-status', (_event, path) => callback(path));
-  },
-  openDocumentsDialog: () => ipcRenderer.invoke('open-documents-dialog'),
-  convertToPdf: (inputPath: string, outputDir: string) =>
-    ipcRenderer.invoke('convert-to-pdf', { inputPath, outputDir }),
   getPrinters: () => ipcRenderer.invoke('get-printers'),
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) =>
     ipcRenderer.invoke('print-pdf', options),

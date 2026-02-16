@@ -7,6 +7,8 @@ import { PDFDocument, Annotation, Position, Size, TextAnnotation, ImageAnnotatio
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
 import { saveFormFieldValues, buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
+import { buildTextColorMap, matchTextColor } from '../utils/textColorExtractor';
+import { extractSourceAnnotations } from '../utils/annotationExtractor';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -99,15 +101,16 @@ async function sampleBackgroundColor(
   }
 }
 
-// Sample text color from rendered canvas
-async function sampleTextColor(
-  pdfDoc: pdfjsLib.PDFDocumentProxy,
-  pageNum: number,
-  transform: number[]
-): Promise<{ r: number; g: number; b: number }> {
-  // Default to black - text color detection from canvas is unreliable
-  // The transform matrix doesn't contain color info, that's in the content stream
-  return { r: 0, g: 0, b: 0 };
+/** Detect bold from PDF font name patterns */
+function isBoldFontName(fontName: string): boolean {
+  const lower = fontName.toLowerCase();
+  return lower.includes('bold') || lower.includes('-bd') || lower.endsWith('bd');
+}
+
+/** Detect italic from PDF font name patterns */
+function isItalicFontName(fontName: string): boolean {
+  const lower = fontName.toLowerCase();
+  return lower.includes('italic') || lower.includes('oblique') || lower.includes('-it');
 }
 interface HistoryEntry {
   type: string;
@@ -298,7 +301,15 @@ export function usePDFDocument() {
           const page = await pdfDoc.getPage(i + 1);
           const viewport = page.getViewport({ scale: 1 });
 
-          const textContent = await page.getTextContent();
+          // Get text content and operator list in parallel
+          const [textContent, operatorList] = await Promise.all([
+            page.getTextContent(),
+            page.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
+          ]);
+
+          // Build text color map from operator list
+          const textColorMap = buildTextColorMap(operatorList, viewport.height);
+
           // First pass: collect basic text item data
           // Split text items into individual words for finer-grained erasing
           let itemCounter = 0;
@@ -313,6 +324,7 @@ export function usePDFDocument() {
               const height = item.height || fontSize * 1.2;
               const y = viewport.height - transform[5] - height;
               const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
+              const rawFontName = item.fontName || 'default';
 
               // Split into words, preserving spaces
               const words = item.str.split(/( +)/);
@@ -333,11 +345,10 @@ export function usePDFDocument() {
                     y,
                     width: wordWidth,
                     height,
-                    fontName: item.fontName || 'default',
+                    fontName: rawFontName,
                     fontSize,
                     transform: [...transform.slice(0, 4), currentX, transform[5]],
                     isEdited: false,
-                    // Store reference to parent item for potential re-assembly
                     parentTransform: transform,
                   });
                 }
@@ -346,8 +357,8 @@ export function usePDFDocument() {
               });
             });
 
-          // Second pass: sample background colors for each text item
-          // Render page once for sampling
+          // Second pass: sample background colors and match text colors
+          // Render page once for background sampling
           const canvas = new OffscreenCanvas(viewport.width, viewport.height);
           const context = canvas.getContext('2d');
           if (context) {
@@ -361,7 +372,6 @@ export function usePDFDocument() {
             let backgroundColor = { r: 1, g: 1, b: 1 }; // Default white
 
             if (context) {
-              // Sample from slightly outside the text area to get background
               const sampleX = Math.max(0, Math.floor(item.x - 2));
               const sampleY = Math.max(0, Math.floor(item.y + item.height / 2));
 
@@ -374,12 +384,24 @@ export function usePDFDocument() {
               }
             }
 
+            // Match text color from operator list color map
+            const textColor = matchTextColor(item.x, item.y, item.fontSize, textColorMap);
+
+            // Detect bold/italic from font name
+            const bold = isBoldFontName(item.fontName);
+            const italic = isItalicFontName(item.fontName);
+
             return {
               ...item,
               backgroundColor,
-              textColor: { r: 0, g: 0, b: 0 }, // Default black text
+              textColor,
+              bold,
+              italic,
             };
           });
+
+          // Extract source PDF annotations (non-widget)
+          const sourceAnnotations = await extractSourceAnnotations(page, i, viewport.height);
 
           return {
             index: i,
@@ -389,6 +411,7 @@ export function usePDFDocument() {
             annotations: [],
             textItems,
             textEdits: [],
+            sourceAnnotations,
           };
         })
       );

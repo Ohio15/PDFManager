@@ -30,6 +30,7 @@ import { ZipBuilder } from './ZipBuilder';
 import { StyleCollector } from './StyleCollector';
 import { analyzePage } from './PageAnalyzer';
 import { buildPageLayout } from './LayoutAnalyzer';
+import { parseDocumentStructureTree, getPageStructure, type StructNode } from '../structureTreeParser';
 import {
   generateContentTypes,
   generateRootRels,
@@ -485,9 +486,21 @@ export async function generateDocx(
     // ─── FLOW MODE: Full pipeline with LayoutAnalyzer ─────────
 
     // Phase 3: Build structural layouts
+    // Attempt to parse structure tree for enhanced layout hints
+    let structureTree: StructNode | null = null;
+    try {
+      structureTree = await parseDocumentStructureTree(pdfJsDoc);
+      if (structureTree) {
+        console.log(`[DocxGenerator] Structure tree found with ${structureTree.children.length} top-level nodes`);
+      }
+    } catch {
+      // Structure tree not available — fall back to pure geometric analysis
+    }
+
     const layouts: PageLayout[] = [];
-    for (const scene of scenes) {
-      const layout = await buildPageLayout(scene);
+    for (let si = 0; si < scenes.length; si++) {
+      const structureHints = structureTree ? getPageStructure(structureTree, si) : undefined;
+      const layout = await buildPageLayout(scenes[si], structureHints);
       layouts.push(layout);
     }
 

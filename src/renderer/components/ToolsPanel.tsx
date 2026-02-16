@@ -7,6 +7,7 @@ import {
   RotateCw,
   FileText,
   Image,
+  Code,
   ChevronLeft,
   X,
 } from 'lucide-react';
@@ -22,6 +23,7 @@ interface ToolsPanelProps {
   onRotateAll: () => void;
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
+  onExportSvg: () => void;
 }
 
 const ToolsPanel: React.FC<ToolsPanelProps> = ({
@@ -35,6 +37,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onRotateAll,
   onConvertFromPdf,
   onConvertToDocx,
+  onExportSvg,
 }) => {
   const tools = [
     {
@@ -140,6 +143,15 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
           >
             <Image size={18} />
             <span>PDF to Images</span>
+          </button>
+          <button
+            className="tool-btn"
+            onClick={onExportSvg}
+            disabled={disabled}
+            title="Export PDF pages as SVG vector graphics"
+          >
+            <Code size={18} />
+            <span>PDF to SVG</span>
           </button>
         </div>
       </div>

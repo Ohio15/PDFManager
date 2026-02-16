@@ -40,6 +40,22 @@ export interface TextElement {
   italic: boolean;
   /** Hex color without '#' prefix, e.g. "000000" */
   color: string;
+  /** Text rendering mode: 0=fill, 1=stroke, 2=fill+stroke (faux bold), 3=invisible */
+  renderingMode?: number;
+  /** Text rise in points: positive=superscript, negative=subscript */
+  textRise?: number;
+  /** Additional character spacing in points */
+  charSpacing?: number;
+  /** Additional word spacing in points */
+  wordSpacing?: number;
+  /** Detected from line geometry intersection */
+  underline?: boolean;
+  /** Detected from line geometry intersection */
+  strikethrough?: boolean;
+  /** Tagged as artifact (header/footer/page number) from marked content */
+  isArtifact?: boolean;
+  /** Role from structure tree or marked content */
+  structRole?: string;
 }
 
 /** A filled/stroked rectangle */
@@ -91,6 +107,10 @@ export interface ImageElement {
   /** Original bytes (JPEG or PNG), null if extraction failed */
   data: Uint8Array | null;
   mimeType: 'image/jpeg' | 'image/png';
+  /** Horizontal DPI: intrinsicWidth / (displayWidth / 72) */
+  dpiX?: number;
+  /** Vertical DPI: intrinsicHeight / (displayHeight / 72) */
+  dpiY?: number;
 }
 
 /** A form field extracted from PDF Widget annotations */

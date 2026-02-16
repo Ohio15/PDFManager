@@ -208,6 +208,9 @@ export function renderTextRunsFromElements(
     bold: boolean;
     italic: boolean;
     color: string;
+    underline: boolean;
+    strikethrough: boolean;
+    textRise: number;
   }
 
   const runs: RunAccum[] = [];
@@ -217,6 +220,9 @@ export function renderTextRunsFromElements(
     const mappedFont = mapFontName(elem.fontName);
     const halfPts = Math.round(elem.fontSize * 2);
     const color = elem.color || '000000';
+    const underline = elem.underline || false;
+    const strikethrough = elem.strikethrough || false;
+    const textRise = elem.textRise || 0;
 
     // Register with style collector
     styleCollector.registerRun(mappedFont, halfPts, elem.bold, elem.italic, color);
@@ -243,7 +249,10 @@ export function renderTextRunsFromElements(
         prev.fontSize === halfPts &&
         prev.bold === elem.bold &&
         prev.italic === elem.italic &&
-        prev.color === color
+        prev.color === color &&
+        prev.underline === underline &&
+        prev.strikethrough === strikethrough &&
+        prev.textRise === textRise
       ) {
         runs[runs.length - 1] = { ...prev, text: prev.text + text };
         continue;
@@ -257,6 +266,9 @@ export function renderTextRunsFromElements(
       bold: elem.bold,
       italic: elem.italic,
       color,
+      underline,
+      strikethrough,
+      textRise,
     });
   }
 
@@ -271,7 +283,10 @@ export function renderTextRunsFromElements(
       run.fontSize !== normalStyle.fontSize ||
       run.bold !== normalStyle.bold ||
       run.italic !== normalStyle.italic ||
-      run.color !== normalStyle.color;
+      run.color !== normalStyle.color ||
+      run.underline ||
+      run.strikethrough ||
+      run.textRise !== 0;
 
     if (needsRPr) {
       xml += '    <w:rPr>\n';
@@ -292,6 +307,14 @@ export function renderTextRunsFromElements(
         xml += '      <w:i w:val="0"/>\n';
       }
 
+      if (run.underline) {
+        xml += '      <w:u w:val="single"/>\n';
+      }
+
+      if (run.strikethrough) {
+        xml += '      <w:strike/>\n';
+      }
+
       if (run.color !== normalStyle.color) {
         xml += `      <w:color w:val="${escXml(run.color)}"/>\n`;
       }
@@ -299,6 +322,13 @@ export function renderTextRunsFromElements(
       if (run.fontSize !== normalStyle.fontSize) {
         xml += `      <w:sz w:val="${run.fontSize}"/>\n`;
         xml += `      <w:szCs w:val="${run.fontSize}"/>\n`;
+      }
+
+      // Superscript / subscript from text rise
+      if (run.textRise > 0.5) {
+        xml += '      <w:vertAlign w:val="superscript"/>\n';
+      } else if (run.textRise < -0.5) {
+        xml += '      <w:vertAlign w:val="subscript"/>\n';
       }
 
       xml += '    </w:rPr>\n';

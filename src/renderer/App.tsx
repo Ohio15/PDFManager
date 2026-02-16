@@ -801,6 +801,51 @@ const App: React.FC = () => {
     return { count: result.pageCount, folder: outputDir };
   }, [document, toast]);
 
+  // Export PDF pages as SVG vector graphics
+  const handleExportSvg = useCallback(async () => {
+    if (!document) return;
+    try {
+      const outputDir = await window.electronAPI.selectOutputDirectory();
+      if (!outputDir) return;
+
+      const { analyzePage } = await import('./utils/docxGenerator/PageAnalyzer');
+      const { pageToSvg } = await import('./utils/svgExporter');
+      const pdfjsLib = await import('pdfjs-dist');
+
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+        'pdfjs-dist/build/pdf.worker.min.mjs',
+        import.meta.url
+      ).toString();
+
+      const dataCopy = new Uint8Array(document.pdfData);
+      const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+      const totalPages = pdfDoc.numPages;
+
+      for (let i = 0; i < totalPages; i++) {
+        const page = await pdfDoc.getPage(i + 1);
+        const scene = await analyzePage(page, null, i, false, false);
+        const svgContent = pageToSvg(scene);
+
+        const baseName = document.fileName.replace(/\.pdf$/i, '');
+        const svgPath = `${outputDir}/${baseName}_page_${i + 1}.svg`;
+
+        await window.electronAPI.saveFileToPath(
+          btoa(new TextEncoder().encode(svgContent).reduce((data, byte) => data + String.fromCharCode(byte), '')),
+          svgPath
+        );
+
+        page.cleanup();
+      }
+
+      await pdfDoc.destroy();
+      toast.success(`Exported ${totalPages} pages as SVG`);
+      await window.electronAPI.openFolder(outputDir);
+    } catch (error) {
+      console.error('SVG export failed:', error);
+      toast.error('SVG export failed');
+    }
+  }, [document, toast]);
+
   // Menu event handlers
   useEffect(() => {
     const menuActions: Record<string, () => void> = {
@@ -1199,6 +1244,7 @@ const App: React.FC = () => {
           onRotateAll={handleRotateAllPages}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
+          onExportSvg={handleExportSvg}
         />
 
         <FormDataPanel

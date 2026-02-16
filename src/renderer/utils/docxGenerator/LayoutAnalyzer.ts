@@ -30,6 +30,8 @@ import type {
   RGB,
 } from './types';
 import { groupNearbyPaths, rasterizePathGroup } from './PathRasterizer';
+import type { StructNode } from '../structureTreeParser';
+import { getHeadingLevel, isArtifactRole } from '../structureTreeParser';
 
 // ─── Constants ───────────────────────────────────────────────
 
@@ -1852,6 +1854,87 @@ function applyRectStylingToParagraphs(
   }
 }
 
+/**
+ * Detect underline and strikethrough text decorations from thin horizontal lines.
+ *
+ * Scans thin RectElements and horizontal PathElements that intersect text baselines:
+ * - Underline: thin line (height < 2pt) within 2pt below text baseline
+ * - Strikethrough: thin line at ~50% of text height (x-height)
+ * Text X-range must overlap line X-range by >80%.
+ */
+function detectTextDecorations(
+  paragraphs: ParagraphGroup[],
+  scene: PageScene,
+): void {
+  // Collect thin horizontal lines from rects and paths
+  const thinLines: Array<{ x: number; y: number; width: number; height: number }> = [];
+
+  for (const el of scene.elements) {
+    if (el.kind === 'rect') {
+      const h = Math.abs(el.height);
+      if (h > 0 && h < 2.5 && el.width > 5) {
+        thinLines.push({
+          x: Math.min(el.x, el.x + el.width),
+          y: Math.min(el.y, el.y + el.height),
+          width: Math.abs(el.width),
+          height: h,
+        });
+      }
+    } else if (el.kind === 'path' && el.points.length >= 2) {
+      // Check if it's a nearly horizontal line
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const pt of el.points) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+      const w = maxX - minX;
+      const h = maxY - minY;
+      if (h < 2.5 && w > 5) {
+        thinLines.push({ x: minX, y: minY, width: w, height: h });
+      }
+    }
+  }
+
+  if (thinLines.length === 0) return;
+
+  for (const para of paragraphs) {
+    for (const text of para.texts) {
+      const textLeft = text.x;
+      const textRight = text.x + text.width;
+      const textBottom = text.y + text.height;
+      const textMidY = text.y + text.height * 0.5;
+
+      for (const line of thinLines) {
+        const lineLeft = line.x;
+        const lineRight = line.x + line.width;
+        const lineMidY = line.y + line.height / 2;
+
+        // Check horizontal overlap (>80%)
+        const overlapLeft = Math.max(textLeft, lineLeft);
+        const overlapRight = Math.min(textRight, lineRight);
+        const overlap = overlapRight - overlapLeft;
+        const textWidth = textRight - textLeft;
+        if (textWidth <= 0 || overlap / textWidth < 0.8) continue;
+
+        // Underline: line is within 2pt below text baseline
+        const underlineDist = lineMidY - textBottom;
+        if (underlineDist >= -1 && underlineDist <= 3) {
+          text.underline = true;
+          continue;
+        }
+
+        // Strikethrough: line is at ~50% of text height
+        const strikeDist = Math.abs(lineMidY - textMidY);
+        if (strikeDist <= text.height * 0.2) {
+          text.strikethrough = true;
+        }
+      }
+    }
+  }
+}
+
 // ─── Main Entry Point ────────────────────────────────────────
 
 /**
@@ -2094,7 +2177,63 @@ export const _testExports = {
   EDGE_CLUSTER_TOLERANCE,
 };
 
-export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
+/**
+ * Apply structure tree hints to paragraphs.
+ * Matches heading roles from the structure tree to paragraphs by text content overlap,
+ * and filters out paragraphs whose text is entirely marked as artifacts.
+ */
+function applyStructureHints(paragraphs: ParagraphGroup[], hints: StructNode[]): void {
+  // Collect heading hints
+  const headingHints: Array<{ level: number; text: string }> = [];
+  const artifactTexts: string[] = [];
+
+  function walkHints(node: StructNode): void {
+    const headingLevel = getHeadingLevel(node.role);
+    if (headingLevel !== undefined) {
+      // Collect text from children
+      const text = collectNodeText(node);
+      if (text) headingHints.push({ level: headingLevel, text });
+    }
+    if (isArtifactRole(node.role)) {
+      const text = collectNodeText(node);
+      if (text) artifactTexts.push(text.toLowerCase());
+    }
+    for (const child of node.children) {
+      walkHints(child);
+    }
+  }
+
+  for (const hint of hints) {
+    walkHints(hint);
+  }
+
+  // Match headings to paragraphs by text content overlap
+  for (const para of paragraphs) {
+    const paraText = para.texts.map(t => t.text).join(' ').trim();
+    if (!paraText) continue;
+
+    for (const heading of headingHints) {
+      // Check if the paragraph text matches the heading text (fuzzy: one contains the other)
+      if (paraText.includes(heading.text) || heading.text.includes(paraText)) {
+        para.headingLevel = heading.level;
+        break;
+      }
+    }
+  }
+}
+
+/** Recursively collect text content from a structure tree node */
+function collectNodeText(node: StructNode): string {
+  if (node.actualText) return node.actualText;
+  const parts: string[] = [];
+  for (const child of node.children) {
+    const text = collectNodeText(child);
+    if (text) parts.push(text);
+  }
+  return parts.join(' ');
+}
+
+export async function buildPageLayout(scene: PageScene, structureHints?: StructNode[]): Promise<PageLayout> {
   // Step 1: Classify all rectangles
   const rectRoles = classifyRectangles(scene);
 
@@ -2215,9 +2354,17 @@ export async function buildPageLayout(scene: PageScene): Promise<PageLayout> {
   // Group free text and fields into paragraphs
   const paragraphs = groupIntoParagraphs(freeTexts, freeFields);
 
+  // Step 5a: Apply structure tree hints for heading detection and artifact filtering
+  if (structureHints && structureHints.length > 0) {
+    applyStructureHints(paragraphs, structureHints);
+  }
+
   // Step 5b: Apply visual styling from rects to paragraphs
   // Map cell-fill rects (colored backgrounds) and separator rects to paragraphs
   applyRectStylingToParagraphs(paragraphs, rectRoles, scene);
+
+  // Step 5c: Detect underline/strikethrough from thin line geometry
+  detectTextDecorations(paragraphs, scene);
 
   // Step 6: Combine all layout elements and sort by Y position
   const layoutElements: LayoutElement[] = [];

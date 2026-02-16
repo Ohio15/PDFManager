@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2 } from 'lucide-react';
-import { PDFDocument, Annotation } from '../types';
+import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2, AlertCircle, Link, Eye } from 'lucide-react';
+import { PDFDocument, Annotation, PDFSourceAnnotation } from '../types';
 
 export type SidebarTab = 'pages' | 'bookmarks' | 'annotations';
 
@@ -63,6 +63,20 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
     return items;
   }, [document, annotationFilter]);
+
+  // Compute source (PDF-embedded) annotations across all pages
+  const sourceAnnotations = useMemo(() => {
+    if (!document) return [];
+    const items: Array<{ annotation: PDFSourceAnnotation; pageIndex: number }> = [];
+    document.pages.forEach((page, idx) => {
+      if (page.sourceAnnotations) {
+        page.sourceAnnotations.forEach((ann) => {
+          items.push({ annotation: ann, pageIndex: idx + 1 });
+        });
+      }
+    });
+    return items;
+  }, [document]);
 
   // Generate thumbnails
   useEffect(() => {
@@ -422,6 +436,46 @@ const Sidebar: React.FC<SidebarProps> = ({
             </select>
             <span className="annotations-count">{allAnnotations.length}</span>
           </div>
+
+          {/* PDF Source Annotations */}
+          {sourceAnnotations.length > 0 && (
+            <div className="source-annotations-section">
+              <div className="source-annotations-header">
+                <Eye size={13} />
+                <span>PDF Annotations ({sourceAnnotations.length})</span>
+              </div>
+              <div className="annotations-list">
+                {sourceAnnotations.map(({ annotation: ann, pageIndex }) => (
+                  <div
+                    key={ann.id}
+                    className="annotation-list-item source-annotation"
+                    onClick={() => onPageSelect(pageIndex)}
+                    title={ann.contents || ann.subtype}
+                  >
+                    <span className="annotation-list-icon">
+                      {ann.subtype === 'Link' ? <Link size={13} /> :
+                       ann.subtype === 'Text' ? <MessageSquare size={13} /> :
+                       ann.subtype === 'FreeText' ? <Type size={13} /> :
+                       ann.subtype === 'Highlight' ? <Highlighter size={13} /> :
+                       ann.subtype === 'Underline' ? <Type size={13} /> :
+                       ann.subtype === 'StrikeOut' ? <Type size={13} /> :
+                       ann.subtype === 'Stamp' ? <Stamp size={13} /> :
+                       <AlertCircle size={13} />}
+                    </span>
+                    <div className="annotation-list-info">
+                      <span className="annotation-list-label">
+                        {ann.contents ? ann.contents.slice(0, 40) : ann.subtype}
+                        {ann.author ? ` — ${ann.author}` : ''}
+                      </span>
+                      <span className="annotation-list-page">
+                        Page {pageIndex} · {ann.subtype}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {allAnnotations.length > 0 ? (
             <div className="annotations-list">

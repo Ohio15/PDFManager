@@ -70,6 +70,13 @@ const OPS = {
   paintInlineImageXObjectGroup: 87,
   paintImageMaskXObject: 88,
   constructPath: 91,
+  setCharSpacing: 3,
+  setWordSpacing: 4,
+  setTextRenderingMode: 44,
+  setTextRise: 48,
+  beginMarkedContent: 70,
+  beginMarkedContentProps: 71,
+  endMarkedContent: 72,
 } as const;
 
 // ─── Affine Matrix Types and Math ─────────────────────────────────
@@ -379,10 +386,39 @@ function resolveColorSpace(
             return { numComponents: 1, pngColorType: 0 };
           } else if (csName === '/Lab') {
             return { numComponents: 3, pngColorType: 2 };
-          } else if (csName === '/Separation' || csName === '/DeviceN') {
-            // Spot colors require tint transform functions we can't execute.
-            // Return sentinel numComponents=0 so handleFlateImage returns null,
-            // triggering the pdfjs fallback which handles these correctly.
+          } else if (csName === '/Separation') {
+            // Separation: [/Separation name alternateSpace tintTransform]
+            // Try to use the alternate color space component count as a hint.
+            // We can't execute the tint transform, but knowing the alternate helps
+            // the pdfjs fallback produce correctly-sized pixel data.
+            if (resolved.size() >= 3) {
+              try {
+                const altCs = context.lookup(resolved.get(2));
+                if (altCs instanceof PDFName) {
+                  const altName = altCs.asString();
+                  if (altName === '/DeviceRGB') return { numComponents: 3, pngColorType: 2 };
+                  if (altName === '/DeviceGray') return { numComponents: 1, pngColorType: 0 };
+                  if (altName === '/DeviceCMYK') return { numComponents: 4, pngColorType: 2 };
+                }
+              } catch { /* fall through */ }
+            }
+            // Can't determine alternate — trigger pdfjs fallback
+            return { numComponents: 0, pngColorType: 0 };
+          } else if (csName === '/DeviceN') {
+            // DeviceN: [/DeviceN names alternateSpace tintTransform ...]
+            // Similar to Separation but with multiple colorants.
+            if (resolved.size() >= 3) {
+              try {
+                const altCs = context.lookup(resolved.get(2));
+                if (altCs instanceof PDFName) {
+                  const altName = altCs.asString();
+                  if (altName === '/DeviceRGB') return { numComponents: 3, pngColorType: 2 };
+                  if (altName === '/DeviceGray') return { numComponents: 1, pngColorType: 0 };
+                  if (altName === '/DeviceCMYK') return { numComponents: 4, pngColorType: 2 };
+                }
+              } catch { /* fall through */ }
+            }
+            // Can't determine alternate — trigger pdfjs fallback
             return { numComponents: 0, pngColorType: 0 };
           }
         }
@@ -857,6 +893,157 @@ function extractImageData(
 }
 
 /**
+ * Try to extract and apply a soft mask (SMask) to produce an RGBA image.
+ * SMask provides the alpha channel for images with soft edges/transparency.
+ *
+ * @param pdfLibDoc  The pdf-lib document
+ * @param pageIndex  The page index
+ * @param resourceName The image resource name
+ * @param baseData   The extracted base image (PNG only — JPEG cannot embed alpha)
+ * @param baseMimeType The base image MIME type
+ * @param intrinsicWidth  Image pixel width
+ * @param intrinsicHeight Image pixel height
+ * @returns RGBA PNG bytes or null if no SMask or unable to apply
+ */
+function tryApplySmask(
+  pdfLibDoc: any,
+  pageIndex: number,
+  resourceName: string,
+  baseData: Uint8Array,
+  baseMimeType: string,
+  intrinsicWidth: number,
+  intrinsicHeight: number,
+): Uint8Array | null {
+  // SMask only applicable to PNG base images (JPEG doesn't support alpha)
+  if (baseMimeType === 'image/jpeg') return null;
+
+  try {
+    const pdfLibPage = pdfLibDoc.getPage(pageIndex);
+    if (!pdfLibPage) return null;
+    const context = pdfLibDoc.context;
+    const resources = pdfLibPage.node.Resources();
+    if (!resources) return null;
+
+    const xObjEntry = resources.get(PDFName.of('XObject'));
+    if (!xObjEntry) return null;
+    const xObjectDict = xObjEntry instanceof PDFDict ? xObjEntry : context.lookup(xObjEntry);
+    if (!(xObjectDict instanceof PDFDict)) return null;
+
+    const ref = xObjectDict.get(PDFName.of(resourceName));
+    if (!ref) return null;
+    const stream = context.lookup(ref);
+    if (!(stream instanceof PDFRawStream)) return null;
+
+    const dict = stream.dict;
+    const smaskRef = dict.get(PDFName.of('SMask'));
+    if (!smaskRef) return null;
+
+    const smaskStream = context.lookup(smaskRef);
+    if (!(smaskStream instanceof PDFRawStream)) return null;
+
+    const smaskDict = smaskStream.dict;
+    const smW = smaskDict.get(PDFName.of('Width'));
+    const smH = smaskDict.get(PDFName.of('Height'));
+    const smaskWidth = smW instanceof PDFNumber ? smW.asNumber() : 0;
+    const smaskHeight = smH instanceof PDFNumber ? smH.asNumber() : 0;
+
+    if (smaskWidth !== intrinsicWidth || smaskHeight !== intrinsicHeight) {
+      console.log(`[PageAnalyzer] SMask dimension mismatch: ${smaskWidth}x${smaskHeight} vs ${intrinsicWidth}x${intrinsicHeight}`);
+      return null;
+    }
+
+    // Decompress SMask stream (typically FlateDecode grayscale)
+    const smaskRaw = smaskStream.getContents();
+    if (!smaskRaw || smaskRaw.length === 0) return null;
+
+    let smaskPixels: Uint8Array;
+    const smaskFilter = smaskDict.get(PDFName.of('Filter'));
+    if (smaskFilter instanceof PDFName && smaskFilter.asString() === '/FlateDecode') {
+      smaskPixels = pako.inflate(smaskRaw);
+    } else {
+      smaskPixels = smaskRaw;
+    }
+
+    if (smaskPixels.length < intrinsicWidth * intrinsicHeight) {
+      console.log(`[PageAnalyzer] SMask pixels too short: ${smaskPixels.length} < ${intrinsicWidth * intrinsicHeight}`);
+      return null;
+    }
+
+    // Re-decompress the base image to get raw RGB pixels
+    const baseRaw = stream.getContents();
+    if (!baseRaw || baseRaw.length === 0) return null;
+
+    const baseFilter = dict.get(PDFName.of('Filter'));
+    let basePixels: Uint8Array;
+    if (baseFilter instanceof PDFName && baseFilter.asString() === '/FlateDecode') {
+      basePixels = pako.inflate(baseRaw);
+    } else {
+      basePixels = baseRaw;
+    }
+
+    // Determine base pixel format
+    let hintColors = 0;
+    try {
+      const dpObj = dict.get(PDFName.of('DecodeParms'));
+      if (dpObj) {
+        const dp = dpObj instanceof PDFDict ? dpObj : context.lookup(dpObj);
+        if (dp instanceof PDFDict) {
+          const colorsObj = dp.get(PDFName.of('Colors'));
+          if (colorsObj instanceof PDFNumber) hintColors = colorsObj.asNumber();
+        }
+      }
+    } catch { /* use default */ }
+
+    const { numComponents } = resolveColorSpace(dict, context, hintColors);
+    const pixelCount = intrinsicWidth * intrinsicHeight;
+
+    // Un-predict if needed (predictor handling for the base image)
+    // For simplicity, only handle the non-predictor case — most SMask images are simple
+    let rgbPixels: Uint8Array;
+    if (numComponents === 3 && basePixels.length >= pixelCount * 3) {
+      rgbPixels = basePixels.subarray(0, pixelCount * 3);
+    } else if (numComponents === 1 && basePixels.length >= pixelCount) {
+      // Grayscale → expand to RGB
+      rgbPixels = new Uint8Array(pixelCount * 3);
+      for (let p = 0; p < pixelCount; p++) {
+        rgbPixels[p * 3] = basePixels[p];
+        rgbPixels[p * 3 + 1] = basePixels[p];
+        rgbPixels[p * 3 + 2] = basePixels[p];
+      }
+    } else if (numComponents === 4 && basePixels.length >= pixelCount * 4) {
+      // CMYK → convert to RGB
+      rgbPixels = new Uint8Array(pixelCount * 3);
+      for (let p = 0; p < pixelCount; p++) {
+        const c = basePixels[p * 4] / 255;
+        const m = basePixels[p * 4 + 1] / 255;
+        const y = basePixels[p * 4 + 2] / 255;
+        const k = basePixels[p * 4 + 3] / 255;
+        rgbPixels[p * 3] = Math.round(255 * (1 - c) * (1 - k));
+        rgbPixels[p * 3 + 1] = Math.round(255 * (1 - m) * (1 - k));
+        rgbPixels[p * 3 + 2] = Math.round(255 * (1 - y) * (1 - k));
+      }
+    } else {
+      return null; // Unsupported base format for SMask combination
+    }
+
+    // Combine RGB + SMask alpha into RGBA
+    const rgba = new Uint8Array(pixelCount * 4);
+    for (let p = 0; p < pixelCount; p++) {
+      rgba[p * 4] = rgbPixels[p * 3];
+      rgba[p * 4 + 1] = rgbPixels[p * 3 + 1];
+      rgba[p * 4 + 2] = rgbPixels[p * 3 + 2];
+      rgba[p * 4 + 3] = smaskPixels[p]; // alpha from SMask
+    }
+
+    console.log(`[PageAnalyzer] SMask applied: ${intrinsicWidth}x${intrinsicHeight}, base ${numComponents}-component + alpha`);
+    return wrapRgbaAsPng(rgba, intrinsicWidth, intrinsicHeight);
+  } catch (e) {
+    console.warn(`[PageAnalyzer] SMask extraction failed for ${resourceName}:`, e);
+    return null;
+  }
+}
+
+/**
  * Attempt to find all XObject image resource names on a page.
  * Returns a map of resource name -> { intrinsicWidth, intrinsicHeight, filterName, bpc }.
  */
@@ -998,6 +1185,10 @@ interface GraphicsState {
   strokeColor: RGB;
   lineWidth: number;
   ctm: Matrix;
+  charSpacing: number;
+  wordSpacing: number;
+  textRenderingMode: number;
+  textRise: number;
 }
 
 /** Position-keyed text color entry from operator list analysis */
@@ -1008,6 +1199,16 @@ interface TextColorEntry {
   ty: number;
   /** Fill color active at the time of text rendering */
   color: RGB;
+  /** Text rendering mode (0=fill, 1=stroke, 2=fill+stroke/faux bold, 3=invisible) */
+  renderingMode: number;
+  /** Text rise in points (superscript/subscript) */
+  textRise: number;
+  /** Character spacing */
+  charSpacing: number;
+  /** Word spacing */
+  wordSpacing: number;
+  /** Whether the text is inside an /Artifact marked content */
+  isArtifact: boolean;
 }
 
 /** Result of operator list parsing including text color map */
@@ -1071,10 +1272,17 @@ function parseOperatorList(
     strokeColor: { r: 0, g: 0, b: 0 },
     lineWidth: 1,
     ctm: [...IDENTITY] as Matrix,
+    charSpacing: 0,
+    wordSpacing: 0,
+    textRenderingMode: 0,
+    textRise: 0,
   };
 
   let state: GraphicsState = { ...defaultState, ctm: [...IDENTITY] as Matrix };
   const stateStack: GraphicsState[] = [];
+
+  // Marked content stack for artifact detection
+  const markedContentStack: string[] = [];
 
   // Path accumulator
   let pathOps: PathOp[] = [];
@@ -1219,6 +1427,10 @@ function parseOperatorList(
           strokeColor: { ...state.strokeColor },
           lineWidth: state.lineWidth,
           ctm: [...state.ctm] as Matrix,
+          charSpacing: state.charSpacing,
+          wordSpacing: state.wordSpacing,
+          textRenderingMode: state.textRenderingMode,
+          textRise: state.textRise,
         });
         break;
       }
@@ -1527,6 +1739,15 @@ function parseOperatorList(
             }
           }
 
+          // Strategy 1b: Try applying soft mask (SMask) for alpha channel
+          if (imageData && mimeType === 'image/png' && pdfLibDoc) {
+            const withAlpha = tryApplySmask(pdfLibDoc, pageIndex, resourceName, imageData, mimeType, intrinsicW, intrinsicH);
+            if (withAlpha) {
+              imageData = withAlpha;
+              console.log(`[PageAnalyzer]   -> SMask applied: ${withAlpha.length} bytes RGBA PNG`);
+            }
+          }
+
           // Strategy 2: pdfjs decoded pixel data fallback (handles ALL formats)
           // Used when pdf-lib can't extract (CCITTFaxDecode, JBIG2Decode, JPXDecode,
           // Indexed color spaces, multi-filter chains, LZWDecode, etc.)
@@ -1542,6 +1763,10 @@ function parseOperatorList(
           }
         }
 
+        // Calculate DPI from intrinsic vs display dimensions
+        const dpiX = displayWidth > 0 ? (intrinsicW / displayWidth) * 72 : undefined;
+        const dpiY = effectiveHeight > 0 ? (intrinsicH / effectiveHeight) * 72 : undefined;
+
         elements.push({
           kind: 'image',
           x: xPdf,
@@ -1554,6 +1779,8 @@ function parseOperatorList(
           isGenuine,
           data: imageData,
           mimeType,
+          dpiX,
+          dpiY,
         });
 
         break;
@@ -1641,6 +1868,40 @@ function parseOperatorList(
         break;
       }
 
+      // ── Text style operators ──
+      case OPS.setCharSpacing: {
+        state.charSpacing = args[0] || 0;
+        break;
+      }
+      case OPS.setWordSpacing: {
+        state.wordSpacing = args[0] || 0;
+        break;
+      }
+      case OPS.setTextRenderingMode: {
+        state.textRenderingMode = args[0] || 0;
+        break;
+      }
+      case OPS.setTextRise: {
+        state.textRise = args[0] || 0;
+        break;
+      }
+
+      // ── Marked content (artifact detection) ──
+      case OPS.beginMarkedContent: {
+        const tag = args[0] || '';
+        markedContentStack.push(typeof tag === 'string' ? tag : String(tag));
+        break;
+      }
+      case OPS.beginMarkedContentProps: {
+        const tag = args[0] || '';
+        markedContentStack.push(typeof tag === 'string' ? tag : String(tag));
+        break;
+      }
+      case OPS.endMarkedContent: {
+        markedContentStack.pop();
+        break;
+      }
+
       // ── Text rendering ops — capture fill color at text position ──
       // Text content is still extracted via getTextContent() for accuracy,
       // but we record the fill color active during text rendering for cross-reference.
@@ -1649,10 +1910,18 @@ function parseOperatorList(
         // Record current position and fill color for text color recovery
         const tx = state.ctm[4];
         const ty = pageHeight - state.ctm[5];
+        const isInsideArtifact = markedContentStack.some(
+          tag => tag === 'Artifact' || tag === '/Artifact'
+        );
         textColorMap.push({
           tx,
           ty,
           color: { ...state.fillColor },
+          renderingMode: state.textRenderingMode,
+          textRise: state.textRise,
+          charSpacing: state.charSpacing,
+          wordSpacing: state.wordSpacing,
+          isArtifact: isInsideArtifact,
         });
         break;
       }
@@ -1748,6 +2017,12 @@ function convertTextItems(
     // Cross-reference operator list color map for text color recovery.
     // Find the closest color map entry by position (Euclidean distance).
     let color = '000000'; // fallback to black
+    let renderingMode = 0;
+    let textRise = 0;
+    let charSpacing = 0;
+    let wordSpacing = 0;
+    let isArtifact = false;
+
     if (textColorMap.length > 0) {
       let bestDist = Infinity;
       const tolerance = fontSize * 2; // generous tolerance
@@ -1758,9 +2033,17 @@ function convertTextItems(
         if (dist < bestDist && dist <= tolerance) {
           bestDist = dist;
           color = rgbToHex(entry.color.r, entry.color.g, entry.color.b);
+          renderingMode = entry.renderingMode;
+          textRise = entry.textRise;
+          charSpacing = entry.charSpacing;
+          wordSpacing = entry.wordSpacing;
+          isArtifact = entry.isArtifact;
         }
       }
     }
+
+    // Rendering mode 2 (fill+stroke) is often used for faux bold
+    const effectiveBold = bold || renderingMode === 2;
 
     results.push({
       kind: 'text',
@@ -1771,9 +2054,14 @@ function convertTextItems(
       height,
       fontName: mappedFont,
       fontSize,
-      bold,
+      bold: effectiveBold,
       italic,
       color,
+      renderingMode,
+      textRise,
+      charSpacing,
+      wordSpacing,
+      isArtifact,
     });
   }
 

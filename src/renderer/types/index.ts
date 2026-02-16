@@ -102,6 +102,29 @@ export interface PDFTextItem {
   isDeleted?: boolean;
   backgroundColor?: { r: number; g: number; b: number };
   textColor?: { r: number; g: number; b: number };
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+}
+
+export interface PDFSourceAnnotation {
+  id: string;
+  subtype: string;
+  pageIndex: number;
+  rect: { x: number; y: number; width: number; height: number };
+  contents?: string;
+  author?: string;
+  modDate?: string;
+  color?: { r: number; g: number; b: number };
+  uri?: string;
+  destPage?: number;
+  richText?: string;
+  quadPoints?: number[];
+  inReplyTo?: string;
+  replyType?: string;
+  creationDate?: string;
+  opacity?: number;
 }
 
 export interface TextEdit {
@@ -128,6 +151,7 @@ export interface PDFPage {
   annotations: Annotation[];
   textItems?: PDFTextItem[];
   textEdits?: TextEdit[];
+  sourceAnnotations?: PDFSourceAnnotation[];
 }
 
 export interface PDFDocument {

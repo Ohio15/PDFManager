@@ -26,6 +26,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
   const [results, setResults] = useState<SearchResult[]>([]);
   const [currentResultIndex, setCurrentResultIndex] = useState(-1);
   const [searching, setSearching] = useState(false);
+  const [useRegex, setUseRegex] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -54,6 +55,16 @@ const SearchBar: React.FC<SearchBarProps> = ({
     const searchLower = searchQuery.toLowerCase();
     const found: SearchResult[] = [];
 
+    let searchRegex: RegExp | null = null;
+    if (useRegex) {
+      try {
+        searchRegex = new RegExp(searchQuery, 'i');
+      } catch {
+        // Invalid regex — fall back to literal search
+        searchRegex = null;
+      }
+    }
+
     try {
       const dataCopy = new Uint8Array(document.pdfData);
       const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
@@ -63,7 +74,10 @@ const SearchBar: React.FC<SearchBarProps> = ({
         const textContent = await page.getTextContent();
 
         textContent.items.forEach((item: any, idx: number) => {
-          if (item.str && item.str.toLowerCase().includes(searchLower)) {
+          const matches = searchRegex
+            ? searchRegex.test(item.str || '')
+            : (item.str && item.str.toLowerCase().includes(searchLower));
+          if (matches) {
             found.push({
               pageIndex: i,
               itemIndex: idx,
@@ -82,7 +96,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
       onNavigateToPage(found[0].pageIndex);
     }
     setSearching(false);
-  }, [document, onNavigateToPage]);
+  }, [document, onNavigateToPage, useRegex]);
 
   const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const newQuery = e.target.value;
@@ -144,6 +158,17 @@ const SearchBar: React.FC<SearchBarProps> = ({
           </span>
         )}
       </div>
+      <button
+        className={`search-bar-btn ${useRegex ? 'active' : ''}`}
+        onClick={() => {
+          setUseRegex(!useRegex);
+          if (query) performSearch(query);
+        }}
+        title="Use regular expressions"
+        style={useRegex ? { color: 'var(--accent)', background: 'var(--accent-bg, rgba(59,130,246,0.15))' } : undefined}
+      >
+        .*
+      </button>
       <button
         className="search-bar-btn"
         onClick={() => navigateResult('prev')}

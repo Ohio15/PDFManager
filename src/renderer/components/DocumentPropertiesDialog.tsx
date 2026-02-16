@@ -23,6 +23,11 @@ interface PDFMetadata {
   fileSize: string;
   pageDimensions: string;
   isEncrypted: boolean;
+  language?: string;
+  description?: string;
+  rights?: string;
+  trapped?: string;
+  permissions?: string[];
 }
 
 function formatFileSize(bytes: number): string {
@@ -74,6 +79,22 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
 
         const info = (meta?.info as Record<string, any>) || {};
 
+        // Extract XMP metadata if available
+        const xmpMetadata = meta?.metadata;
+        let language = '';
+        let description = '';
+        let rights = '';
+
+        if (xmpMetadata) {
+          try {
+            language = xmpMetadata.get('dc:language') || xmpMetadata.get('language') || '';
+            description = xmpMetadata.get('dc:description') || xmpMetadata.get('description') || '';
+            rights = xmpMetadata.get('dc:rights') || xmpMetadata.get('xmpRights:WebStatement') || '';
+          } catch {
+            // XMP metadata not available
+          }
+        }
+
         // Get first page dimensions
         const firstPage = await pdfDoc.getPage(1);
         const viewport = firstPage.getViewport({ scale: 1 });
@@ -81,6 +102,23 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
         const heightInches = (viewport.height / 72).toFixed(2);
         const widthMm = (viewport.width * 0.3528).toFixed(0);
         const heightMm = (viewport.height * 0.3528).toFixed(0);
+
+        // Extract permissions
+        let permissions: string[] = [];
+        try {
+          const perms = await pdfDoc.getPermissions();
+          if (perms) {
+            const permNames = ['Print', 'Modify', 'Copy', 'ModifyAnnotations', 'FillForms', 'ExtractContent', 'Assemble', 'PrintHighQuality'];
+            permissions = perms.map((allowed: number | boolean, idx: number) =>
+              `${permNames[idx] || `Perm${idx}`}: ${allowed ? 'Yes' : 'No'}`
+            ).filter(Boolean);
+          }
+        } catch {
+          // Permissions not available
+        }
+
+        // Detect encryption
+        const isEncrypted = !!info.IsEncrypted || permissions.length > 0;
 
         setMetadata({
           title: info.Title || document.fileName || 'Untitled',
@@ -95,7 +133,12 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
           pageCount: pdfDoc.numPages,
           fileSize: formatFileSize(document.pdfData.length),
           pageDimensions: `${viewport.width.toFixed(0)} x ${viewport.height.toFixed(0)} pts (${widthInches}" x ${heightInches}" / ${widthMm} x ${heightMm} mm)`,
-          isEncrypted: false,
+          isEncrypted,
+          language,
+          description,
+          rights,
+          trapped: info.Trapped || '',
+          permissions,
         });
       } catch (error) {
         console.error('Failed to extract metadata:', error);
@@ -123,6 +166,11 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
         { label: 'PDF Version', value: metadata.pdfVersion },
         { label: 'Pages', value: String(metadata.pageCount) },
         { label: 'Page Size', value: metadata.pageDimensions },
+        { label: 'Language', value: metadata.language || '' },
+        { label: 'Description', value: metadata.description || '' },
+        { label: 'Rights', value: metadata.rights || '' },
+        { label: 'Trapped', value: metadata.trapped || '' },
+        { label: 'Encrypted', value: metadata.isEncrypted ? 'Yes' : 'No' },
       ].filter((p) => p.value)
     : [];
 
@@ -133,16 +181,34 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
           Loading properties...
         </div>
       ) : (
-        <div className="doc-properties-grid">
-          {properties.map((prop) => (
-            <div key={prop.label} className="doc-property-row">
-              <span className="doc-property-label">{prop.label}</span>
-              <span className="doc-property-value" title={prop.value}>
-                {prop.value}
-              </span>
+        <>
+          <div className="doc-properties-grid">
+            {properties.map((prop) => (
+              <div key={prop.label} className="doc-property-row">
+                <span className="doc-property-label">{prop.label}</span>
+                <span className="doc-property-value" title={prop.value}>
+                  {prop.value}
+                </span>
+              </div>
+            ))}
+          </div>
+          {metadata?.permissions && metadata.permissions.length > 0 && (
+            <div className="doc-properties-grid" style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)' }}>
+              <div className="doc-property-row" style={{ gridColumn: '1 / -1', fontWeight: 600, marginBottom: '4px' }}>
+                Security & Permissions
+              </div>
+              {metadata.permissions.map((perm) => {
+                const [name, value] = perm.split(': ');
+                return (
+                  <div key={name} className="doc-property-row">
+                    <span className="doc-property-label">{name}</span>
+                    <span className="doc-property-value">{value}</span>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </Modal>
   );

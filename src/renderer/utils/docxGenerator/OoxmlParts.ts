@@ -19,6 +19,7 @@
 
 import type {
   PageLayout,
+  LayoutElement,
   DetectedTable,
   DetectedCell,
   ParagraphGroup,
@@ -45,6 +46,7 @@ import {
   generateTextFieldRuns,
   generateCheckBoxRuns,
   generateDropdownRuns,
+  type HyperlinkCollector,
 } from './OoxmlUtils';
 
 // Re-export escXml for backward compatibility
@@ -68,8 +70,14 @@ function variance(nums: number[]): number {
 
 /**
  * Generate [Content_Types].xml
+ *
+ * @param images       Image files for MIME type detection
+ * @param extraParts   Optional flags for additional DOCX parts
  */
-export function generateContentTypes(images: ImageFile[]): string {
+export function generateContentTypes(
+  images: ImageFile[],
+  extraParts?: { hasHeader?: boolean; hasFooter?: boolean; hasNumbering?: boolean },
+): string {
   const hasJpeg = images.some(img => img.mimeType === 'image/jpeg');
   const hasPng = images.some(img => img.mimeType === 'image/png');
 
@@ -87,6 +95,15 @@ export function generateContentTypes(images: ImageFile[]): string {
   xml += '  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
   xml += '  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>\n';
   xml += '  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>\n';
+  if (extraParts?.hasHeader) {
+    xml += '  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>\n';
+  }
+  if (extraParts?.hasFooter) {
+    xml += '  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>\n';
+  }
+  if (extraParts?.hasNumbering) {
+    xml += '  <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>\n';
+  }
   xml += '</Types>';
   return xml;
 }
@@ -102,10 +119,21 @@ export function generateRootRels(): string {
   return xml;
 }
 
+/** An extra relationship entry for header/footer/hyperlink/numbering parts */
+export interface ExtraRel {
+  rId: string;
+  type: string;
+  target: string;
+  targetMode?: 'External';
+}
+
 /**
  * Generate word/_rels/document.xml.rels
+ *
+ * @param images     Image files with rId references
+ * @param extraRels  Additional relationships (header, footer, hyperlinks, numbering)
  */
-export function generateDocumentRels(images: ImageFile[]): string {
+export function generateDocumentRels(images: ImageFile[], extraRels?: ExtraRel[]): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   xml += '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
@@ -114,6 +142,13 @@ export function generateDocumentRels(images: ImageFile[]): string {
 
   for (const img of images) {
     xml += `  <Relationship Id="${img.rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.fileName}"/>\n`;
+  }
+
+  if (extraRels) {
+    for (const rel of extraRels) {
+      const targetMode = rel.targetMode ? ` TargetMode="${rel.targetMode}"` : '';
+      xml += `  <Relationship Id="${rel.rId}" Type="${rel.type}" Target="${escXml(rel.target)}"${targetMode}/>\n`;
+    }
   }
 
   xml += '</Relationships>';
@@ -130,11 +165,15 @@ export function generateDocumentRels(images: ImageFile[]): string {
  * Consumes PageLayout[] from the LayoutAnalyzer. Each layout contains
  * interleaved tables, paragraphs, and images already sorted by Y position.
  * Pure DrawingML output — no VML, no mc:AlternateContent.
+ *
+ * @param sectionRefs  Optional header/footer rId references for section properties
  */
 export function generateDocumentXml(
   layouts: PageLayout[],
   images: ImageFile[],
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  sectionRefs?: { headerRId?: string; footerRId?: string },
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += `<w:document ${DOC_NS}>\n`;
@@ -154,13 +193,13 @@ export function generateDocumentXml(
     // Elements are already sorted by Y position by the LayoutAnalyzer
     for (const elem of layout.elements) {
       if (elem.type === 'table') {
-        xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector);
+        xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector, hyperlinkCollector);
       } else if (elem.type === 'paragraph') {
-        xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt);
+        xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt, layout.width, hyperlinkCollector);
       } else if (elem.type === 'image') {
         xml += generateImageXml(elem.element, images);
       } else if (elem.type === 'two-column') {
-        xml += generateTwoColumnXml(elem.element, images, normalStyle, styleCollector, pageLeftMarginPt);
+        xml += generateTwoColumnXml(elem.element, images, normalStyle, styleCollector, pageLeftMarginPt, hyperlinkCollector);
       }
     }
 
@@ -195,6 +234,12 @@ export function generateDocumentXml(
   }
 
   xml += '<w:sectPr>\n';
+  if (sectionRefs?.headerRId) {
+    xml += `  <w:headerReference w:type="default" r:id="${sectionRefs.headerRId}"/>\n`;
+  }
+  if (sectionRefs?.footerRId) {
+    xml += `  <w:footerReference w:type="default" r:id="${sectionRefs.footerRId}"/>\n`;
+  }
   xml += `  <w:pgSz w:w="${pgW}" w:h="${pgH}"/>\n`;
   xml += `  <w:pgMar w:top="${marginTopTwips}" w:right="${marginRightTwips}" w:bottom="${marginBottomTwips}" w:left="${marginLeftTwips}" w:header="720" w:footer="720" w:gutter="0"/>\n`;
   xml += '  <w:cols w:space="720"/>\n';
@@ -222,7 +267,8 @@ function generateTableFromDetected(
   table: DetectedTable,
   _images: ImageFile[],
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   let xml = '<w:tbl>\n';
 
@@ -391,7 +437,7 @@ function generateTableFromDetected(
       xml += '      </w:tcPr>\n';
 
       // Cell content: texts grouped into paragraphs by Y baseline, with form fields inline
-      const cellContent = renderCellContent(cell, normalStyle, styleCollector);
+      const cellContent = renderCellContent(cell, normalStyle, styleCollector, hyperlinkCollector);
       if (cellContent.length === 0) {
         xml += '      <w:p/>\n';
       } else {
@@ -446,7 +492,8 @@ function computeCellWidthTwips(columnWidths: number[], startCol: number, colSpan
 function renderCellContent(
   cell: DetectedCell,
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   if (cell.texts.length === 0 && cell.formFields.length === 0) {
     return '';
@@ -512,7 +559,7 @@ function renderCellContent(
     }
 
     // Build runs from text elements on this line
-    xml += renderTextRunsFromElements(lineTexts, normalStyle, styleCollector);
+    xml += renderTextRunsFromElements(lineTexts, normalStyle, styleCollector, hyperlinkCollector);
 
     // Emit "after" form fields
     for (const ff of fields) {
@@ -556,6 +603,8 @@ function generateParagraphGroupXml(
   normalStyle: DocxStyle,
   styleCollector: StyleCollector,
   pageLeftMarginPt: number = 72,
+  pageWidthPt: number = 612,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   if (group.texts.length === 0 && group.formFields.length === 0) {
     return '<w:p/>\n';
@@ -664,19 +713,23 @@ function generateParagraphGroupXml(
 
     // Right indent: compute from right edge vs page right margin
     let rightIndentTwips = 0;
-    if (group.rightX && pageLeftMarginPt > 0) {
-      // Approximate page content width from scene width minus margins
-      // We don't have scene width here, but we can detect right indent
-      // if the paragraph right edge is significantly inset from the maximum right
-      // (This is an approximation; exact right margin would need page width)
+    if (group.rightX && pageWidthPt > 0) {
+      const pageRightMarginPt = pageLeftMarginPt; // assume symmetric margins
+      const contentRightEdgePt = pageWidthPt - pageRightMarginPt;
+      const rightInsetPt = contentRightEdgePt - group.rightX;
+      if (rightInsetPt > 10) {
+        rightIndentTwips = Math.round(rightInsetPt * PT_TO_TWIPS);
+      }
     }
 
     // Paragraph properties (heading style, alignment, indentation, spacing, background, borders)
     const needsPPr = group.headingLevel || alignment !== 'left' || hasIndent
       || firstLineIndentTwips > 0 || hangingTwips > 0
+      || rightIndentTwips > 0
       || lineSpacingTwips > 0
       || spacingBeforeTwips > 0 || spacingAfterTwips > 0
-      || group.backgroundColor || group.bottomBorder;
+      || group.backgroundColor || group.bottomBorder
+      || group.listType;
     if (needsPPr) {
       xml += '  <w:pPr>\n';
       if (group.headingLevel) {
@@ -686,9 +739,18 @@ function generateParagraphGroupXml(
         const jcVal = alignment === 'justify' ? 'both' : alignment;
         xml += `    <w:jc w:val="${jcVal}"/>\n`;
       }
-      if (hasIndent || firstLineIndentTwips > 0 || hangingTwips > 0) {
+      if (group.listType && group.numId !== undefined) {
+        xml += '    <w:numPr>\n';
+        xml += `      <w:ilvl w:val="${group.listLevel ?? 0}"/>\n`;
+        xml += `      <w:numId w:val="${group.numId}"/>\n`;
+        xml += '    </w:numPr>\n';
+      }
+      if (hasIndent || firstLineIndentTwips > 0 || hangingTwips > 0 || rightIndentTwips > 0) {
         const leftTwips = hasIndent ? Math.round(leftIndentPt * PT_TO_TWIPS) : 0;
         let indAttr = `w:left="${leftTwips}"`;
+        if (rightIndentTwips > 0) {
+          indAttr += ` w:right="${rightIndentTwips}"`;
+        }
         if (firstLineIndentTwips > 0) {
           indAttr += ` w:firstLine="${firstLineIndentTwips}"`;
         } else if (hangingTwips > 0) {
@@ -736,7 +798,7 @@ function generateParagraphGroupXml(
       if (li > 0) {
         xml += '  <w:r><w:t xml:space="preserve"> </w:t></w:r>\n';
       }
-      xml += renderTextRunsFromElements(paraLines[li], normalStyle, styleCollector);
+      xml += renderTextRunsFromElements(paraLines[li], normalStyle, styleCollector, hyperlinkCollector);
     }
 
     // Emit "after" form fields
@@ -870,7 +932,8 @@ function generateImageXml(image: ImageElement, images: ImageFile[]): string {
   xml += '    <w:drawing>\n';
   xml += `      <wp:inline distT="0" distB="0" distL="0" distR="0">\n`;
   xml += `        <wp:extent cx="${widthEmu}" cy="${heightEmu}"/>\n`;
-  xml += `        <wp:docPr id="${n}" name="Picture ${n}"/>\n`;
+  const altDescr = image.altText ? ` descr="${escXml(image.altText)}"` : '';
+  xml += `        <wp:docPr id="${n}" name="Picture ${n}"${altDescr}/>\n`;
   xml += '        <a:graphic>\n';
   xml += '          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">\n';
   xml += '            <pic:pic>\n';
@@ -914,6 +977,7 @@ function generateTwoColumnXml(
   normalStyle: DocxStyle,
   styleCollector: StyleCollector,
   pageLeftMarginPt: number = 72,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   // Compute column widths from gapX and actual page margins
   const marginPt = pageLeftMarginPt;
@@ -953,7 +1017,7 @@ function generateTwoColumnXml(
   xml += '      <w:tcPr>\n';
   xml += `        <w:tcW w:w="${leftWidthTwips}" w:type="dxa"/>\n`;
   xml += '      </w:tcPr>\n';
-  const leftContent = renderColumnContent(region.leftElements, images, normalStyle, styleCollector, pageLeftMarginPt);
+  const leftContent = renderColumnContent(region.leftElements, images, normalStyle, styleCollector, pageLeftMarginPt, hyperlinkCollector);
   xml += leftContent || '      <w:p/>\n';
   xml += '    </w:tc>\n';
 
@@ -962,7 +1026,7 @@ function generateTwoColumnXml(
   xml += '      <w:tcPr>\n';
   xml += `        <w:tcW w:w="${rightWidthTwips}" w:type="dxa"/>\n`;
   xml += '      </w:tcPr>\n';
-  const rightContent = renderColumnContent(region.rightElements, images, normalStyle, styleCollector, pageLeftMarginPt);
+  const rightContent = renderColumnContent(region.rightElements, images, normalStyle, styleCollector, pageLeftMarginPt, hyperlinkCollector);
   xml += rightContent || '      <w:p/>\n';
   xml += '    </w:tc>\n';
 
@@ -984,18 +1048,19 @@ function renderColumnContent(
   normalStyle: DocxStyle,
   styleCollector: StyleCollector,
   pageLeftMarginPt: number = 72,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   let xml = '';
   let lastType: string = '';
   for (const elem of elements) {
     if (elem.type === 'paragraph') {
-      xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt);
+      xml += generateParagraphGroupXml(elem.element, normalStyle, styleCollector, pageLeftMarginPt, undefined, hyperlinkCollector);
       lastType = 'paragraph';
     } else if (elem.type === 'image') {
       xml += generateImageXml(elem.element, images);
       lastType = 'image';
     } else if (elem.type === 'table') {
-      xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector);
+      xml += generateTableFromDetected(elem.element, images, normalStyle, styleCollector, hyperlinkCollector);
       lastType = 'table';
     }
   }
@@ -1003,6 +1068,135 @@ function renderColumnContent(
   if (lastType === 'table') {
     xml += '      <w:p/>\n';
   }
+  return xml;
+}
+
+// ────────────────────────────────────────────────────────────
+// Numbering XML generation (bullet & numbered lists)
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Generate word/numbering.xml with bullet and numbered list definitions.
+ *
+ * Defines two abstract numbering schemes:
+ *   - abstractNumId 0: bullet list (alternating bullet chars across 9 levels)
+ *   - abstractNumId 1: decimal numbered list (cycling decimal/lowerLetter/lowerRoman)
+ *
+ * Concrete numbering instances:
+ *   - numId 1 → bullets (abstractNumId 0)
+ *   - numId 2 → numbers (abstractNumId 1)
+ */
+export function generateNumberingXml(): string {
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  xml += '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n';
+
+  // Abstract numbering 0: bullet list (9 levels, alternating bullet chars)
+  xml += '  <w:abstractNum w:abstractNumId="0">\n';
+  const bulletChars = ['\u2022', '\u25E6', '\u25AA', '\u2022', '\u25E6', '\u25AA', '\u2022', '\u25E6', '\u25AA'];
+  for (let lvl = 0; lvl < 9; lvl++) {
+    const indent = 720 + lvl * 360; // 720 twips base + 360 per level
+    xml += `    <w:lvl w:ilvl="${lvl}">\n`;
+    xml += '      <w:start w:val="1"/>\n';
+    xml += '      <w:numFmt w:val="bullet"/>\n';
+    xml += `      <w:lvlText w:val="${bulletChars[lvl]}"/>\n`;
+    xml += '      <w:lvlJc w:val="left"/>\n';
+    xml += `      <w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr>\n`;
+    xml += '      <w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/></w:rPr>\n';
+    xml += '    </w:lvl>\n';
+  }
+  xml += '  </w:abstractNum>\n';
+
+  // Abstract numbering 1: decimal numbered list (cycling decimal/lowerLetter/lowerRoman)
+  xml += '  <w:abstractNum w:abstractNumId="1">\n';
+  const numFormats = ['decimal', 'lowerLetter', 'lowerRoman', 'decimal', 'lowerLetter', 'lowerRoman', 'decimal', 'lowerLetter', 'lowerRoman'];
+  const numTexts = ['%1.', '%2.', '%3.', '%4.', '%5.', '%6.', '%7.', '%8.', '%9.'];
+  for (let lvl = 0; lvl < 9; lvl++) {
+    const indent = 720 + lvl * 360;
+    xml += `    <w:lvl w:ilvl="${lvl}">\n`;
+    xml += '      <w:start w:val="1"/>\n';
+    xml += `      <w:numFmt w:val="${numFormats[lvl]}"/>\n`;
+    xml += `      <w:lvlText w:val="${numTexts[lvl]}"/>\n`;
+    xml += '      <w:lvlJc w:val="left"/>\n';
+    xml += `      <w:pPr><w:ind w:left="${indent}" w:hanging="360"/></w:pPr>\n`;
+    xml += '    </w:lvl>\n';
+  }
+  xml += '  </w:abstractNum>\n';
+
+  // Concrete numbering instances
+  xml += '  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>\n'; // bullets
+  xml += '  <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>\n'; // numbers
+
+  xml += '</w:numbering>';
+  return xml;
+}
+
+// ────────────────────────────────────────────────────────────
+// Header / Footer XML generation
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Generate word/header1.xml from header text elements.
+ *
+ * Renders header texts as simple paragraphs with center alignment.
+ * Uses the same text run rendering pipeline as body paragraphs.
+ */
+export function generateHeaderXml(
+  texts: TextElement[],
+  styleCollector: StyleCollector,
+): string {
+  const normalStyle = styleCollector.getNormalStyle();
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  xml += `<w:hdr ${DOC_NS}>\n`;
+
+  if (texts.length === 0) {
+    xml += '  <w:p/>\n';
+  } else {
+    // Group texts by baseline into lines
+    const lines = groupTextsByBaseline(texts);
+    for (const line of lines) {
+      xml += '  <w:p>\n';
+      xml += '    <w:pPr>\n';
+      xml += '      <w:pStyle w:val="Header"/>\n';
+      xml += '    </w:pPr>\n';
+      xml += renderTextRunsFromElements(line, normalStyle, styleCollector);
+      xml += '  </w:p>\n';
+    }
+  }
+
+  xml += '</w:hdr>';
+  return xml;
+}
+
+/**
+ * Generate word/footer1.xml from footer text elements.
+ *
+ * Renders footer texts as simple paragraphs with center alignment.
+ * Uses the same text run rendering pipeline as body paragraphs.
+ */
+export function generateFooterXml(
+  texts: TextElement[],
+  styleCollector: StyleCollector,
+): string {
+  const normalStyle = styleCollector.getNormalStyle();
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  xml += `<w:ftr ${DOC_NS}>\n`;
+
+  if (texts.length === 0) {
+    xml += '  <w:p/>\n';
+  } else {
+    // Group texts by baseline into lines
+    const lines = groupTextsByBaseline(texts);
+    for (const line of lines) {
+      xml += '  <w:p>\n';
+      xml += '    <w:pPr>\n';
+      xml += '      <w:pStyle w:val="Footer"/>\n';
+      xml += '    </w:pPr>\n';
+      xml += renderTextRunsFromElements(line, normalStyle, styleCollector);
+      xml += '  </w:p>\n';
+    }
+  }
+
+  xml += '</w:ftr>';
   return xml;
 }
 
@@ -1088,6 +1282,31 @@ export function generateStylesXml(styleCollector: StyleCollector): string {
     xml += '  </w:style>\n';
   }
 
+  // Header and Footer paragraph styles
+  xml += '  <w:style w:type="paragraph" w:styleId="Header">\n';
+  xml += '    <w:name w:val="header"/>\n';
+  xml += '    <w:basedOn w:val="Normal"/>\n';
+  xml += '    <w:pPr>\n';
+  xml += '      <w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs>\n';
+  xml += '    </w:pPr>\n';
+  xml += '  </w:style>\n';
+  xml += '  <w:style w:type="paragraph" w:styleId="Footer">\n';
+  xml += '    <w:name w:val="footer"/>\n';
+  xml += '    <w:basedOn w:val="Normal"/>\n';
+  xml += '    <w:pPr>\n';
+  xml += '      <w:tabs><w:tab w:val="center" w:pos="4680"/><w:tab w:val="right" w:pos="9360"/></w:tabs>\n';
+  xml += '    </w:pPr>\n';
+  xml += '  </w:style>\n';
+
+  // Hyperlink character style
+  xml += '  <w:style w:type="character" w:styleId="Hyperlink">\n';
+  xml += '    <w:name w:val="Hyperlink"/>\n';
+  xml += '    <w:rPr>\n';
+  xml += '      <w:color w:val="0563C1"/>\n';
+  xml += '      <w:u w:val="single"/>\n';
+  xml += '    </w:rPr>\n';
+  xml += '  </w:style>\n';
+
   // Only emit styles that are actually used and differ from Normal
   for (const style of usedStyles) {
     xml += `  <w:style w:type="character" w:customStyle="1" w:styleId="${escXml(style.id)}">\n`;
@@ -1142,19 +1361,63 @@ export function generateSettingsXml(hasFormFields: boolean = false): string {
   return xml;
 }
 
+/** Font metadata for accurate font table generation */
+interface FontMetadata {
+  panose: string;
+  family: string;
+  charset: string;
+  pitch: string;
+}
+
+/** Known font metadata for common fonts */
+const FONT_METADATA: Record<string, FontMetadata> = {
+  'Arial':           { panose: '020B0604020202020204', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Times New Roman': { panose: '02020603050405020304', family: 'roman', charset: '00', pitch: 'variable' },
+  'Courier New':     { panose: '02070309020205020404', family: 'modern', charset: '00', pitch: 'fixed' },
+  'Calibri':         { panose: '020F0502020204030204', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Cambria':         { panose: '02040503050406030204', family: 'roman', charset: '00', pitch: 'variable' },
+  'Verdana':         { panose: '020B0604030504040204', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Georgia':         { panose: '02040502050405020303', family: 'roman', charset: '00', pitch: 'variable' },
+  'Tahoma':          { panose: '020B0604030504040204', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Consolas':        { panose: '020B0609020204030204', family: 'modern', charset: '00', pitch: 'fixed' },
+  'Symbol':          { panose: '05050102010706020507', family: 'roman', charset: '02', pitch: 'variable' },
+  'Wingdings':       { panose: '05000000000000000000', family: 'auto', charset: '02', pitch: 'variable' },
+  'Segoe UI':        { panose: '020B0502040204020203', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Segoe UI Symbol': { panose: '020B0502040204020203', family: 'swiss', charset: '00', pitch: 'variable' },
+  'Helvetica':       { panose: '020B0604020202020204', family: 'swiss', charset: '00', pitch: 'variable' },
+};
+
+/** Infer font family classification from font name heuristics */
+function inferFontFamily(fontName: string): FontMetadata {
+  const lower = fontName.toLowerCase();
+  if (lower.includes('mono') || lower.includes('courier') || lower.includes('consolas') || lower.includes('code')) {
+    return { panose: '02070309020205020404', family: 'modern', charset: '00', pitch: 'fixed' };
+  }
+  if (lower.includes('times') || lower.includes('serif') || lower.includes('georgia') || lower.includes('cambria') || lower.includes('garamond') || lower.includes('palatino')) {
+    return { panose: '02020603050405020304', family: 'roman', charset: '00', pitch: 'variable' };
+  }
+  if (lower.includes('script') || lower.includes('cursive') || lower.includes('handwrit')) {
+    return { panose: '03050502040302020204', family: 'script', charset: '00', pitch: 'variable' };
+  }
+  // Default: sans-serif / swiss
+  return { panose: '020F0502020204030204', family: 'swiss', charset: '00', pitch: 'variable' };
+}
+
 /**
  * Generate word/fontTable.xml with only used fonts.
+ * Uses accurate per-font metadata (panose, family, charset, pitch).
  */
 export function generateFontTableXml(fonts: string[]): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n';
 
   for (const font of fonts) {
+    const meta = FONT_METADATA[font] || inferFontFamily(font);
     xml += `  <w:font w:name="${escXml(font)}">\n`;
-    xml += `    <w:panose1 w:val="020F0502020204030204"/>\n`;
-    xml += '    <w:charset w:val="00"/>\n';
-    xml += '    <w:family w:val="swiss"/>\n';
-    xml += '    <w:pitch w:val="variable"/>\n';
+    xml += `    <w:panose1 w:val="${meta.panose}"/>\n`;
+    xml += `    <w:charset w:val="${meta.charset}"/>\n`;
+    xml += `    <w:family w:val="${meta.family}"/>\n`;
+    xml += `    <w:pitch w:val="${meta.pitch}"/>\n`;
     xml += '  </w:font>\n';
   }
 

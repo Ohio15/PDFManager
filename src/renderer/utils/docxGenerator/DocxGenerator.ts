@@ -39,7 +39,12 @@ import {
   generateStylesXml,
   generateSettingsXml,
   generateFontTableXml,
+  generateHeaderXml,
+  generateFooterXml,
+  generateNumberingXml,
+  type ExtraRel,
 } from './OoxmlParts';
+import { createHyperlinkCollector } from './OoxmlUtils';
 import { generatePositionedDocumentXml } from './PositionedOoxmlParts';
 
 // Ensure pdfjs worker is configured
@@ -62,7 +67,7 @@ function findBgColor(
   x: number, y: number, w: number, h: number,
   filledRects: Array<import('./types').RectElement>,
 ): string {
-  let bestArea = 0;
+  let bestArea = Infinity;
   let bgColor = '#ffffff';
   for (const rect of filledRects) {
     // Check if the rect contains the target area (with tolerance)
@@ -73,7 +78,7 @@ function findBgColor(
       y + h <= rect.y + rect.height + 2
     ) {
       const area = rect.width * rect.height;
-      if (area > bestArea) {
+      if (area < bestArea) {
         bestArea = area;
         const c = rect.fillColor!;
         bgColor = `rgb(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)})`;
@@ -445,6 +450,9 @@ export async function generateDocx(
   let documentXml: string;
   let allImages: ImageFile[];
   let uniqueImages: ImageFile[];
+  let headerXml: string | undefined;
+  let footerXml: string | undefined;
+  let flowExtraRels: ExtraRel[] | undefined;
 
   if (conversionMode === 'positioned') {
     // ─── POSITIONED MODE: Skip LayoutAnalyzer, use scenes directly ─
@@ -510,15 +518,104 @@ export async function generateDocx(
     allImages = collected.allImages;
     uniqueImages = collected.uniqueImages;
 
+    // Collect header/footer texts from first page with content (most common pattern)
+    let headerTexts: import('./types').TextElement[] | undefined;
+    let footerTexts: import('./types').TextElement[] | undefined;
+    for (const layout of layouts) {
+      if (!headerTexts && layout.headerTexts && layout.headerTexts.length > 0) {
+        headerTexts = layout.headerTexts;
+      }
+      if (!footerTexts && layout.footerTexts && layout.footerTexts.length > 0) {
+        footerTexts = layout.footerTexts;
+      }
+      if (headerTexts && footerTexts) break;
+    }
+
+    // Compute rIds for header/footer parts (after images)
+    const extraRels: ExtraRel[] = [];
+    const sectionRefs: { headerRId?: string; footerRId?: string } = {};
+    let nextExtraRId = 4 + uniqueImages.length;
+
+    if (headerTexts && headerTexts.length > 0) {
+      const rId = `rId${nextExtraRId++}`;
+      extraRels.push({
+        rId,
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header',
+        target: 'header1.xml',
+      });
+      sectionRefs.headerRId = rId;
+    }
+    if (footerTexts && footerTexts.length > 0) {
+      const rId = `rId${nextExtraRId++}`;
+      extraRels.push({
+        rId,
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer',
+        target: 'footer1.xml',
+      });
+      sectionRefs.footerRId = rId;
+    }
+
+    // Detect if any paragraphs have list formatting
+    let hasLists = false;
+    for (const layout of layouts) {
+      for (const el of layout.elements) {
+        if (el.type === 'paragraph' && el.element.listType) {
+          hasLists = true;
+          break;
+        }
+        if (el.type === 'two-column') {
+          const allCols = [...el.element.leftElements, ...el.element.rightElements];
+          for (const col of allCols) {
+            if (col.type === 'paragraph' && col.element.listType) {
+              hasLists = true;
+              break;
+            }
+          }
+        }
+        if (hasLists) break;
+      }
+      if (hasLists) break;
+    }
+
+    // Add numbering relationship if lists were detected
+    if (hasLists) {
+      extraRels.push({
+        rId: `rId${nextExtraRId++}`,
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering',
+        target: 'numbering.xml',
+      });
+    }
+
     // Phase 5b: Generate flow document XML
-    documentXml = generateDocumentXml(layouts, allImages, styleCollector);
+    // Create a hyperlink collector starting after all other rIds
+    const hyperlinkCollector = createHyperlinkCollector(nextExtraRId);
+    documentXml = generateDocumentXml(layouts, allImages, styleCollector, sectionRefs, hyperlinkCollector);
+
+    // Collect hyperlink relationships from the document generation pass
+    const hyperlinks = hyperlinkCollector.getHyperlinks();
+    for (const hl of hyperlinks) {
+      extraRels.push({
+        rId: hl.rId,
+        type: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        target: hl.uri,
+        targetMode: 'External',
+      });
+    }
+
+    // Generate header/footer XML parts
+    headerXml = headerTexts ? generateHeaderXml(headerTexts, styleCollector) : undefined;
+    footerXml = footerTexts ? generateFooterXml(footerTexts, styleCollector) : undefined;
+    flowExtraRels = extraRels.length > 0 ? extraRels : undefined;
   }
 
   // ─── Generate remaining OOXML parts and package (SHARED) ─
 
-  const contentTypes = generateContentTypes(allImages);
+  const hasHeader = !!headerXml;
+  const hasFooter = !!footerXml;
+  const hasNumbering = flowExtraRels?.some(r => r.target === 'numbering.xml') ?? false;
+  const contentTypes = generateContentTypes(allImages, { hasHeader, hasFooter, hasNumbering });
   const rootRels = generateRootRels();
-  const documentRels = generateDocumentRels(uniqueImages);
+  const documentRels = generateDocumentRels(uniqueImages, flowExtraRels);
   const stylesXml = generateStylesXml(styleCollector);
   const settingsXml = generateSettingsXml(hasFormFields);
   const fontTableXml = generateFontTableXml(styleCollector.getUsedFonts());
@@ -532,6 +629,19 @@ export async function generateDocx(
   zip.addFileString('word/styles.xml', stylesXml);
   zip.addFileString('word/settings.xml', settingsXml);
   zip.addFileString('word/fontTable.xml', fontTableXml);
+
+  // Add header/footer parts if present
+  if (headerXml) {
+    zip.addFileString('word/header1.xml', headerXml);
+  }
+  if (footerXml) {
+    zip.addFileString('word/footer1.xml', footerXml);
+  }
+
+  // Add numbering.xml if lists were detected
+  if (hasNumbering) {
+    zip.addFileString('word/numbering.xml', generateNumberingXml());
+  }
 
   // Add image media files (only unique images -- deduped by content hash)
   for (const img of uniqueImages) {

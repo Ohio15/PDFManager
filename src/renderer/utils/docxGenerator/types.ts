@@ -56,6 +56,12 @@ export interface TextElement {
   isArtifact?: boolean;
   /** Role from structure tree or marked content */
   structRole?: string;
+  /** Rotation angle in degrees (from text matrix) */
+  rotation?: number;
+  /** Hyperlink URI if this text overlaps a Link annotation */
+  linkUri?: string;
+  /** Language tag from structure tree (e.g., "en-US") */
+  lang?: string;
 }
 
 /** A filled/stroked rectangle */
@@ -104,6 +110,8 @@ export interface ImageElement {
   intrinsicHeight: number;
   /** true = real photo/diagram, false = UI chrome */
   isGenuine: boolean;
+  /** Alt text from structure tree Figure node */
+  altText?: string;
   /** Original bytes (JPEG or PNG), null if extraction failed */
   data: Uint8Array | null;
   mimeType: 'image/jpeg' | 'image/png';
@@ -154,6 +162,8 @@ export interface PageScene {
   formFields: FormField[];
   width: number;
   height: number;
+  /** Hyperlink annotations extracted from the page */
+  links?: Array<{ rect: { x: number; y: number; width: number; height: number }; uri: string }>;
 }
 
 // ─── Layout Types (from LayoutAnalyzer) ────────────────────────
@@ -233,6 +243,14 @@ export interface ParagraphGroup {
   spacingAfterPt?: number;
   /** Right edge X position in PDF points (for right indent calculation) */
   rightX?: number;
+  /** Detected list type: bullet or number */
+  listType?: 'bullet' | 'number';
+  /** List nesting level (0 = top-level) */
+  listLevel?: number;
+  /** Original list marker text before stripping */
+  listMarker?: string;
+  /** OOXML numbering definition ID */
+  numId?: number;
 }
 
 /** A two-column region detected from side-by-side paragraph groups */
@@ -265,6 +283,10 @@ export interface PageLayout {
   height: number;
   /** Bounding box of all content on the page in PDF points */
   contentBounds?: { left: number; top: number; right: number; bottom: number };
+  /** Header text elements filtered from artifacts */
+  headerTexts?: TextElement[];
+  /** Footer text elements filtered from artifacts */
+  footerTexts?: TextElement[];
 }
 
 // ─── DOCX Run / Paragraph Types (used by OoxmlParts) ──────────

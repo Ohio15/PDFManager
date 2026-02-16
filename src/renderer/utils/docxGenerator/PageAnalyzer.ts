@@ -26,6 +26,7 @@ import type {
   PageScene,
   RGB,
 } from './types';
+import { mapFontName } from './OoxmlUtils';
 
 // ─── pdfjs-dist OPS constants ─────────────────────────────────────
 
@@ -141,57 +142,8 @@ function normalizeColorComponent(v: number): number {
 
 // ─── Font Resolution ──────────────────────────────────────────────
 
-/** Common PDF font name -> Word-safe font name */
-const FONT_MAP: Record<string, string> = {
-  'ArialMT': 'Arial',
-  'Arial-BoldMT': 'Arial',
-  'Arial-ItalicMT': 'Arial',
-  'Arial-BoldItalicMT': 'Arial',
-  'TimesNewRomanPSMT': 'Times New Roman',
-  'TimesNewRomanPS-BoldMT': 'Times New Roman',
-  'TimesNewRomanPS-ItalicMT': 'Times New Roman',
-  'TimesNewRomanPS-BoldItalicMT': 'Times New Roman',
-  'CourierNewPSMT': 'Courier New',
-  'CourierNewPS-BoldMT': 'Courier New',
-  'Helvetica': 'Arial',
-  'Helvetica-Bold': 'Arial',
-  'Helvetica-Oblique': 'Arial',
-  'Helvetica-BoldOblique': 'Arial',
-  'Symbol': 'Symbol',
-  'ZapfDingbats': 'Wingdings',
-};
-
-/**
- * Resolve a PDF font name to a Word-safe family name.
- * Strips subset prefix (ABCDEF+), maps known names, strips style suffixes.
- */
-function resolveFontFamily(pdfFontName: string): string {
-  if (!pdfFontName) return 'Calibri';
-
-  // Strip subset prefix like "BCDFGH+"
-  let name = pdfFontName.replace(/^[A-Z]{6}\+/, '');
-
-  // Check direct mapping first
-  if (FONT_MAP[name]) return FONT_MAP[name];
-
-  // Strip common style suffixes
-  name = name.replace(
-    /[-,](Bold|Italic|BoldItalic|Regular|Medium|Light|Semibold|Condensed|Narrow|Black|Heavy|Thin|ExtraBold|ExtraLight)$/i,
-    ''
-  );
-  name = name.replace(/MT$/, '');
-  name = name.replace(/PS$/, '');
-
-  // Handle hyphenated compound names — if trailing part is a style, drop it
-  if (name.includes('-')) {
-    const parts = name.split('-');
-    if (/^(Bold|Italic|Regular|Medium|Light|Semi|Extra|Condensed)$/i.test(parts[parts.length - 1])) {
-      name = parts.slice(0, -1).join('-');
-    }
-  }
-
-  return name || 'Calibri';
-}
+// Font mapping is centralized in OoxmlUtils.ts (mapFontName).
+// Imported at the top of this file.
 
 /** Detect bold from font name patterns */
 function isBoldFont(fontName: string): boolean {
@@ -2000,6 +1952,9 @@ function convertTextItems(
     const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
     if (fontSize <= 0) continue;
 
+    // Extract rotation angle from text matrix: atan2(b, a) in degrees
+    const rotationDeg = Math.atan2(transform[1], transform[0]) * (180 / Math.PI);
+
     const x = transform[4];
     const height = ti.height || fontSize * 1.2;
     // pdfjs uses bottom-left origin; convert to top-left
@@ -2009,7 +1964,7 @@ function convertTextItems(
     // Resolve internal font name to actual font family
     const rawFontName = ti.fontName || 'default';
     const resolvedFontFamily = fontNameMap[rawFontName] || rawFontName;
-    const mappedFont = resolveFontFamily(resolvedFontFamily);
+    const mappedFont = mapFontName(resolvedFontFamily);
 
     const bold = isBoldFont(resolvedFontFamily);
     const italic = isItalicFont(resolvedFontFamily);
@@ -2062,6 +2017,7 @@ function convertTextItems(
       charSpacing,
       wordSpacing,
       isArtifact,
+      ...(Math.abs(rotationDeg) > 1 ? { rotation: rotationDeg } : {}),
     });
   }
 
@@ -2162,11 +2118,41 @@ export const _testExports = {
   applyTransform,
   cmykToRgb,
   rgbToHex,
-  resolveFontFamily,
+  mapFontName,
   classifyImage,
   isBoldFont,
   isItalicFont,
 };
+
+/**
+ * Extract hyperlink annotations from a PDF page.
+ * Returns link rects in top-left origin coordinate system with their target URIs.
+ */
+async function extractLinks(
+  page: any,
+  pageHeight: number,
+): Promise<Array<{ rect: { x: number; y: number; width: number; height: number }; uri: string }>> {
+  const links: Array<{ rect: { x: number; y: number; width: number; height: number }; uri: string }> = [];
+  try {
+    const annotations = await page.getAnnotations({ intent: 'display' });
+    for (const ann of annotations) {
+      if (ann.subtype !== 'Link' || !ann.url) continue;
+      const [x1, y1, x2, y2] = ann.rect;
+      links.push({
+        rect: {
+          x: Math.min(x1, x2),
+          y: pageHeight - Math.max(y1, y2), // flip to top-left origin
+          width: Math.abs(x2 - x1),
+          height: Math.abs(y2 - y1),
+        },
+        uri: ann.url,
+      });
+    }
+  } catch {
+    // Annotation extraction failed — skip silently
+  }
+  return links;
+}
 
 export async function analyzePage(
   page: any,
@@ -2179,12 +2165,13 @@ export async function analyzePage(
   const pageWidth = viewport.width;
   const pageHeight = viewport.height;
 
-  // Run all three extraction passes in parallel for speed.
-  // They are independent: operator list, text content, and annotations.
-  const [opList, textContent, formFields] = await Promise.all([
+  // Run all four extraction passes in parallel for speed.
+  // They are independent: operator list, text content, annotations, and links.
+  const [opList, textContent, formFields, links] = await Promise.all([
     page.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
     page.getTextContent().catch(() => ({ items: [], styles: {} })),
     extractFormFields(page, pageHeight),
+    extractLinks(page, pageHeight),
   ]);
 
   // Parse operator list for graphics (rects, paths, images) and text color map
@@ -2213,5 +2200,6 @@ export async function analyzePage(
     formFields,
     width: pageWidth,
     height: pageHeight,
+    links: links.length > 0 ? links : undefined,
   };
 }

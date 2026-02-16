@@ -12,6 +12,7 @@ import type {
   DocxStyle,
   RGB,
 } from './types';
+import { PT_TO_EMU } from './types';
 import { StyleCollector } from './StyleCollector';
 
 // ────────────────────────────────────────────────────────────
@@ -197,7 +198,8 @@ export function groupTextsByBaseline(texts: TextElement[]): TextElement[][] {
 export function renderTextRunsFromElements(
   texts: TextElement[],
   normalStyle: DocxStyle,
-  styleCollector: StyleCollector
+  styleCollector: StyleCollector,
+  hyperlinkCollector?: HyperlinkCollector,
 ): string {
   if (texts.length === 0) return '';
 
@@ -211,6 +213,9 @@ export function renderTextRunsFromElements(
     underline: boolean;
     strikethrough: boolean;
     textRise: number;
+    rotation: number; // degrees (0 = normal)
+    lang?: string; // language tag from structure tree
+    linkUri?: string; // hyperlink URI
   }
 
   const runs: RunAccum[] = [];
@@ -223,6 +228,9 @@ export function renderTextRunsFromElements(
     const underline = elem.underline || false;
     const strikethrough = elem.strikethrough || false;
     const textRise = elem.textRise || 0;
+    const rotation = elem.rotation || 0;
+    const lang = elem.lang;
+    const linkUri = elem.linkUri;
 
     // Register with style collector
     styleCollector.registerRun(mappedFont, halfPts, elem.bold, elem.italic, color);
@@ -241,7 +249,7 @@ export function renderTextRunsFromElements(
 
     const text = prefix + elem.text;
 
-    // Try to merge with previous run if same formatting
+    // Try to merge with previous run if same formatting (and same link target)
     if (runs.length > 0) {
       const prev = runs[runs.length - 1];
       if (
@@ -252,7 +260,10 @@ export function renderTextRunsFromElements(
         prev.color === color &&
         prev.underline === underline &&
         prev.strikethrough === strikethrough &&
-        prev.textRise === textRise
+        prev.textRise === textRise &&
+        prev.rotation === rotation &&
+        prev.lang === lang &&
+        prev.linkUri === linkUri
       ) {
         runs[runs.length - 1] = { ...prev, text: prev.text + text };
         continue;
@@ -269,13 +280,34 @@ export function renderTextRunsFromElements(
       underline,
       strikethrough,
       textRise,
+      rotation,
+      lang,
+      linkUri,
     });
   }
 
   // Convert accumulated runs to XML
   let xml = '';
   for (const run of runs) {
+    // Significantly rotated text → DrawingML inline text box with rotation
+    if (Math.abs(run.rotation) > 5) {
+      xml += buildRotatedTextBox(run, normalStyle);
+      continue;
+    }
+
+    // Determine if this run is a hyperlink
+    const isHyperlink = !!run.linkUri && !!hyperlinkCollector;
+    let hyperlinkRId = '';
+    if (isHyperlink) {
+      hyperlinkRId = hyperlinkCollector!.addHyperlink(run.linkUri!);
+      xml += `  <w:hyperlink r:id="${hyperlinkRId}">\n`;
+    }
+
     xml += '  <w:r>\n';
+
+    // For hyperlinks, force blue color and underline via Hyperlink style
+    const effectiveColor = isHyperlink ? '0563C1' : run.color;
+    const effectiveUnderline = isHyperlink ? true : run.underline;
 
     // Run properties — only emit what differs from Normal
     const needsRPr =
@@ -283,13 +315,19 @@ export function renderTextRunsFromElements(
       run.fontSize !== normalStyle.fontSize ||
       run.bold !== normalStyle.bold ||
       run.italic !== normalStyle.italic ||
-      run.color !== normalStyle.color ||
-      run.underline ||
+      effectiveColor !== normalStyle.color ||
+      effectiveUnderline ||
       run.strikethrough ||
-      run.textRise !== 0;
+      run.textRise !== 0 ||
+      !!run.lang ||
+      isHyperlink;
 
     if (needsRPr) {
       xml += '    <w:rPr>\n';
+
+      if (isHyperlink) {
+        xml += '      <w:rStyle w:val="Hyperlink"/>\n';
+      }
 
       if (run.fontName !== normalStyle.fontName) {
         xml += `      <w:rFonts w:ascii="${escXml(run.fontName)}" w:hAnsi="${escXml(run.fontName)}" w:cs="${escXml(run.fontName)}"/>\n`;
@@ -307,7 +345,7 @@ export function renderTextRunsFromElements(
         xml += '      <w:i w:val="0"/>\n';
       }
 
-      if (run.underline) {
+      if (effectiveUnderline) {
         xml += '      <w:u w:val="single"/>\n';
       }
 
@@ -315,8 +353,8 @@ export function renderTextRunsFromElements(
         xml += '      <w:strike/>\n';
       }
 
-      if (run.color !== normalStyle.color) {
-        xml += `      <w:color w:val="${escXml(run.color)}"/>\n`;
+      if (effectiveColor !== normalStyle.color) {
+        xml += `      <w:color w:val="${escXml(effectiveColor)}"/>\n`;
       }
 
       if (run.fontSize !== normalStyle.fontSize) {
@@ -331,13 +369,95 @@ export function renderTextRunsFromElements(
         xml += '      <w:vertAlign w:val="subscript"/>\n';
       }
 
+      // Language tag from structure tree
+      if (run.lang) {
+        xml += `      <w:lang w:val="${escXml(run.lang)}"/>\n`;
+      }
+
       xml += '    </w:rPr>\n';
     }
 
     xml += `    <w:t xml:space="preserve">${escXml(run.text)}</w:t>\n`;
     xml += '  </w:r>\n';
+
+    if (isHyperlink) {
+      xml += '  </w:hyperlink>\n';
+    }
   }
 
+  return xml;
+}
+
+/** Unique counter for rotated text box IDs */
+let rotatedTextBoxIdCounter = 1000;
+
+/**
+ * Build a DrawingML inline text box with rotation for significantly rotated text.
+ * Uses <wps:wsp> (WordprocessingShape) with <a:xfrm rot="..."> for rotation.
+ */
+function buildRotatedTextBox(
+  run: { text: string; fontName: string; fontSize: number; bold: boolean; italic: boolean; color: string; rotation: number },
+  normalStyle: DocxStyle,
+): string {
+  const id = rotatedTextBoxIdCounter++;
+
+  // Estimate text box dimensions from text length and font size
+  const fontSizePt = run.fontSize / 2; // half-points to points
+  const estWidthPt = run.text.length * fontSizePt * 0.6;
+  const estHeightPt = fontSizePt * 1.4;
+  const widthEmu = Math.round(estWidthPt * PT_TO_EMU);
+  const heightEmu = Math.round(estHeightPt * PT_TO_EMU);
+
+  // OOXML rotation is in 60000ths of a degree
+  const rotEmu = Math.round(run.rotation * 60000);
+
+  // Build inner run properties
+  let rPr = '';
+  if (run.fontName !== normalStyle.fontName) {
+    rPr += `<w:rFonts w:ascii="${escXml(run.fontName)}" w:hAnsi="${escXml(run.fontName)}" w:cs="${escXml(run.fontName)}"/>`;
+  }
+  if (run.bold) rPr += '<w:b/>';
+  if (run.italic) rPr += '<w:i/>';
+  if (run.color !== normalStyle.color) {
+    rPr += `<w:color w:val="${escXml(run.color)}"/>`;
+  }
+  if (run.fontSize !== normalStyle.fontSize) {
+    rPr += `<w:sz w:val="${run.fontSize}"/><w:szCs w:val="${run.fontSize}"/>`;
+  }
+  const rPrXml = rPr ? `<w:rPr>${rPr}</w:rPr>` : '';
+
+  let xml = '  <w:r>\n';
+  xml += '    <w:drawing>\n';
+  xml += `      <wp:inline distT="0" distB="0" distL="0" distR="0">\n`;
+  xml += `        <wp:extent cx="${widthEmu}" cy="${heightEmu}"/>\n`;
+  xml += `        <wp:docPr id="${id}" name="RotatedText${id}"/>\n`;
+  xml += '        <a:graphic>\n';
+  xml += '          <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">\n';
+  xml += '            <wps:wsp>\n';
+  xml += '              <wps:cNvSpPr txBox="1"/>\n';
+  xml += '              <wps:spPr>\n';
+  xml += `                <a:xfrm rot="${rotEmu}">\n`;
+  xml += '                  <a:off x="0" y="0"/>\n';
+  xml += `                  <a:ext cx="${widthEmu}" cy="${heightEmu}"/>\n`;
+  xml += '                </a:xfrm>\n';
+  xml += '                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>\n';
+  xml += '                <a:noFill/>\n';
+  xml += '                <a:ln><a:noFill/></a:ln>\n';
+  xml += '              </wps:spPr>\n';
+  xml += '              <wps:txbx>\n';
+  xml += '                <w:txbxContent>\n';
+  xml += '                  <w:p>\n';
+  xml += `                    <w:r>${rPrXml}<w:t xml:space="preserve">${escXml(run.text)}</w:t></w:r>\n`;
+  xml += '                  </w:p>\n';
+  xml += '                </w:txbxContent>\n';
+  xml += '              </wps:txbx>\n';
+  xml += '              <wps:bodyPr wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t"/>\n';
+  xml += '            </wps:wsp>\n';
+  xml += '          </a:graphicData>\n';
+  xml += '        </a:graphic>\n';
+  xml += '      </wp:inline>\n';
+  xml += '    </w:drawing>\n';
+  xml += '  </w:r>\n';
   return xml;
 }
 
@@ -523,4 +643,30 @@ export function generateVisualFormFieldRuns(field: FormField, heightPt: number):
   }
 
   return '';
+}
+
+// ────────────────────────────────────────────────────────────
+// Hyperlink Collection
+// ────────────────────────────────────────────────────────────
+
+export interface HyperlinkCollector {
+  addHyperlink(uri: string): string;  // returns rId, deduplicates same URI
+  getHyperlinks(): Array<{ rId: string; uri: string }>;
+}
+
+export function createHyperlinkCollector(startRId: number): HyperlinkCollector {
+  const map = new Map<string, string>(); // uri -> rId
+  let nextRId = startRId;
+  return {
+    addHyperlink(uri: string): string {
+      const existing = map.get(uri);
+      if (existing) return existing;
+      const rId = `rId${nextRId++}`;
+      map.set(uri, rId);
+      return rId;
+    },
+    getHyperlinks(): Array<{ rId: string; uri: string }> {
+      return Array.from(map.entries()).map(([uri, rId]) => ({ rId, uri }));
+    },
+  };
 }

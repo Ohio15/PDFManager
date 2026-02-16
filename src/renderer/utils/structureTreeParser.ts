@@ -196,3 +196,42 @@ export function getHeadingLevel(role: string): number | undefined {
 export function isArtifactRole(role: string): boolean {
   return role === 'Artifact' || role === 'artifact';
 }
+
+/**
+ * Check if a role represents a table element (Table, TR, TD, TH).
+ */
+export function isTableRole(role: string): boolean {
+  const r = role.toLowerCase();
+  return r === 'table' || r === 'tr' || r === 'td' || r === 'th' || r === 'thead' || r === 'tbody' || r === 'tfoot';
+}
+
+/**
+ * Check if a role represents a figure/image element.
+ */
+export function isFigureRole(role: string): boolean {
+  const r = role.toLowerCase();
+  return r === 'figure' || r === 'image';
+}
+
+/**
+ * Check if a role represents a list element (L, LI, Lbl, LBody).
+ */
+export function isListRole(role: string): boolean {
+  const r = role.toLowerCase();
+  return r === 'l' || r === 'li' || r === 'lbl' || r === 'lbody' || r === 'list';
+}
+
+/**
+ * Walk a structure tree and collect nodes matching a predicate.
+ */
+export function walkTree(
+  node: StructNode,
+  predicate: (n: StructNode) => boolean,
+  results: StructNode[] = [],
+): StructNode[] {
+  if (predicate(node)) results.push(node);
+  for (const child of node.children) {
+    walkTree(child, predicate, results);
+  }
+  return results;
+}

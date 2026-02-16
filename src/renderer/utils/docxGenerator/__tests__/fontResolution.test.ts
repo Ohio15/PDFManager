@@ -1,7 +1,7 @@
 /**
  * Tier 1 Unit Tests: Font Resolution and Text Helpers
  *
- * Tests for resolveFontFamily, isBoldFont, isItalicFont from PageAnalyzer.ts
+ * Tests for mapFontName (centralized in OoxmlUtils), isBoldFont, isItalicFont from PageAnalyzer.ts
  * Tests for escXml from OoxmlParts.ts
  * Tests for sanitizeFieldName from OoxmlParts.ts
  */
@@ -9,64 +9,64 @@ import { describe, test, expect } from 'vitest';
 import { _testExports } from '../PageAnalyzer';
 import { escXml, _testExports as ooxmlExports } from '../OoxmlParts';
 
-const { resolveFontFamily, isBoldFont, isItalicFont } = _testExports;
+const { isBoldFont, isItalicFont } = _testExports;
 const { sanitizeFieldName, mapFontName } = ooxmlExports;
 
-// ─── resolveFontFamily ───────────────────────────────────────
+// ─── mapFontName (centralized font resolution) ─────────────────
 
-describe('resolveFontFamily', () => {
+describe('mapFontName', () => {
   test('maps ArialMT', () => {
-    expect(resolveFontFamily('ArialMT')).toBe('Arial');
+    expect(mapFontName('ArialMT')).toBe('Arial');
   });
 
   test('maps Helvetica', () => {
-    expect(resolveFontFamily('Helvetica')).toBe('Arial');
+    expect(mapFontName('Helvetica')).toBe('Arial');
   });
 
   test('maps Helvetica-Bold', () => {
-    expect(resolveFontFamily('Helvetica-Bold')).toBe('Arial');
+    expect(mapFontName('Helvetica-Bold')).toBe('Arial');
   });
 
   test('maps TimesNewRomanPSMT', () => {
-    expect(resolveFontFamily('TimesNewRomanPSMT')).toBe('Times New Roman');
+    expect(mapFontName('TimesNewRomanPSMT')).toBe('Times New Roman');
   });
 
   test('maps CourierNewPSMT', () => {
-    expect(resolveFontFamily('CourierNewPSMT')).toBe('Courier New');
+    expect(mapFontName('CourierNewPSMT')).toBe('Courier New');
   });
 
   test('strips subset prefix', () => {
-    expect(resolveFontFamily('ABCDEF+ArialMT')).toBe('Arial');
+    expect(mapFontName('ABCDEF+ArialMT')).toBe('Arial');
   });
 
   test('strips subset prefix for Helvetica', () => {
-    expect(resolveFontFamily('BCDFGH+Helvetica')).toBe('Arial');
+    expect(mapFontName('BCDFGH+Helvetica')).toBe('Arial');
   });
 
   test('handles null/undefined', () => {
-    expect(resolveFontFamily(null as any)).toBe('Calibri');
-    expect(resolveFontFamily(undefined as any)).toBe('Calibri');
-    expect(resolveFontFamily('')).toBe('Calibri');
+    expect(mapFontName(null as any)).toBe('Calibri');
+    expect(mapFontName(undefined as any)).toBe('Calibri');
+    expect(mapFontName('')).toBe('Calibri');
   });
 
   test('strips Bold suffix from unknown font', () => {
-    expect(resolveFontFamily('MyCustomFont-Bold')).toBe('MyCustomFont');
+    expect(mapFontName('MyCustomFont-Bold')).toBe('MyCustomFont');
   });
 
   test('strips Italic suffix from unknown font', () => {
-    expect(resolveFontFamily('MyCustomFont-Italic')).toBe('MyCustomFont');
+    expect(mapFontName('MyCustomFont-Italic')).toBe('MyCustomFont');
   });
 
   test('strips MT suffix', () => {
-    expect(resolveFontFamily('SomeFontMT')).toBe('SomeFont');
+    expect(mapFontName('SomeFontMT')).toBe('SomeFont');
   });
 
   test('maps ZapfDingbats', () => {
-    expect(resolveFontFamily('ZapfDingbats')).toBe('Wingdings');
+    expect(mapFontName('ZapfDingbats')).toBe('Wingdings');
   });
 
   test('maps Symbol', () => {
-    expect(resolveFontFamily('Symbol')).toBe('Symbol');
+    expect(mapFontName('Symbol')).toBe('Symbol');
   });
 });
 
@@ -166,23 +166,3 @@ describe('sanitizeFieldName', () => {
   });
 });
 
-// ─── mapFontName (OoxmlParts version) ────────────────────────
-
-describe('mapFontName (OoxmlParts)', () => {
-  test('maps ArialMT', () => {
-    expect(mapFontName('ArialMT')).toBe('Arial');
-  });
-
-  test('maps Helvetica', () => {
-    expect(mapFontName('Helvetica')).toBe('Arial');
-  });
-
-  test('strips subset prefix', () => {
-    expect(mapFontName('ABCDEF+ArialMT')).toBe('Arial');
-  });
-
-  test('handles null/undefined', () => {
-    expect(mapFontName(null as any)).toBe('Calibri');
-    expect(mapFontName('')).toBe('Calibri');
-  });
-});

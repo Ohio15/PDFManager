@@ -162,7 +162,7 @@ export function matchTextColor(
 ): { r: number; g: number; b: number } {
   if (colorMap.length === 0) return { r: 0, g: 0, b: 0 };
 
-  const tolerance = fontSize * 3; // generous tolerance
+  const tolerance = fontSize * 2; // match PageAnalyzer's tolerance
   let bestDist = Infinity;
   let bestColor = { r: 0, g: 0, b: 0 };
 

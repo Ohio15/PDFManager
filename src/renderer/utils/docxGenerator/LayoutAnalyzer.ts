@@ -1952,6 +1952,154 @@ function detectTextDecorations(
 // ─── Test Exports ─────────────────────────────────────────────────
 // ─── Two-Column Detection ──────────────────────────────────
 
+// ─── Borderless Table Detection ──────────────────────────────
+
+/**
+ * Detect borderless tables from aligned text columns across consecutive paragraphs.
+ *
+ * Looks for consecutive single-line paragraphs whose text segments cluster into
+ * the same X-column positions (within tolerance). If 3+ consecutive lines have
+ * matching columns, they form a borderless table.
+ *
+ * @param paragraphs  All paragraph groups from the page
+ * @param structureHints  Optional structure tree hints for validation
+ * @returns Detected borderless tables and the set of consumed paragraph indices
+ */
+function detectBorderlessTables(
+  paragraphs: ParagraphGroup[],
+  _structureHints?: StructNode[],
+): { tables: DetectedTable[]; consumedIndices: Set<number> } {
+  const tables: DetectedTable[] = [];
+  const consumedIndices = new Set<number>();
+  const COLUMN_TOLERANCE = 15; // X tolerance for column alignment
+  const MIN_ROWS = 3; // minimum rows for a borderless table
+  const MIN_COLS = 2; // minimum columns
+
+  // For each paragraph, extract X positions of text segments as "columns"
+  function getColumnPositions(para: ParagraphGroup): number[] {
+    if (para.texts.length === 0) return [];
+    // Group texts by X gap (significant gap = new column)
+    const sorted = [...para.texts].sort((a, b) => a.x - b.x);
+    const cols: number[] = [sorted[0].x];
+    for (let i = 1; i < sorted.length; i++) {
+      const gap = sorted[i].x - (sorted[i - 1].x + sorted[i - 1].width);
+      if (gap > sorted[i].fontSize * 2) {
+        cols.push(sorted[i].x);
+      }
+    }
+    return cols;
+  }
+
+  // Check if two sets of column positions align within tolerance
+  function columnsMatch(colsA: number[], colsB: number[]): boolean {
+    if (colsA.length !== colsB.length || colsA.length < MIN_COLS) return false;
+    for (let i = 0; i < colsA.length; i++) {
+      if (Math.abs(colsA[i] - colsB[i]) > COLUMN_TOLERANCE) return false;
+    }
+    return true;
+  }
+
+  // Scan for runs of consecutive paragraphs with aligned columns
+  let runStart = 0;
+  while (runStart < paragraphs.length) {
+    const baseCols = getColumnPositions(paragraphs[runStart]);
+    if (baseCols.length < MIN_COLS) {
+      runStart++;
+      continue;
+    }
+
+    let runEnd = runStart + 1;
+    while (runEnd < paragraphs.length) {
+      const nextCols = getColumnPositions(paragraphs[runEnd]);
+      if (!columnsMatch(baseCols, nextCols)) break;
+      runEnd++;
+    }
+
+    const runLen = runEnd - runStart;
+    if (runLen >= MIN_ROWS) {
+      // Build a borderless table from this run
+      const runParas = paragraphs.slice(runStart, runEnd);
+      const avgCols = baseCols.map((_, ci) => {
+        const xVals = runParas.map(p => getColumnPositions(p)[ci]);
+        return xVals.reduce((s, v) => s + v, 0) / xVals.length;
+      });
+
+      // Compute column widths from X positions
+      const colWidths: number[] = [];
+      for (let ci = 0; ci < avgCols.length; ci++) {
+        if (ci < avgCols.length - 1) {
+          colWidths.push(avgCols[ci + 1] - avgCols[ci]);
+        } else {
+          // Last column: estimate from text extents
+          const maxRight = Math.max(...runParas.flatMap(p => p.texts.map(t => t.x + t.width)));
+          colWidths.push(maxRight - avgCols[ci]);
+        }
+      }
+
+      // Build cells
+      const cells: DetectedCell[] = [];
+      const rowHeights: number[] = [];
+
+      for (let ri = 0; ri < runParas.length; ri++) {
+        const para = runParas[ri];
+        const sorted = [...para.texts].sort((a, b) => a.x - b.x);
+        const rowHeight = para.texts.length > 0 ? Math.max(...para.texts.map(t => t.height)) : 12;
+        rowHeights.push(rowHeight);
+
+        // Distribute texts into columns by proximity to column X positions
+        for (let ci = 0; ci < avgCols.length; ci++) {
+          const colLeft = avgCols[ci] - COLUMN_TOLERANCE;
+          const colRight = ci < avgCols.length - 1
+            ? avgCols[ci + 1] - COLUMN_TOLERANCE
+            : Infinity;
+
+          const colTexts = sorted.filter(t => t.x >= colLeft && t.x < colRight);
+
+          cells.push({
+            row: ri,
+            col: ci,
+            rowSpan: 1,
+            colSpan: 1,
+            x: avgCols[ci],
+            y: para.y,
+            width: colWidths[ci],
+            height: rowHeight,
+            fillColor: null,
+            texts: colTexts,
+            formFields: [],
+          });
+        }
+      }
+
+      const tableX = Math.min(...avgCols);
+      const tableY = runParas[0].y;
+      const tableHeight = rowHeights.reduce((s, h) => s + h, 0);
+      const tableWidth = colWidths.reduce((s, w) => s + w, 0);
+
+      tables.push({
+        cells,
+        rows: runParas.length,
+        cols: avgCols.length,
+        columnWidths: colWidths,
+        rowHeights,
+        x: tableX,
+        y: tableY,
+        width: tableWidth,
+        height: tableHeight,
+        borderWidthPt: 0, // borderless
+      });
+
+      for (let i = runStart; i < runEnd; i++) {
+        consumedIndices.add(i);
+      }
+    }
+
+    runStart = runEnd;
+  }
+
+  return { tables, consumedIndices };
+}
+
 /** Minimum X gap between columns to trigger two-column detection */
 const TWO_COL_MIN_GAP = 40;
 
@@ -2183,20 +2331,33 @@ export const _testExports = {
  * and filters out paragraphs whose text is entirely marked as artifacts.
  */
 function applyStructureHints(paragraphs: ParagraphGroup[], hints: StructNode[]): void {
-  // Collect heading hints
+  // Collect heading hints, artifact texts, lang hints, and actualText fixes
   const headingHints: Array<{ level: number; text: string }> = [];
   const artifactTexts: string[] = [];
+  const langHints: Array<{ text: string; lang: string }> = [];
+  const actualTextFixes: Array<{ text: string; replacement: string }> = [];
 
   function walkHints(node: StructNode): void {
     const headingLevel = getHeadingLevel(node.role);
     if (headingLevel !== undefined) {
-      // Collect text from children
       const text = collectNodeText(node);
       if (text) headingHints.push({ level: headingLevel, text });
     }
     if (isArtifactRole(node.role)) {
       const text = collectNodeText(node);
       if (text) artifactTexts.push(text.toLowerCase());
+    }
+    // Propagate lang tags
+    if (node.lang) {
+      const text = collectNodeText(node);
+      if (text) langHints.push({ text, lang: node.lang });
+    }
+    // Collect actualText for ligature/garbled text fixes
+    if (node.actualText && node.children.length > 0) {
+      const childText = node.children.map(c => collectNodeText(c)).join('');
+      if (childText && childText !== node.actualText) {
+        actualTextFixes.push({ text: childText, replacement: node.actualText });
+      }
     }
     for (const child of node.children) {
       walkHints(child);
@@ -2213,10 +2374,43 @@ function applyStructureHints(paragraphs: ParagraphGroup[], hints: StructNode[]):
     if (!paraText) continue;
 
     for (const heading of headingHints) {
-      // Check if the paragraph text matches the heading text (fuzzy: one contains the other)
       if (paraText.includes(heading.text) || heading.text.includes(paraText)) {
         para.headingLevel = heading.level;
         break;
+      }
+    }
+
+    // Propagate lang tags to text elements
+    for (const langHint of langHints) {
+      for (const text of para.texts) {
+        if (langHint.text.includes(text.text) || text.text.includes(langHint.text)) {
+          text.lang = langHint.lang;
+        }
+      }
+    }
+
+    // Apply actualText fixes (ligature correction)
+    for (const fix of actualTextFixes) {
+      for (const text of para.texts) {
+        if (text.text === fix.text) {
+          text.text = fix.replacement;
+        }
+      }
+    }
+  }
+
+  // Filter artifact-matching paragraphs (mark texts as artifacts for later filtering)
+  if (artifactTexts.length > 0) {
+    for (const para of paragraphs) {
+      const paraText = para.texts.map(t => t.text).join(' ').trim().toLowerCase();
+      if (!paraText) continue;
+      for (const artifact of artifactTexts) {
+        if (paraText.includes(artifact) || artifact.includes(paraText)) {
+          for (const text of para.texts) {
+            text.isArtifact = true;
+          }
+          break;
+        }
       }
     }
   }
@@ -2231,6 +2425,98 @@ function collectNodeText(node: StructNode): string {
     if (text) parts.push(text);
   }
   return parts.join(' ');
+}
+
+// ─── List Detection ──────────────────────────────────────────
+
+/** Bullet characters commonly used in PDF list items */
+const BULLET_CHARS = new Set(['•', '-', '*', '◦', '▪', '▸', '►', '◆', '★', '→', '‣', '⁃']);
+
+/** Regex patterns for detecting numbered list markers */
+const NUMBER_PATTERNS: RegExp[] = [
+  /^\s*(\d+[.)]\s)/,         // 1. or 1)
+  /^\s*(\(\d+\)\s)/,         // (1)
+  /^\s*([a-zA-Z][.)]\s)/,    // a. or a) or A. or A)
+  /^\s*(\([a-zA-Z]\)\s)/,    // (a) or (A)
+  /^\s*([ivxlcdm]+[.)]\s)/i, // roman numerals: i. ii) iv.
+];
+
+/**
+ * Detect list items among paragraphs using visual heuristics.
+ *
+ * Looks for bullet characters or number patterns at the start of the first
+ * text element. When found, sets `listType`, `listMarker`, `listLevel`,
+ * and `numId` on the paragraph, and strips the marker from the text.
+ *
+ * Consecutive same-type items share a `numId` (1 for bullets, 2 for numbers).
+ * The numId counter resets when the list type changes or a non-list paragraph
+ * interrupts the sequence.
+ */
+function detectLists(paragraphs: ParagraphGroup[]): void {
+  // First pass: detect markers on each paragraph
+  for (const para of paragraphs) {
+    if (para.texts.length === 0) continue;
+    const first = para.texts[0];
+    const text = first.text;
+    if (!text || text.trim().length === 0) continue;
+
+    // Check for bullet characters
+    const trimmed = text.trimStart();
+    if (trimmed.length > 0 && BULLET_CHARS.has(trimmed[0])) {
+      // Verify there's actual content after the bullet
+      const afterBullet = trimmed.slice(1).trimStart();
+      if (afterBullet.length > 0) {
+        para.listType = 'bullet';
+        para.listMarker = trimmed[0];
+        // Strip the marker from the text element
+        const markerEnd = text.indexOf(trimmed[0]) + 1;
+        first.text = text.slice(markerEnd).trimStart();
+        continue;
+      }
+    }
+
+    // Check for number patterns
+    for (const pattern of NUMBER_PATTERNS) {
+      const match = text.match(pattern);
+      if (match) {
+        para.listType = 'number';
+        para.listMarker = match[1].trim();
+        // Strip the matched marker from the text
+        first.text = text.slice(match[0].length).trimStart();
+        break;
+      }
+    }
+  }
+
+  // Second pass: compute list levels based on indent relative to other list items
+  const listItems = paragraphs.filter(p => p.listType);
+  if (listItems.length === 0) return;
+
+  // Find minimum X across all detected list items
+  let minX = Infinity;
+  for (const item of listItems) {
+    if (item.x < minX) minX = item.x;
+  }
+
+  // Assign indent levels
+  for (const item of listItems) {
+    item.listLevel = Math.floor((item.x - minX) / 18);
+  }
+
+  // Third pass: assign numId and group consecutive same-type items
+  let prevType: 'bullet' | 'number' | null = null;
+  for (const para of paragraphs) {
+    if (para.listType) {
+      if (para.listType !== prevType) {
+        // Type changed — start a new group
+        prevType = para.listType;
+      }
+      para.numId = para.listType === 'bullet' ? 1 : 2;
+    } else {
+      // Non-list paragraph breaks the sequence
+      prevType = null;
+    }
+  }
 }
 
 export async function buildPageLayout(scene: PageScene, structureHints?: StructNode[]): Promise<PageLayout> {
@@ -2336,10 +2622,35 @@ export async function buildPageLayout(scene: PageScene, structureHints?: StructN
     }
   }
 
-  // Step 5: Gather remaining (non-table) texts and form fields
+  // Step 4c: Partition artifact texts into header/footer vs body
+  // Artifacts (isArtifact=true) at the top 15% of the page are headers,
+  // at the bottom 15% are footers. Everything else is body text.
+  const headerThreshold = scene.height * 0.15;
+  const footerThreshold = scene.height * 0.85;
+  const headerTexts: TextElement[] = [];
+  const footerTexts: TextElement[] = [];
+  const artifactTextsToFilter = new Set<TextElement>();
+
+  for (const el of scene.elements) {
+    if (el.kind !== 'text') continue;
+    const t = el as TextElement;
+    if (!t.isArtifact) continue;
+    if (consumedTexts.has(t)) continue;
+
+    if (t.y < headerThreshold) {
+      headerTexts.push(t);
+      artifactTextsToFilter.add(t);
+    } else if (t.y > footerThreshold) {
+      footerTexts.push(t);
+      artifactTextsToFilter.add(t);
+    }
+    // Artifacts in the body zone are left as body text (e.g., watermarks)
+  }
+
+  // Step 5: Gather remaining (non-table, non-artifact-header/footer) texts and form fields
   const freeTexts: TextElement[] = [];
   for (const el of scene.elements) {
-    if (el.kind === 'text' && !consumedTexts.has(el as TextElement)) {
+    if (el.kind === 'text' && !consumedTexts.has(el as TextElement) && !artifactTextsToFilter.has(el as TextElement)) {
       freeTexts.push(el as TextElement);
     }
   }
@@ -2359,12 +2670,62 @@ export async function buildPageLayout(scene: PageScene, structureHints?: StructN
     applyStructureHints(paragraphs, structureHints);
   }
 
-  // Step 5b: Apply visual styling from rects to paragraphs
+  // Step 5b: Detect bullet and numbered lists from visual markers
+  detectLists(paragraphs);
+
+  // Step 5c: Apply visual styling from rects to paragraphs
   // Map cell-fill rects (colored backgrounds) and separator rects to paragraphs
   applyRectStylingToParagraphs(paragraphs, rectRoles, scene);
 
-  // Step 5c: Detect underline/strikethrough from thin line geometry
+  // Step 5d: Detect underline/strikethrough from thin line geometry
   detectTextDecorations(paragraphs, scene);
+
+  // Step 5e: Match hyperlink annotations to text elements
+  if (scene.links && scene.links.length > 0) {
+    // Match links to free-standing paragraph texts
+    for (const para of paragraphs) {
+      for (const text of para.texts) {
+        const textCenterX = text.x + text.width / 2;
+        const textCenterY = text.y + text.height / 2;
+        for (const link of scene.links) {
+          if (
+            textCenterX >= link.rect.x - 2 &&
+            textCenterX <= link.rect.x + link.rect.width + 2 &&
+            textCenterY >= link.rect.y - 2 &&
+            textCenterY <= link.rect.y + link.rect.height + 2
+          ) {
+            text.linkUri = link.uri;
+            break;
+          }
+        }
+      }
+    }
+    // Match links to table cell texts
+    for (const table of tables) {
+      for (const cell of table.cells) {
+        for (const text of cell.texts) {
+          const textCenterX = text.x + text.width / 2;
+          const textCenterY = text.y + text.height / 2;
+          for (const link of scene.links) {
+            if (
+              textCenterX >= link.rect.x - 2 &&
+              textCenterX <= link.rect.x + link.rect.width + 2 &&
+              textCenterY >= link.rect.y - 2 &&
+              textCenterY <= link.rect.y + link.rect.height + 2
+            ) {
+              text.linkUri = link.uri;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Step 5f: Detect borderless tables from aligned text columns
+  const { tables: borderlessTables, consumedIndices: borderlessConsumed } =
+    detectBorderlessTables(paragraphs, structureHints ? structureHints : undefined);
+  tables.push(...borderlessTables);
 
   // Step 6: Combine all layout elements and sort by Y position
   const layoutElements: LayoutElement[] = [];
@@ -2373,8 +2734,9 @@ export async function buildPageLayout(scene: PageScene, structureHints?: StructN
     layoutElements.push({ type: 'table', element: table });
   }
 
-  for (const para of paragraphs) {
-    layoutElements.push({ type: 'paragraph', element: para });
+  for (let pi = 0; pi < paragraphs.length; pi++) {
+    if (borderlessConsumed.has(pi)) continue; // consumed by borderless table
+    layoutElements.push({ type: 'paragraph', element: paragraphs[pi] });
   }
 
   for (const img of genuineImages) {
@@ -2519,6 +2881,8 @@ export async function buildPageLayout(scene: PageScene, structureHints?: StructN
     width: scene.width,
     height: scene.height,
     contentBounds,
+    headerTexts: headerTexts.length > 0 ? headerTexts : undefined,
+    footerTexts: footerTexts.length > 0 ? footerTexts : undefined,
   };
 }
 

@@ -7,7 +7,7 @@ import { PDFDocument, Annotation, Position, Size, TextAnnotation, ImageAnnotatio
 import { replaceTextInPage } from '../utils/pdfTextReplacer';
 import { blankTextInContentStream } from '../utils/blankText';
 import { saveFormFieldValues, buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
-import { buildTextColorMap, matchTextColor } from '../utils/textColorExtractor';
+import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
@@ -58,48 +58,6 @@ function mapToStandardFont(fontName: string): typeof StandardFonts[keyof typeof 
 }
 
 
-
-// Sample background color from rendered canvas at a specific position
-async function sampleBackgroundColor(
-  pdfDoc: pdfjsLib.PDFDocumentProxy,
-  pageNum: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  pageHeight: number
-): Promise<{ r: number; g: number; b: number }> {
-  try {
-    const page = await pdfDoc.getPage(pageNum);
-    const scale = 1;
-    const viewport = page.getViewport({ scale });
-
-    // Create an offscreen canvas
-    const canvas = new OffscreenCanvas(viewport.width, viewport.height);
-    const context = canvas.getContext('2d');
-    if (!context) return { r: 1, g: 1, b: 1 }; // Default white
-
-    // Render the page
-    await page.render({
-      canvasContext: context as any,
-      viewport,
-    }).promise;
-
-    // Sample from the center of where the text will be
-    // Convert PDF coordinates to canvas coordinates
-    const sampleX = Math.floor(x + width / 2);
-    const sampleY = Math.floor(y + height / 2);
-
-    // Get pixel data at the sample point
-    const imageData = context.getImageData(sampleX, sampleY, 1, 1);
-    const [r, g, b] = imageData.data;
-
-    return { r: r / 255, g: g / 255, b: b / 255 };
-  } catch (error) {
-    console.error('Failed to sample background color:', error);
-    return { r: 1, g: 1, b: 1 }; // Default white on error
-  }
-}
 
 /** Detect bold from PDF font name patterns */
 function isBoldFontName(fontName: string): boolean {
@@ -307,13 +265,13 @@ export function usePDFDocument() {
             page.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
           ]);
 
-          // Build text color map from operator list
+          // Build color maps from operator list (source of truth — no canvas rendering)
           const textColorMap = buildTextColorMap(operatorList, viewport.height);
+          const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
 
-          // First pass: collect basic text item data
-          // Split text items into individual words for finer-grained erasing
+          // Collect text items — split into individual words for fine-grained editing
           let itemCounter = 0;
-          const basicTextItems: any[] = [];
+          const textItems: PDFTextItem[] = [];
 
           textContent.items
             .filter((item: any) => item.str && item.str.trim())
@@ -337,7 +295,13 @@ export function usePDFDocument() {
 
                 // Only create items for non-empty words (skip pure whitespace)
                 if (word.trim()) {
-                  basicTextItems.push({
+                  // Match colors from operator list data (not canvas rendering)
+                  const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                  const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
+                  const bold = isBoldFontName(rawFontName);
+                  const italic = isItalicFontName(rawFontName);
+
+                  textItems.push({
                     id: `text-item-${i}-${itemCounter++}`,
                     str: word,
                     originalStr: word,
@@ -350,55 +314,16 @@ export function usePDFDocument() {
                     transform: [...transform.slice(0, 4), currentX, transform[5]],
                     isEdited: false,
                     parentTransform: transform,
+                    backgroundColor,
+                    textColor,
+                    bold,
+                    italic,
                   });
                 }
 
                 currentX += wordWidth;
               });
             });
-
-          // Second pass: sample background colors and match text colors
-          // Render page once for background sampling
-          const canvas = new OffscreenCanvas(viewport.width, viewport.height);
-          const context = canvas.getContext('2d');
-          if (context) {
-            await page.render({
-              canvasContext: context as any,
-              viewport,
-            }).promise;
-          }
-
-          const textItems: PDFTextItem[] = basicTextItems.map((item) => {
-            let backgroundColor = { r: 1, g: 1, b: 1 }; // Default white
-
-            if (context) {
-              const sampleX = Math.max(0, Math.floor(item.x - 2));
-              const sampleY = Math.max(0, Math.floor(item.y + item.height / 2));
-
-              try {
-                const imageData = context.getImageData(sampleX, sampleY, 1, 1);
-                const [r, g, b] = imageData.data;
-                backgroundColor = { r: r / 255, g: g / 255, b: b / 255 };
-              } catch (e) {
-                // Keep default white
-              }
-            }
-
-            // Match text color from operator list color map
-            const textColor = matchTextColor(item.x, item.y, item.fontSize, textColorMap);
-
-            // Detect bold/italic from font name
-            const bold = isBoldFontName(item.fontName);
-            const italic = isItalicFontName(item.fontName);
-
-            return {
-              ...item,
-              backgroundColor,
-              textColor,
-              bold,
-              italic,
-            };
-          });
 
           // Extract source PDF annotations (non-widget)
           const sourceAnnotations = await extractSourceAnnotations(page, i, viewport.height);

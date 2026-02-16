@@ -13,6 +13,11 @@ const OPS = {
   save: 10,
   restore: 11,
   transform: 12,
+  rectangle: 19,
+  fill: 22,
+  eoFill: 23,
+  fillStroke: 24,
+  eoFillStroke: 25,
   setFillGray: 57,
   setFillRGBColor: 59,
   setFillCMYKColor: 61,
@@ -168,6 +173,190 @@ export function matchTextColor(
     if (dist < bestDist && dist <= tolerance) {
       bestDist = dist;
       bestColor = entry.color;
+    }
+  }
+
+  return bestColor;
+}
+
+// ─── Background Color Extraction (from filled rectangles in operator list) ────
+
+export interface FilledRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: { r: number; g: number; b: number };
+}
+
+/**
+ * Build a map of filled rectangles from a pdfjs operator list.
+ * These represent background colors behind text — extracted directly from
+ * the content stream instead of rendering to canvas.
+ *
+ * Tracks the graphics state (save/restore, transform, fill color) and records
+ * each filled rectangle with its position and active fill color.
+ *
+ * @param operatorList  The result of page.getOperatorList()
+ * @param pageHeight    The page height for Y coordinate flipping
+ */
+export function buildFilledRectMap(
+  operatorList: { fnArray: number[]; argsArray: any[] },
+  pageHeight: number,
+): FilledRect[] {
+  const { fnArray, argsArray } = operatorList;
+  const rects: FilledRect[] = [];
+
+  // Graphics state
+  let fillColor = { r: 0, g: 0, b: 0 };
+  const fillColorStack: Array<{ r: number; g: number; b: number }>[] = [];
+  let currentStack: Array<{ r: number; g: number; b: number }> = [];
+
+  // CTM tracking for coordinate transforms
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const ctmStack: number[][] = [];
+
+  // Pending rectangle (set by rectangle op, consumed by fill op)
+  let pendingRect: { x: number; y: number; w: number; h: number } | null = null;
+
+  for (let i = 0; i < fnArray.length; i++) {
+    const op = fnArray[i];
+    const args = argsArray[i];
+
+    switch (op) {
+      case OPS.save: {
+        ctmStack.push([...ctm]);
+        currentStack.push({ ...fillColor });
+        fillColorStack.push([...currentStack]);
+        currentStack = [];
+        break;
+      }
+      case OPS.restore: {
+        const prevCtm = ctmStack.pop();
+        if (prevCtm) ctm = prevCtm;
+        const prevStack = fillColorStack.pop();
+        if (prevStack && prevStack.length > 0) {
+          fillColor = prevStack[prevStack.length - 1];
+          currentStack = prevStack;
+        }
+        pendingRect = null;
+        break;
+      }
+      case OPS.transform: {
+        const [a, b, c, d, e, f] = args;
+        ctm = [
+          ctm[0] * a + ctm[1] * c,
+          ctm[0] * b + ctm[1] * d,
+          ctm[2] * a + ctm[3] * c,
+          ctm[2] * b + ctm[3] * d,
+          ctm[4] * a + ctm[5] * c + e,
+          ctm[4] * b + ctm[5] * d + f,
+        ];
+        break;
+      }
+      case OPS.setFillRGBColor: {
+        fillColor = {
+          r: normalizeComponent(args[0]),
+          g: normalizeComponent(args[1]),
+          b: normalizeComponent(args[2]),
+        };
+        break;
+      }
+      case OPS.setFillGray: {
+        const g = normalizeComponent(args[0]);
+        fillColor = { r: g, g: g, b: g };
+        break;
+      }
+      case OPS.setFillCMYKColor: {
+        fillColor = cmykToRgb(args[0], args[1], args[2], args[3]);
+        break;
+      }
+      case OPS.rectangle: {
+        // Record pending rectangle in user space
+        pendingRect = { x: args[0], y: args[1], w: args[2], h: args[3] };
+        break;
+      }
+      case OPS.fill:
+      case OPS.eoFill:
+      case OPS.fillStroke:
+      case OPS.eoFillStroke: {
+        if (pendingRect) {
+          // Transform rectangle corners through CTM
+          const x0 = pendingRect.x * ctm[0] + pendingRect.y * ctm[2] + ctm[4];
+          const y0 = pendingRect.x * ctm[1] + pendingRect.y * ctm[3] + ctm[5];
+          const x1 = (pendingRect.x + pendingRect.w) * ctm[0] + (pendingRect.y + pendingRect.h) * ctm[2] + ctm[4];
+          const y1 = (pendingRect.x + pendingRect.w) * ctm[1] + (pendingRect.y + pendingRect.h) * ctm[3] + ctm[5];
+
+          const minX = Math.min(x0, x1);
+          const maxX = Math.max(x0, x1);
+          const minY = Math.min(y0, y1);
+          const maxY = Math.max(y0, y1);
+
+          const width = maxX - minX;
+          const height = maxY - minY;
+
+          // Only record rects large enough to be a background (> 5pt in both dimensions)
+          if (width > 5 && height > 5) {
+            rects.push({
+              x: minX,
+              y: pageHeight - maxY, // flip to top-left origin
+              width,
+              height,
+              color: { ...fillColor },
+            });
+          }
+        }
+        pendingRect = null;
+        break;
+      }
+    }
+  }
+
+  return rects;
+}
+
+/**
+ * Find the background color at a given text position from the filled rect map.
+ * Returns the fill color of the smallest containing rectangle (most specific background),
+ * or default white if no rectangle contains the position.
+ *
+ * @param itemX     X position of the text item
+ * @param itemY     Y position of the text item (top-left origin)
+ * @param itemW     Width of the text item
+ * @param itemH     Height of the text item
+ * @param rectMap   The filled rect map built from buildFilledRectMap()
+ * @returns The background RGB color (0-1 range), default white
+ */
+export function matchBackgroundColor(
+  itemX: number,
+  itemY: number,
+  itemW: number,
+  itemH: number,
+  rectMap: FilledRect[],
+): { r: number; g: number; b: number } {
+  if (rectMap.length === 0) return { r: 1, g: 1, b: 1 };
+
+  // Find the smallest containing rect (most specific background)
+  let bestArea = Infinity;
+  let bestColor = { r: 1, g: 1, b: 1 }; // default white
+  const tolerance = 2; // 2pt tolerance for containment
+
+  const centerX = itemX + itemW / 2;
+  const centerY = itemY + itemH / 2;
+
+  for (const rect of rectMap) {
+    // Check if the text center is inside this filled rect
+    if (
+      centerX >= rect.x - tolerance &&
+      centerX <= rect.x + rect.width + tolerance &&
+      centerY >= rect.y - tolerance &&
+      centerY <= rect.y + rect.height + tolerance
+    ) {
+      const area = rect.width * rect.height;
+      if (area < bestArea) {
+        bestArea = area;
+        bestColor = rect.color;
+      }
     }
   }
 

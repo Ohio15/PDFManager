@@ -55,6 +55,11 @@ declare global {
       // Multi-file operations
       openMultipleFilesDialog: () => Promise<Array<{ path: string; data: string }> | null>;
       selectOutputDirectory: () => Promise<string | null>;
+      showSaveDocxDialog: (defaultName: string, defaultDir?: string) => Promise<string | null>;
+      scanDirectoryForPdfs: (dirPath: string) => Promise<string[]>;
+      readFileRaw: (filePath: string) => Promise<ArrayBuffer | null>;
+      pickPdfFile: () => Promise<string | null>;
+      checkFileExists: (filePath: string) => Promise<boolean>;
       saveFileToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       saveRawBytesToPath: (data: ArrayBuffer, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
       saveImageToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
@@ -104,6 +109,7 @@ const App: React.FC = () => {
   const [extractImagesDialogOpen, setExtractImagesDialogOpen] = useState(false);
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
   const [convertToDocxDialogOpen, setConvertToDocxDialogOpen] = useState(false);
+  const [convertToDocxInitialMode, setConvertToDocxInitialMode] = useState<'single' | 'batch'>('single');
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [searchBarOpen, setSearchBarOpen] = useState(false);
@@ -777,28 +783,27 @@ const App: React.FC = () => {
 
   // Convert PDF to DOCX handler
   const handleConvertToDocx = useCallback(async (
-    outputDir: string,
+    outputPath: string,
     mode: 'positioned' | 'flow' = 'flow'
   ): Promise<{ count: number; folder: string }> => {
-    if (!document) return { count: 0, folder: outputDir };
+    const folder = outputPath.substring(0, Math.max(outputPath.lastIndexOf('/'), outputPath.lastIndexOf('\\')));
+    if (!document) return { count: 0, folder };
 
     const { generateDocx } = await import('./utils/docxGenerator/DocxGenerator');
 
-    const baseName = document.fileName.replace(/\.pdf$/i, '');
     const result = await generateDocx(document.pdfData, { conversionMode: mode });
 
     console.log(`[DOCX] Generated ${result.data.length} bytes, ${result.pageCount} pages`);
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
 
     // Send raw bytes directly via IPC (no base64 encoding/decoding)
-    const filePath = `${outputDir}/${baseName}.docx`;
     await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
       result.data.byteOffset,
       result.data.byteOffset + result.data.byteLength
-    ), filePath);
+    ), outputPath);
 
     toast.success(`Converted ${result.pageCount} pages to Word document`);
-    return { count: result.pageCount, folder: outputDir };
+    return { count: result.pageCount, folder };
   }, [document, toast]);
 
   // Export PDF pages as SVG vector graphics
@@ -1205,7 +1210,7 @@ const App: React.FC = () => {
               visible={showConversionBar}
               onClose={() => setShowConversionBar(false)}
               onConvertToImages={() => setConvertFromDialogOpen(true)}
-              onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
+              onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div
@@ -1226,6 +1231,10 @@ const App: React.FC = () => {
         ) : (
           <WelcomeScreen
             onOpenFile={handleOpenFile}
+            onBatchConvert={() => {
+              setConvertToDocxInitialMode('batch');
+              setConvertToDocxDialogOpen(true);
+            }}
             onFileDropped={handleFileDrop}
             recentFiles={recentFiles}
             onOpenRecentFile={handleOpenRecentFile}
@@ -1243,7 +1252,7 @@ const App: React.FC = () => {
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
-          onConvertToDocx={() => setConvertToDocxDialogOpen(true)}
+          onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
         />
 
@@ -1314,16 +1323,15 @@ const App: React.FC = () => {
         />
       )}
 
-      {document && (
-        <ConvertToDocxDialog
-          isOpen={convertToDocxDialogOpen}
-          onClose={() => setConvertToDocxDialogOpen(false)}
-          onConvert={handleConvertToDocx}
-          fileName={document.fileName}
-          pageCount={document.pageCount}
-          filePath={document.filePath || ''}
-        />
-      )}
+      <ConvertToDocxDialog
+        isOpen={convertToDocxDialogOpen}
+        onClose={() => setConvertToDocxDialogOpen(false)}
+        onConvert={handleConvertToDocx}
+        fileName={document?.fileName}
+        pageCount={document?.pageCount}
+        filePath={document?.filePath || ''}
+        initialMode={convertToDocxInitialMode}
+      />
 
       {document && (
         <PrintDialog

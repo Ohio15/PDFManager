@@ -1348,11 +1348,10 @@ export function generateSettingsXml(hasFormFields: boolean = false): string {
   xml += '  <w:defaultTabStop w:val="720"/>\n';
   xml += '  <w:characterSpacingControl w:val="doNotCompress"/>\n';
 
-  // Enable form protection when document contains form fields
-  // This makes checkboxes clickable, text fields editable, dropdowns selectable
-  if (hasFormFields) {
-    xml += '  <w:documentProtection w:edit="forms" w:enforcement="1"/>\n';
-  }
+  // Note: w:documentProtection with w:enforcement="1" was removed because it
+  // triggers Word's "Protected View" / "Trusted Source" banner on every open.
+  // Form fields still render and function without enforcement — users can
+  // optionally enable protection via Word's Review > Restrict Editing.
 
   xml += '  <w:compat>\n';
   xml += '    <w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>\n';

@@ -525,6 +525,60 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   }
 });
 
+// Scan a directory recursively for PDF files
+ipcMain.handle('scan-directory-for-pdfs', async (_event, dirPath: string) => {
+  const pdfs: string[] = [];
+  function walkDir(dir: string): void {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walkDir(fullPath);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) {
+          pdfs.push(fullPath);
+        }
+      }
+    } catch {
+      // Skip inaccessible directories
+    }
+  }
+  walkDir(dirPath);
+  return pdfs;
+});
+
+// Read a file as raw bytes (ArrayBuffer) for batch processing
+ipcMain.handle('read-file-raw', async (_event, filePath: string) => {
+  try {
+    const data = fs.readFileSync(filePath);
+    return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  } catch {
+    return null;
+  }
+});
+
+// Pick a single PDF file (returns path only, no data read)
+ipcMain.handle('pick-pdf-file', async () => {
+  const result = await dialog.showOpenDialog(mainWindow!, {
+    title: 'Select PDF File',
+    properties: ['openFile'],
+    filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+// Check if a file exists at the given path
+ipcMain.handle('check-file-exists', async (_event, filePath: string) => {
+  try {
+    return fs.existsSync(filePath);
+  } catch {
+    return false;
+  }
+});
+
 // Auto-updater IPC handlers
 ipcMain.handle('check-for-updates', async () => {
   try {
@@ -667,6 +721,24 @@ ipcMain.handle('select-output-directory', async () => {
   if (!result.canceled && result.filePaths.length > 0) {
     store.set('lastSaveDirectory', result.filePaths[0]);
     return result.filePaths[0];
+  }
+  return null;
+});
+
+ipcMain.handle('show-save-docx-dialog', async (_event, { defaultName, defaultDir }: { defaultName: string; defaultDir?: string }) => {
+  const lastDir = defaultDir || store.get('lastSaveDirectory') || undefined;
+  const result = await dialog.showSaveDialog(mainWindow!, {
+    defaultPath: lastDir ? path.join(lastDir, defaultName) : defaultName,
+    title: 'Save Word Document',
+    filters: [
+      { name: 'Word Document', extensions: ['docx'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+
+  if (!result.canceled && result.filePath) {
+    store.set('lastSaveDirectory', path.dirname(result.filePath));
+    return result.filePath;
   }
   return null;
 });

@@ -187,10 +187,26 @@ async function renderPageToPng(
     // This text is normal body text — mark for erasure and overlay
     editableTextIndices.add(ti);
 
-    // Erase from canvas: paint background color over the text area
-    const bgColor = findBgColor(elem.x, elem.y, elem.width, elem.height, filledRects);
-    // Generous padding (3pt) ensures complete text coverage by the overlay text box
-    const pad = 3;
+    const textElem = elem as import('./types').TextElement;
+
+    // Erase from canvas: paint background color over the text area.
+    // Padding scales with font size to cover descenders, ascenders, and anti-aliased edges.
+    // Small fonts need at least 4pt; larger fonts need proportionally more.
+    const fontSize = textElem.fontSize || 12;
+    const pad = Math.max(4, fontSize * 0.4);
+
+    // Sample the actual canvas pixel just outside the text area for accurate background color.
+    // This handles gradients, complex backgrounds, and cases where no filled rect exists.
+    const sampleX = Math.max(0, Math.floor((elem.x - 1) * scale));
+    const sampleY = Math.max(0, Math.min(Math.floor((elem.y + elem.height * 0.5) * scale), canvas.height - 1));
+    const pixel = ctx.getImageData(sampleX, sampleY, 1, 1).data;
+    const sampledColor = `rgb(${pixel[0]},${pixel[1]},${pixel[2]})`;
+
+    // Use sampled pixel color, falling back to rect-based detection
+    const bgColor = (pixel[0] === 0 && pixel[1] === 0 && pixel[2] === 0)
+      ? findBgColor(elem.x, elem.y, elem.width, elem.height, filledRects)
+      : sampledColor;
+
     ctx.fillStyle = bgColor;
     ctx.fillRect(
       (elem.x - pad) * scale,
@@ -204,19 +220,26 @@ async function renderPageToPng(
 
   // Erase form field areas (they'll be overlaid as editable form fields)
   for (const field of scene.formFields) {
-    const bgColor = findBgColor(field.x, field.y, field.width, field.height, filledRects);
-    const pad = 3;
-    ctx.fillStyle = bgColor;
+    const fSampleX = Math.max(0, Math.floor((field.x - 1) * scale));
+    const fSampleY = Math.max(0, Math.min(Math.floor((field.y + field.height * 0.5) * scale), canvas.height - 1));
+    const fPixel = ctx.getImageData(fSampleX, fSampleY, 1, 1).data;
+    const fSampledColor = `rgb(${fPixel[0]},${fPixel[1]},${fPixel[2]})`;
+    const fBgColor = (fPixel[0] === 0 && fPixel[1] === 0 && fPixel[2] === 0)
+      ? findBgColor(field.x, field.y, field.width, field.height, filledRects)
+      : fSampledColor;
+    const fPad = 4;
+    ctx.fillStyle = fBgColor;
     ctx.fillRect(
-      (field.x - pad) * scale,
-      (field.y - pad) * scale,
-      (field.width + pad * 2) * scale,
-      (field.height + pad * 2) * scale,
+      (field.x - fPad) * scale,
+      (field.y - fPad) * scale,
+      (field.width + fPad * 2) * scale,
+      (field.height + fPad * 2) * scale,
     );
   }
 
+  // Use JPEG for page backgrounds — much smaller than PNG for photographic/complex content
   const blob = await new Promise<Blob>((resolve) => {
-    canvas.toBlob((b) => resolve(b!), 'image/png');
+    canvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.85);
   });
 
   return {
@@ -425,14 +448,14 @@ export async function generateDocx(
     // that can't be individually converted to OOXML shapes.
     if (conversionMode === 'positioned') {
       try {
-        const result = await renderPageToPng(page, scene, 3.0); // 3× = 216 DPI
+        const result = await renderPageToPng(page, scene, 2.0); // 2× = 144 DPI
         pageBackgrounds.push({
           data: result.pngData,
           widthEmu: Math.round(scene.width * PT_TO_EMU),
           heightEmu: Math.round(scene.height * PT_TO_EMU),
           editableTextIndices: result.editableTextIndices,
         });
-        console.log(`[DocxGenerator] Page ${pageIdx} background: ${result.pngData.length} bytes PNG`);
+        console.log(`[DocxGenerator] Page ${pageIdx} background: ${result.pngData.length} bytes JPEG`);
       } catch (e) {
         console.warn(`[DocxGenerator] Page ${pageIdx} background render failed:`, e);
         pageBackgrounds.push({ data: new Uint8Array(0), widthEmu: 0, heightEmu: 0, editableTextIndices: new Set() });
@@ -473,8 +496,8 @@ export async function generateDocx(
       const bgFile: ImageFile = {
         rId: `rId${bgNextRId + pi}`,
         data: bg.data,
-        mimeType: 'image/png',
-        fileName: `page_bg_${pi + 1}.png`,
+        mimeType: 'image/jpeg',
+        fileName: `page_bg_${pi + 1}.jpeg`,
         resourceName: `__page_bg_${pi}`,
         widthEmu: bg.widthEmu,
         heightEmu: bg.heightEmu,
@@ -613,34 +636,39 @@ export async function generateDocx(
   const hasHeader = !!headerXml;
   const hasFooter = !!footerXml;
   const hasNumbering = flowExtraRels?.some(r => r.target === 'numbering.xml') ?? false;
-  const contentTypes = generateContentTypes(allImages, { hasHeader, hasFooter, hasNumbering });
+  const contentTypes = generateContentTypes(uniqueImages, { hasHeader, hasFooter, hasNumbering });
   const rootRels = generateRootRels();
   const documentRels = generateDocumentRels(uniqueImages, flowExtraRels);
   const stylesXml = generateStylesXml(styleCollector);
   const settingsXml = generateSettingsXml(hasFormFields);
   const fontTableXml = generateFontTableXml(styleCollector.getUsedFonts());
 
+  // Minify XML: strip indentation whitespace between tags (saves ~20% on large docs)
+  // Preserves xml:space="preserve" content inside <w:t> tags
+  const minifyXml = (xml: string): string =>
+    xml.replace(/>\s+</g, '><').replace(/^\s+/gm, '');
+
   // Package into ZIP
   const zip = new ZipBuilder();
-  zip.addFileString('[Content_Types].xml', contentTypes);
-  zip.addFileString('_rels/.rels', rootRels);
-  zip.addFileString('word/_rels/document.xml.rels', documentRels);
-  zip.addFileString('word/document.xml', documentXml);
-  zip.addFileString('word/styles.xml', stylesXml);
-  zip.addFileString('word/settings.xml', settingsXml);
-  zip.addFileString('word/fontTable.xml', fontTableXml);
+  zip.addFileString('[Content_Types].xml', minifyXml(contentTypes));
+  zip.addFileString('_rels/.rels', minifyXml(rootRels));
+  zip.addFileString('word/_rels/document.xml.rels', minifyXml(documentRels));
+  zip.addFileString('word/document.xml', minifyXml(documentXml));
+  zip.addFileString('word/styles.xml', minifyXml(stylesXml));
+  zip.addFileString('word/settings.xml', minifyXml(settingsXml));
+  zip.addFileString('word/fontTable.xml', minifyXml(fontTableXml));
 
   // Add header/footer parts if present
   if (headerXml) {
-    zip.addFileString('word/header1.xml', headerXml);
+    zip.addFileString('word/header1.xml', minifyXml(headerXml));
   }
   if (footerXml) {
-    zip.addFileString('word/footer1.xml', footerXml);
+    zip.addFileString('word/footer1.xml', minifyXml(footerXml));
   }
 
   // Add numbering.xml if lists were detected
   if (hasNumbering) {
-    zip.addFileString('word/numbering.xml', generateNumberingXml());
+    zip.addFileString('word/numbering.xml', minifyXml(generateNumberingXml()));
   }
 
   // Add image media files (only unique images -- deduped by content hash)

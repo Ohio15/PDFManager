@@ -2,16 +2,26 @@
  * Minimal ZIP file builder using pako for deflate compression.
  * Produces a valid ZIP archive (PKZIP 2.0 compatible) without any external ZIP library.
  *
+ * Optimizations:
+ *   - XML files use max compression (level 9) since text compresses very well
+ *   - Pre-compressed media (JPEG, PNG) are stored without re-compressing (STORE method)
+ *   - Other binary files use default deflate compression
+ *
  * Structure: local file headers + compressed data → central directory → end of central directory record
  */
 
 import pako from 'pako';
+
+/** Extensions of files that are already compressed and should use STORE (no compression) */
+const STORE_EXTENSIONS = new Set(['jpeg', 'jpg', 'png', 'gif', 'webp']);
 
 interface ZipEntry {
   path: string;
   data: Uint8Array;
   crc32: number;
   compressedData: Uint8Array;
+  /** 0 = STORE (no compression), 8 = DEFLATE */
+  compressionMethod: number;
   /** Offset of the local file header in the output */
   localHeaderOffset: number;
 }
@@ -37,27 +47,56 @@ function computeCrc32(data: Uint8Array): number {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
+/** Get the file extension from a path (lowercase, no dot) */
+function getExtension(path: string): string {
+  const dot = path.lastIndexOf('.');
+  return dot >= 0 ? path.slice(dot + 1).toLowerCase() : '';
+}
+
 export class ZipBuilder {
   private entries: ZipEntry[] = [];
 
   /** Add a file from raw bytes */
   addFile(path: string, data: Uint8Array): void {
     const crc32 = computeCrc32(data);
-    // Use raw deflate (no zlib header/trailer) for ZIP DEFLATE method
-    const compressedData = pako.deflateRaw(data);
+    const ext = getExtension(path);
+
+    let compressedData: Uint8Array;
+    let compressionMethod: number;
+
+    if (STORE_EXTENSIONS.has(ext)) {
+      // Already-compressed media: store as-is (no point re-deflating JPEG/PNG)
+      compressedData = data;
+      compressionMethod = 0; // STORE
+    } else {
+      // Text/XML/other: deflate with max compression
+      compressedData = pako.deflateRaw(data, { level: 9 });
+      compressionMethod = 8; // DEFLATE
+    }
+
     this.entries.push({
       path,
       data,
       crc32,
       compressedData,
+      compressionMethod,
       localHeaderOffset: 0,
     });
   }
 
-  /** Add a file from a UTF-8 string */
+  /** Add a file from a UTF-8 string (always uses max deflate compression) */
   addFileString(path: string, content: string): void {
-    const encoder = new TextEncoder();
-    this.addFile(path, encoder.encode(content));
+    const data = new TextEncoder().encode(content);
+    const crc32 = computeCrc32(data);
+    const compressedData = pako.deflateRaw(data, { level: 9 });
+    this.entries.push({
+      path,
+      data,
+      crc32,
+      compressedData,
+      compressionMethod: 8, // DEFLATE
+      localHeaderOffset: 0,
+    });
   }
 
   /** Build the complete ZIP file and return as Uint8Array */
@@ -112,7 +151,7 @@ export class ZipBuilder {
     view.setUint32(0, 0x04034B50, true);   // Local file header signature
     view.setUint16(4, 20, true);            // Version needed to extract (2.0)
     view.setUint16(6, 0x0800, true);        // General purpose bit flag (bit 11 = UTF-8)
-    view.setUint16(8, 8, true);             // Compression method: DEFLATE
+    view.setUint16(8, entry.compressionMethod, true);  // Compression method
     view.setUint16(10, 0, true);            // Last mod file time
     view.setUint16(12, 0, true);            // Last mod file date
     view.setUint32(14, entry.crc32, true);  // CRC-32
@@ -135,7 +174,7 @@ export class ZipBuilder {
     view.setUint16(4, 20, true);            // Version made by (2.0)
     view.setUint16(6, 20, true);            // Version needed to extract (2.0)
     view.setUint16(8, 0x0800, true);        // General purpose bit flag (bit 11 = UTF-8)
-    view.setUint16(10, 8, true);            // Compression method: DEFLATE
+    view.setUint16(10, entry.compressionMethod, true);  // Compression method
     view.setUint16(12, 0, true);            // Last mod file time
     view.setUint16(14, 0, true);            // Last mod file date
     view.setUint32(16, entry.crc32, true);  // CRC-32

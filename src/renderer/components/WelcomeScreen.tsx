@@ -1,8 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { FileText, Upload, Clock, Trash2 } from 'lucide-react';
+import { FileText, Upload, Clock, Trash2, FolderOpen } from 'lucide-react';
 
 interface WelcomeScreenProps {
   onOpenFile: () => void;
+  onBatchConvert?: () => void;
   onFileDropped?: (filePath: string) => void;
   recentFiles?: string[];
   onOpenRecentFile?: (filePath: string) => void;
@@ -11,6 +12,7 @@ interface WelcomeScreenProps {
 
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onOpenFile,
+  onBatchConvert,
   onFileDropped,
   recentFiles = [],
   onOpenRecentFile,
@@ -88,6 +90,12 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             <Upload size={20} />
             Open PDF File
           </button>
+          {onBatchConvert && (
+            <button className="welcome-btn welcome-btn-secondary" onClick={onBatchConvert}>
+              <FolderOpen size={20} />
+              Batch Convert to Word
+            </button>
+          )}
         </div>
 
         {/* Recent Files */}

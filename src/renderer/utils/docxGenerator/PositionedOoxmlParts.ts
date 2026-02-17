@@ -350,12 +350,18 @@ function generatePositionedTextBox(
   docPrId: number,
   zOrder: number,
 ): string {
-  // Match eraser origin: eraser uses 3pt padding from top-left of text group
-  const xEmu = Math.round((group.x - 3) * PT_TO_EMU);
-  const yEmu = Math.round((group.y - 3) * PT_TO_EMU);
-  // Match eraser extent: eraser adds 6pt total (3pt each side)
-  const wEmu = Math.round((group.width + 6) * PT_TO_EMU);
-  const hEmu = Math.round((group.height + 6) * PT_TO_EMU);
+  // Padding scales with font size to match the canvas erasure in DocxGenerator.
+  // Must cover descenders, ascenders, and anti-aliased edges.
+  const avgFontSize = group.elements.length > 0
+    ? group.elements.reduce((s, e) => s + e.fontSize, 0) / group.elements.length
+    : 12;
+  const pad = Math.max(4, avgFontSize * 0.4);
+  const padEmu = Math.round(pad * PT_TO_EMU);
+
+  const xEmu = Math.round((group.x - pad) * PT_TO_EMU);
+  const yEmu = Math.round((group.y - pad) * PT_TO_EMU);
+  const wEmu = Math.round((group.width + pad * 2) * PT_TO_EMU);
+  const hEmu = Math.round((group.height + pad * 2) * PT_TO_EMU);
 
   let xml = '<w:drawing>\n';
   xml += `<wp:anchor simplePos="false" relativeHeight="${zOrder}" behindDoc="false" locked="false" layoutInCell="true" allowOverlap="true">\n`;
@@ -393,8 +399,8 @@ function generatePositionedTextBox(
   xml += '</w:txbxContent>\n';
   xml += '</wps:txbx>\n';
 
-  // Body properties: 3pt insets to offset text within the expanded box (matches eraser padding)
-  xml += '<wps:bodyPr wrap="square" lIns="38100" tIns="38100" rIns="38100" bIns="0" anchor="t">\n';
+  // Body properties: insets match padding to offset text within the expanded box
+  xml += `<wps:bodyPr wrap="square" lIns="${padEmu}" tIns="${padEmu}" rIns="${padEmu}" bIns="${padEmu}" anchor="t">\n`;
   xml += '  <a:noAutofit/>\n';
   xml += '</wps:bodyPr>\n';
 
@@ -548,12 +554,13 @@ function generatePositionedFormField(
   docPrId: number,
   zOrder: number,
 ): string {
-  // Match eraser origin: eraser uses 3pt padding from top-left of form field
-  const xEmu = Math.round((field.x - 3) * PT_TO_EMU);
-  const yEmu = Math.round((field.y - 3) * PT_TO_EMU);
-  // Match eraser extent: eraser adds 6pt total (3pt each side)
-  const wEmu = Math.round((field.width + 6) * PT_TO_EMU);
-  const hEmu = Math.round((field.height + 6) * PT_TO_EMU);
+  // Padding matches the canvas erasure in DocxGenerator (4pt for form fields)
+  const fPad = 4;
+  const fPadEmu = Math.round(fPad * PT_TO_EMU);
+  const xEmu = Math.round((field.x - fPad) * PT_TO_EMU);
+  const yEmu = Math.round((field.y - fPad) * PT_TO_EMU);
+  const wEmu = Math.round((field.width + fPad * 2) * PT_TO_EMU);
+  const hEmu = Math.round((field.height + fPad * 2) * PT_TO_EMU);
 
   let xml = '<w:drawing>\n';
   xml += `<wp:anchor simplePos="false" relativeHeight="${zOrder}" behindDoc="false" locked="false" layoutInCell="true" allowOverlap="true">\n`;
@@ -588,8 +595,8 @@ function generatePositionedFormField(
   xml += '</w:txbxContent>\n';
   xml += '</wps:txbx>\n';
 
-  // 3pt insets to offset content within the expanded box (matches eraser padding)
-  xml += '<wps:bodyPr wrap="square" lIns="38100" tIns="38100" rIns="38100" bIns="0" anchor="t">\n';
+  // Insets match padding to offset content within the expanded box
+  xml += `<wps:bodyPr wrap="square" lIns="${fPadEmu}" tIns="${fPadEmu}" rIns="${fPadEmu}" bIns="${fPadEmu}" anchor="t">\n`;
   xml += '  <a:noAutofit/>\n';
   xml += '</wps:bodyPr>\n';
 

@@ -1370,6 +1370,7 @@ function parseOperatorList(
   for (let i = 0; i < fnArray.length; i++) {
     const op = fnArray[i];
     const args = argsArray[i];
+    if (!args) continue; // skip operators with null/undefined args
 
     switch (op) {
       // ── Graphics state stack ──
@@ -2136,7 +2137,7 @@ async function extractLinks(
   try {
     const annotations = await page.getAnnotations({ intent: 'display' });
     for (const ann of annotations) {
-      if (ann.subtype !== 'Link' || !ann.url) continue;
+      if (ann.subtype !== 'Link' || !ann.url || !ann.rect) continue;
       const [x1, y1, x2, y2] = ann.rect;
       links.push({
         rect: {

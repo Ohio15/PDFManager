@@ -56,6 +56,11 @@ export interface ElectronAPI {
   // Multi-file operations
   openMultipleFilesDialog: () => Promise<FileData[] | null>;
   selectOutputDirectory: () => Promise<string | null>;
+  showSaveDocxDialog: (defaultName: string, defaultDir?: string) => Promise<string | null>;
+  scanDirectoryForPdfs: (dirPath: string) => Promise<string[]>;
+  readFileRaw: (filePath: string) => Promise<ArrayBuffer | null>;
+  pickPdfFile: () => Promise<string | null>;
+  checkFileExists: (filePath: string) => Promise<boolean>;
   saveFileToPath: (data: string, filePath: string) => Promise<SaveResult>;
   saveRawBytesToPath: (data: ArrayBuffer, filePath: string) => Promise<SaveResult>;
   saveImageToPath: (data: string, filePath: string) => Promise<SaveResult>;
@@ -128,6 +133,12 @@ const electronAPI: ElectronAPI = {
   // Multi-file operations
   openMultipleFilesDialog: () => ipcRenderer.invoke('open-multiple-files-dialog'),
   selectOutputDirectory: () => ipcRenderer.invoke('select-output-directory'),
+  showSaveDocxDialog: (defaultName: string, defaultDir?: string) =>
+    ipcRenderer.invoke('show-save-docx-dialog', { defaultName, defaultDir }),
+  scanDirectoryForPdfs: (dirPath: string) => ipcRenderer.invoke('scan-directory-for-pdfs', dirPath),
+  readFileRaw: (filePath: string) => ipcRenderer.invoke('read-file-raw', filePath),
+  pickPdfFile: () => ipcRenderer.invoke('pick-pdf-file'),
+  checkFileExists: (filePath: string) => ipcRenderer.invoke('check-file-exists', filePath),
   saveFileToPath: (data: string, filePath: string) =>
     ipcRenderer.invoke('save-file-to-path', { data, filePath }),
   saveRawBytesToPath: (data: ArrayBuffer, filePath: string) =>

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="sans-serif" w:hAnsi="sans-serif" w:cs="sans-serif" w:eastAsia="sans-serif"/>
+        <w:sz w:val="24"/>
+        <w:szCs w:val="24"/>
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:qFormat/>
+  </w:style>
+  <w:style w:type="character" w:customStyle="1" w:styleId="Style2">
+    <w:name w:val="sans-serif 22.5pt"/>
+    <w:rPr>
+      <w:sz w:val="45"/>
+      <w:szCs w:val="45"/>
+    </w:rPr>
+  </w:style>
+  <w:style w:type="character" w:customStyle="1" w:styleId="Style3">
+    <w:name w:val="sans-serif 15pt"/>
+    <w:rPr>
+      <w:sz w:val="30"/>
+      <w:szCs w:val="30"/>
+    </w:rPr>
+  </w:style>
+</w:styles>

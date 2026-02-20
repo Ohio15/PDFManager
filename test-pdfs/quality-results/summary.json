@@ -1,0 +1,70 @@
+{
+  "version": "2.5.0",
+  "timestamp": "2026-02-13T18:33:40.175Z",
+  "composite": 100,
+  "axes": {
+    "text": 100,
+    "color": 100,
+    "structure": 100,
+    "typography": 100,
+    "spatial": 100,
+    "images": 100
+  },
+  "weakest": "text",
+  "perPdf": {
+    "announcement": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": null,
+      "typography": 100,
+      "spatial": 100,
+      "images": 100
+    },
+    "cleaning-services": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": null,
+      "typography": null,
+      "spatial": null,
+      "images": 100
+    },
+    "invoice": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": null,
+      "typography": null,
+      "spatial": null,
+      "images": 100
+    },
+    "repair-calibration-form": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": 100,
+      "typography": 100,
+      "spatial": 100,
+      "images": 100
+    },
+    "scan-document": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": null,
+      "typography": null,
+      "spatial": null,
+      "images": 100
+    },
+    "vaccine-card": {
+      "composite": 100,
+      "text": 100,
+      "color": 100,
+      "structure": null,
+      "typography": null,
+      "spatial": null,
+      "images": 100
+    }
+  }
+}

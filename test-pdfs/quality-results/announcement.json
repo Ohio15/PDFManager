@@ -1,0 +1,66 @@
+{
+  "name": "announcement",
+  "source": {
+    "pageCount": 3,
+    "textElements": 129,
+    "totalCharacters": 3478,
+    "uniqueTextColors": [
+      "000000"
+    ],
+    "fontSizeRange": {
+      "min": 12,
+      "max": 18,
+      "unique": 2
+    },
+    "rectElements": 68,
+    "borderRects": 0,
+    "imageElements": 3,
+    "genuineImages": 3,
+    "formFields": 0,
+    "avgFontSize": 12.032777458309374
+  },
+  "layout": {
+    "tables": 0,
+    "tablesWithCustomBorders": 0,
+    "paragraphs": 8,
+    "paragraphsWithHeading": 1,
+    "paragraphsWithLineSpacing": 4,
+    "paragraphsWithIndent": 4,
+    "images": 3,
+    "twoColumnRegions": 0,
+    "contentBoundsComputed": 3,
+    "computedMargins": {
+      "left": 72.024,
+      "top": 108,
+      "right": 74.2600000000001,
+      "bottom": 53.75999999999999
+    }
+  },
+  "output": {
+    "totalCharactersInXml": 3561,
+    "uniqueColorsInXml": 0,
+    "paragraphCount": 13,
+    "headingStylesUsed": 1,
+    "indentsUsed": 4,
+    "lineSpacingOverrides": 4,
+    "tableCount": 0,
+    "customBorderColors": 1,
+    "imagesEmbedded": 3,
+    "marginValues": {
+      "top": 2160,
+      "right": 1485,
+      "bottom": 1075,
+      "left": 1440
+    },
+    "docxSizeBytes": 30995
+  },
+  "scores": {
+    "text": 100,
+    "color": 100,
+    "structure": null,
+    "typography": 100,
+    "spatial": 100,
+    "images": 100,
+    "composite": 100
+  }
+}

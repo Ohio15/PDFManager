@@ -1,0 +1,59 @@
+{
+  "name": "scan-document",
+  "source": {
+    "pageCount": 9,
+    "textElements": 0,
+    "totalCharacters": 0,
+    "uniqueTextColors": [],
+    "fontSizeRange": {
+      "min": 0,
+      "max": 0,
+      "unique": 0
+    },
+    "rectElements": 0,
+    "borderRects": 0,
+    "imageElements": 9,
+    "genuineImages": 9,
+    "formFields": 0,
+    "avgFontSize": 0
+  },
+  "layout": {
+    "tables": 0,
+    "tablesWithCustomBorders": 0,
+    "paragraphs": 0,
+    "paragraphsWithHeading": 0,
+    "paragraphsWithLineSpacing": 0,
+    "paragraphsWithIndent": 0,
+    "images": 9,
+    "twoColumnRegions": 0,
+    "contentBoundsComputed": 0,
+    "computedMargins": null
+  },
+  "output": {
+    "totalCharactersInXml": 0,
+    "uniqueColorsInXml": 0,
+    "paragraphCount": 17,
+    "headingStylesUsed": 0,
+    "indentsUsed": 0,
+    "lineSpacingOverrides": 0,
+    "tableCount": 0,
+    "customBorderColors": 0,
+    "imagesEmbedded": 9,
+    "marginValues": {
+      "top": 1440,
+      "right": 1440,
+      "bottom": 1440,
+      "left": 1440
+    },
+    "docxSizeBytes": 3001672
+  },
+  "scores": {
+    "text": 100,
+    "color": 100,
+    "structure": null,
+    "typography": null,
+    "spatial": null,
+    "images": 100,
+    "composite": 100
+  }
+}

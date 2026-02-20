@@ -1,0 +1,66 @@
+{
+  "name": "repair-calibration-form",
+  "source": {
+    "pageCount": 1,
+    "textElements": 43,
+    "totalCharacters": 602,
+    "uniqueTextColors": [
+      "000000"
+    ],
+    "fontSizeRange": {
+      "min": 12,
+      "max": 22.3068,
+      "unique": 3
+    },
+    "rectElements": 65,
+    "borderRects": 47,
+    "imageElements": 0,
+    "genuineImages": 0,
+    "formFields": 47,
+    "avgFontSize": 12.853536877076412
+  },
+  "layout": {
+    "tables": 1,
+    "tablesWithCustomBorders": 1,
+    "paragraphs": 5,
+    "paragraphsWithHeading": 1,
+    "paragraphsWithLineSpacing": 0,
+    "paragraphsWithIndent": 2,
+    "images": 0,
+    "twoColumnRegions": 2,
+    "contentBoundsComputed": 1,
+    "computedMargins": {
+      "left": 36,
+      "top": 36,
+      "right": 36,
+      "bottom": 36
+    }
+  },
+  "output": {
+    "totalCharactersInXml": 1101,
+    "uniqueColorsInXml": 1,
+    "paragraphCount": 69,
+    "headingStylesUsed": 1,
+    "indentsUsed": 2,
+    "lineSpacingOverrides": 0,
+    "tableCount": 6,
+    "customBorderColors": 3,
+    "imagesEmbedded": 0,
+    "marginValues": {
+      "top": 720,
+      "right": 720,
+      "bottom": 720,
+      "left": 720
+    },
+    "docxSizeBytes": 5076
+  },
+  "scores": {
+    "text": 100,
+    "color": 100,
+    "structure": 100,
+    "typography": 100,
+    "spatial": 100,
+    "images": 100,
+    "composite": 100
+  }
+}

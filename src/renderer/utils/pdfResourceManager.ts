@@ -5,6 +5,9 @@
  * Handles ExtGState (transparency), XObject (images), and Font registration
  * in the page's resource dictionary.
  *
+ * Uses a class-based allocator so each save operation gets its own counter,
+ * preventing name collisions from concurrent saves.
+ *
  * Pattern follows blankText.ts: page.node -> PDFName.of('Resources') -> sub-dictionaries
  */
 
@@ -14,14 +17,7 @@ import {
   PDFDict,
   PDFRef,
   PDFNumber,
-  PDFArray,
 } from 'pdf-lib';
-
-let resourceCounter = 0;
-
-function nextId(): number {
-  return ++resourceCounter;
-}
 
 /**
  * Ensure the page has a Resources dictionary, creating one if needed.
@@ -44,7 +40,6 @@ function getOrCreateResourcesDict(pdfDoc: PDFDocument, pageIndex: number): PDFDi
     return resources;
   }
 
-  // Shouldn't happen but handle gracefully
   const newDict = context.obj({});
   const ref = context.register(newDict);
   pageDict.set(PDFName.of('Resources'), ref);
@@ -73,94 +68,78 @@ function getOrCreateSubDict(
 }
 
 /**
- * Register an ExtGState resource on a page for transparency support.
- *
- * @param pdfDoc - The pdf-lib document
- * @param pageIndex - Zero-based page index
- * @param options - Graphics state parameters
- * @returns The resource name to use with the `gs` operator (e.g. "GS_ann_1")
+ * Per-save resource allocator. Each instance maintains its own counter,
+ * ensuring concurrent save operations cannot produce colliding resource names.
  */
-export function ensureExtGState(
-  pdfDoc: PDFDocument,
-  pageIndex: number,
-  options: {
-    fillOpacity?: number;
-    strokeOpacity?: number;
-  }
-): string {
-  const context = pdfDoc.context;
-  const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
-  const extGStateDict = getOrCreateSubDict(context, resourcesDict, 'ExtGState');
+export class ResourceAllocator {
+  private counter = 0;
 
-  const gsName = `GS_ann_${nextId()}`;
-
-  // Build the graphics state dictionary
-  const gsDict = context.obj({});
-  gsDict.set(PDFName.of('Type'), PDFName.of('ExtGState'));
-
-  if (options.fillOpacity !== undefined) {
-    // /ca = non-stroking (fill) opacity
-    gsDict.set(PDFName.of('ca'), PDFNumber.of(options.fillOpacity));
-  }
-  if (options.strokeOpacity !== undefined) {
-    // /CA = stroking opacity
-    gsDict.set(PDFName.of('CA'), PDFNumber.of(options.strokeOpacity));
+  private nextId(): number {
+    return ++this.counter;
   }
 
-  extGStateDict.set(PDFName.of(gsName), gsDict);
+  /**
+   * Register an ExtGState resource on a page for transparency support.
+   * @returns The resource name to use with the `gs` operator (e.g. "GS_ann_1")
+   */
+  ensureExtGState(
+    pdfDoc: PDFDocument,
+    pageIndex: number,
+    options: { fillOpacity?: number; strokeOpacity?: number }
+  ): string {
+    const context = pdfDoc.context;
+    const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
+    const extGStateDict = getOrCreateSubDict(context, resourcesDict, 'ExtGState');
 
-  return gsName;
-}
+    const gsName = `GS_ann_${this.nextId()}`;
 
-/**
- * Register an XObject (image) resource on a page.
- *
- * @param pdfDoc - The pdf-lib document
- * @param pageIndex - Zero-based page index
- * @param xObjectRef - A PDFRef pointing to the embedded image/XObject
- * @returns The resource name to use with the `Do` operator (e.g. "Im_ann_1")
- */
-export function ensureXObject(
-  pdfDoc: PDFDocument,
-  pageIndex: number,
-  xObjectRef: PDFRef
-): string {
-  const context = pdfDoc.context;
-  const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
-  const xObjectDict = getOrCreateSubDict(context, resourcesDict, 'XObject');
+    const gsDict = context.obj({});
+    gsDict.set(PDFName.of('Type'), PDFName.of('ExtGState'));
 
-  const imName = `Im_ann_${nextId()}`;
-  xObjectDict.set(PDFName.of(imName), xObjectRef);
+    if (options.fillOpacity !== undefined) {
+      gsDict.set(PDFName.of('ca'), PDFNumber.of(options.fillOpacity));
+    }
+    if (options.strokeOpacity !== undefined) {
+      gsDict.set(PDFName.of('CA'), PDFNumber.of(options.strokeOpacity));
+    }
 
-  return imName;
-}
+    extGStateDict.set(PDFName.of(gsName), gsDict);
+    return gsName;
+  }
 
-/**
- * Register a Font resource on a page.
- *
- * @param pdfDoc - The pdf-lib document
- * @param pageIndex - Zero-based page index
- * @param fontRef - A PDFRef pointing to the embedded font
- * @returns The resource name to use with the `Tf` operator (e.g. "F_ann_1")
- */
-export function ensureFont(
-  pdfDoc: PDFDocument,
-  pageIndex: number,
-  fontRef: PDFRef
-): string {
-  const context = pdfDoc.context;
-  const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
-  const fontDict = getOrCreateSubDict(context, resourcesDict, 'Font');
+  /**
+   * Register an XObject (image) resource on a page.
+   * @returns The resource name to use with the `Do` operator (e.g. "Im_ann_1")
+   */
+  ensureXObject(
+    pdfDoc: PDFDocument,
+    pageIndex: number,
+    xObjectRef: PDFRef
+  ): string {
+    const context = pdfDoc.context;
+    const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
+    const xObjectDict = getOrCreateSubDict(context, resourcesDict, 'XObject');
 
-  const fontName = `F_ann_${nextId()}`;
-  fontDict.set(PDFName.of(fontName), fontRef);
+    const imName = `Im_ann_${this.nextId()}`;
+    xObjectDict.set(PDFName.of(imName), xObjectRef);
+    return imName;
+  }
 
-  return fontName;
-}
+  /**
+   * Register a Font resource on a page.
+   * @returns The resource name to use with the `Tf` operator (e.g. "F_ann_1")
+   */
+  ensureFont(
+    pdfDoc: PDFDocument,
+    pageIndex: number,
+    fontRef: PDFRef
+  ): string {
+    const context = pdfDoc.context;
+    const resourcesDict = getOrCreateResourcesDict(pdfDoc, pageIndex);
+    const fontDict = getOrCreateSubDict(context, resourcesDict, 'Font');
 
-/**
- * Reset the resource counter. Useful between save operations to keep names predictable.
- */
-export function resetResourceCounter(): void {
-  resourceCounter = 0;
+    const fontName = `F_ann_${this.nextId()}`;
+    fontDict.set(PDFName.of(fontName), fontRef);
+    return fontName;
+  }
 }

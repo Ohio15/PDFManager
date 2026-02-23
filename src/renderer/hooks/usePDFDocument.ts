@@ -435,6 +435,7 @@ export function usePDFDocument() {
             ...page,
             textEdits: [],
             textItems: newTextItems,
+            annotations: [], // Clear annotations written to content stream to prevent double-rendering
           };
         })
       );
@@ -456,6 +457,7 @@ export function usePDFDocument() {
         const updatedPages = prev.pages.map(page => ({
           ...page,
           textEdits: [],
+          annotations: [], // Clear annotations written to content stream to prevent double-rendering
           textItems: page.textItems?.map(item => ({
             ...item,
             originalStr: item.str,

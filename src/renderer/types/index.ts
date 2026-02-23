@@ -52,6 +52,8 @@ export interface ShapeAnnotation {
   fillColor: string;
   strokeWidth: number;
   opacity: number;
+  /** For arrows: which corner the arrow starts from. Default: 'topLeft' (arrow points to bottomRight). */
+  startCorner?: 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
 }
 
 export interface StickyNoteAnnotation {
@@ -98,6 +100,7 @@ export interface PDFTextItem {
   fontName: string;
   fontSize: number;
   transform: number[];
+  parentTransform?: number[];
   isEdited: boolean;
   isDeleted?: boolean;
   backgroundColor?: { r: number; g: number; b: number };

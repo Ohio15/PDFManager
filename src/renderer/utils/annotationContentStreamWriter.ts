@@ -34,6 +34,22 @@ export interface ResourceRequirements {
 export interface AnnotationWriteResult {
   contentBytes: Uint8Array;
   resources: ResourceRequirements;
+  /** If true, the caller should add a PDF /Text annotation dict for popup note content. */
+  needsPdfAnnotation?: boolean;
+  /** Content for the PDF /Text annotation (sticky notes). */
+  pdfAnnotationContent?: string;
+  /** Position in PDF coordinates for the annotation rect. */
+  pdfAnnotationRect?: { x: number; y: number; width: number; height: number };
+  /** Color for the PDF annotation. */
+  pdfAnnotationColor?: { r: number; g: number; b: number };
+}
+
+/**
+ * Options that the pipeline can pass to customize annotation rendering.
+ */
+export interface WriteAnnotationOptions {
+  /** Actual text width in points, calculated by pipeline from font metrics. Used for stamp centering. */
+  measuredTextWidth?: number;
 }
 
 /**
@@ -56,7 +72,6 @@ function parseHexColor(hex: string): { r: number; g: number; b: number } {
  * Handles both rgba(R, G, B, A) and hex formats.
  */
 function parseColor(color: string): { r: number; g: number; b: number; a: number } {
-  // Try rgba() format first
   const rgbaMatch = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/i.exec(color);
   if (rgbaMatch) {
     return {
@@ -67,14 +82,25 @@ function parseColor(color: string): { r: number; g: number; b: number; a: number
     };
   }
 
-  // Fall back to hex
   const hex = parseHexColor(color);
   return { ...hex, a: 1 };
 }
 
 /**
+ * Detect whether a fill color represents "no fill" / transparent.
+ * Checks for empty string, 'transparent', 'none', or pure white (#ffffff/#fff).
+ */
+function isTransparentFill(fillColor: string): boolean {
+  if (!fillColor) return true;
+  const lower = fillColor.toLowerCase().trim();
+  if (lower === 'transparent' || lower === 'none' || lower === '') return true;
+  if (lower === '#ffffff' || lower === '#fff') return true;
+  if (lower === 'rgba(255, 255, 255, 0)' || lower === 'rgba(0, 0, 0, 0)') return true;
+  return false;
+}
+
+/**
  * Write a highlight annotation as transparent filled rectangles.
- *
  * Requires ExtGState for fill opacity (`ca` operator).
  */
 function writeHighlight(
@@ -83,7 +109,7 @@ function writeHighlight(
 ): AnnotationWriteResult {
   const builder = new ContentStreamBuilder();
   const color = parseColor(annotation.color);
-  const opacity = color.a < 1 ? color.a : 0.35; // Default highlight transparency
+  const opacity = color.a < 1 ? color.a : 0.35;
 
   const resources: ResourceRequirements = {
     extGStates: [{ fillOpacity: opacity }],
@@ -92,15 +118,10 @@ function writeHighlight(
   };
 
   builder.saveState();
-
-  // ExtGState will be set by caller-assigned name via placeholder index 0
-  // The name gets patched in by writeAnnotationsToContentStream()
   builder.setExtGState('__GS_0__');
-
   builder.setFillColor({ space: 'DeviceRGB', values: [color.r, color.g, color.b] });
 
   for (const rect of annotation.rects) {
-    // Convert from page coords (top-left origin) to PDF coords (bottom-left origin)
     const pdfX = rect.x;
     const pdfY = pageHeight - rect.y - rect.height;
     builder.rectangle(pdfX, pdfY, rect.width, rect.height);
@@ -108,7 +129,6 @@ function writeHighlight(
   }
 
   builder.restoreState();
-
   return { contentBytes: builder.build(), resources };
 }
 
@@ -123,7 +143,7 @@ function writeDrawing(
   const resources: ResourceRequirements = { extGStates: [], xObjects: [], fonts: [] };
 
   builder.saveState();
-  builder.setLineCap(1); // Round cap for smooth freehand appearance
+  builder.setLineCap(1); // Round cap
 
   for (const path of annotation.paths) {
     if (path.points.length < 2) continue;
@@ -132,11 +152,9 @@ function writeDrawing(
     builder.setStrokeColor({ space: 'DeviceRGB', values: [color.r, color.g, color.b] });
     builder.setLineWidth(path.width);
 
-    // First point - moveTo
     const first = path.points[0];
     builder.moveTo(first.x, pageHeight - first.y);
 
-    // Subsequent points - lineTo
     for (let i = 1; i < path.points.length; i++) {
       const pt = path.points[i];
       builder.lineTo(pt.x, pageHeight - pt.y);
@@ -146,12 +164,13 @@ function writeDrawing(
   }
 
   builder.restoreState();
-
   return { contentBytes: builder.build(), resources };
 }
 
 /**
  * Write a shape annotation (rectangle, ellipse, line, arrow).
+ * Fix #8: Uses isTransparentFill() instead of white-color check.
+ * Fix #9: Arrows respect startCorner for direction.
  */
 function writeShape(
   annotation: ShapeAnnotation,
@@ -162,6 +181,7 @@ function writeShape(
 
   const strokeColor = parseHexColor(annotation.strokeColor);
   const fillColor = parseHexColor(annotation.fillColor);
+  const noFill = isTransparentFill(annotation.fillColor);
   const needsOpacity = annotation.opacity < 1;
 
   if (needsOpacity) {
@@ -178,7 +198,6 @@ function writeShape(
   }
 
   builder.setStrokeColor({ space: 'DeviceRGB', values: [strokeColor.r, strokeColor.g, strokeColor.b] });
-  builder.setFillColor({ space: 'DeviceRGB', values: [fillColor.r, fillColor.g, fillColor.b] });
   builder.setLineWidth(annotation.strokeWidth);
 
   // Convert position from page coords to PDF coords
@@ -189,43 +208,48 @@ function writeShape(
 
   switch (annotation.shapeType) {
     case 'rectangle':
+      if (!noFill) {
+        builder.setFillColor({ space: 'DeviceRGB', values: [fillColor.r, fillColor.g, fillColor.b] });
+      }
       builder.rectangle(x, y, w, h);
-      if (fillColor.r !== 1 || fillColor.g !== 1 || fillColor.b !== 1) {
-        builder.fillStroke(); // Fill + stroke
+      if (noFill) {
+        builder.stroke();
       } else {
-        builder.stroke(); // Stroke only for transparent/white fill
+        builder.fillStroke();
       }
       break;
 
     case 'ellipse':
+      if (!noFill) {
+        builder.setFillColor({ space: 'DeviceRGB', values: [fillColor.r, fillColor.g, fillColor.b] });
+      }
       drawEllipse(builder, x, y, w, h);
-      if (fillColor.r !== 1 || fillColor.g !== 1 || fillColor.b !== 1) {
-        builder.fillStroke();
-      } else {
+      if (noFill) {
         builder.stroke();
+      } else {
+        builder.fillStroke();
       }
       break;
 
     case 'line':
-      // Line from top-left to bottom-right of the bounding box
-      builder.moveTo(x, y + h); // Top-left in PDF coords
-      builder.lineTo(x + w, y); // Bottom-right in PDF coords
+      builder.moveTo(x, y + h);
+      builder.lineTo(x + w, y);
       builder.stroke();
       break;
 
-    case 'arrow':
-      drawArrow(builder, x, y, w, h);
+    case 'arrow': {
+      const corner = annotation.startCorner || 'topLeft';
+      drawArrow(builder, x, y, w, h, corner, strokeColor);
       break;
+    }
   }
 
   builder.restoreState();
-
   return { contentBytes: builder.build(), resources };
 }
 
 /**
  * Draw an ellipse using 4 cubic bezier curves (kappa approximation).
- * k = 0.5523 is the standard approximation for a quarter-circle.
  */
 function drawEllipse(
   builder: ContentStreamBuilder,
@@ -242,56 +266,71 @@ function drawEllipse(
   const kx = rx * k;
   const ky = ry * k;
 
-  // Start at top of ellipse
   builder.moveTo(cx, cy + ry);
-
-  // Top to right
   builder.curveTo(cx + kx, cy + ry, cx + rx, cy + ky, cx + rx, cy);
-
-  // Right to bottom
   builder.curveTo(cx + rx, cy - ky, cx + kx, cy - ry, cx, cy - ry);
-
-  // Bottom to left
   builder.curveTo(cx - kx, cy - ry, cx - rx, cy - ky, cx - rx, cy);
-
-  // Left to top
   builder.curveTo(cx - rx, cy + ky, cx - kx, cy + ry, cx, cy + ry);
-
   builder.closePath();
 }
 
 /**
- * Draw an arrow: line from start to end with a filled triangle arrowhead.
+ * Draw an arrow with direction determined by startCorner.
+ * Fix #9: Supports all 4 corner-to-corner directions.
  */
 function drawArrow(
   builder: ContentStreamBuilder,
   x: number,
   y: number,
   w: number,
-  h: number
+  h: number,
+  startCorner: 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight',
+  strokeColor: { r: number; g: number; b: number }
 ): void {
-  // Line from top-left to bottom-right of bounding box (in PDF coords)
-  const x1 = x;
-  const y1 = y + h;
-  const x2 = x + w;
-  const y2 = y;
+  // Map corners to PDF coordinates (y already converted to bottom-left origin)
+  // In PDF coords: bottom-left = (x, y), top-right = (x+w, y+h)
+  let x1: number, y1: number, x2: number, y2: number;
+
+  switch (startCorner) {
+    case 'topLeft':
+      // Page top-left → PDF top-left = (x, y+h) → bottom-right = (x+w, y)
+      x1 = x; y1 = y + h;
+      x2 = x + w; y2 = y;
+      break;
+    case 'topRight':
+      // Page top-right → PDF top-right = (x+w, y+h) → bottom-left = (x, y)
+      x1 = x + w; y1 = y + h;
+      x2 = x; y2 = y;
+      break;
+    case 'bottomLeft':
+      // Page bottom-left → PDF bottom-left = (x, y) → top-right = (x+w, y+h)
+      x1 = x; y1 = y;
+      x2 = x + w; y2 = y + h;
+      break;
+    case 'bottomRight':
+      // Page bottom-right → PDF bottom-right = (x+w, y) → top-left = (x, y+h)
+      x1 = x + w; y1 = y;
+      x2 = x; y2 = y + h;
+      break;
+  }
 
   // Draw the main line
   builder.moveTo(x1, y1);
   builder.lineTo(x2, y2);
   builder.stroke();
 
-  // Calculate arrowhead at endpoint (x2, y2)
+  // Calculate arrowhead at endpoint
   const angle = Math.atan2(y2 - y1, x2 - x1);
   const headLen = Math.min(15, Math.sqrt(w * w + h * h) * 0.2);
-  const headAngle = Math.PI / 6; // 30 degrees
+  const headAngle = Math.PI / 6;
 
   const ax1 = x2 - headLen * Math.cos(angle - headAngle);
   const ay1 = y2 - headLen * Math.sin(angle - headAngle);
   const ax2 = x2 - headLen * Math.cos(angle + headAngle);
   const ay2 = y2 - headLen * Math.sin(angle + headAngle);
 
-  // Draw filled arrowhead triangle
+  // Filled arrowhead triangle using stroke color as fill
+  builder.setFillColor({ space: 'DeviceRGB', values: [strokeColor.r, strokeColor.g, strokeColor.b] });
   builder.moveTo(x2, y2);
   builder.lineTo(ax1, ay1);
   builder.lineTo(ax2, ay2);
@@ -301,18 +340,19 @@ function drawArrow(
 
 /**
  * Write a stamp annotation as a bordered rectangle with text.
- * Requires a font resource.
+ * Fix #4: Accepts measuredTextWidth from pipeline for accurate centering.
  */
 function writeStamp(
   annotation: StampAnnotation,
-  pageHeight: number
+  pageHeight: number,
+  options?: WriteAnnotationOptions
 ): AnnotationWriteResult {
   const builder = new ContentStreamBuilder();
   const color = parseHexColor(annotation.color);
   const resources: ResourceRequirements = {
     extGStates: [],
     xObjects: [],
-    fonts: [{ ref: null }], // Font ref will be assigned by caller
+    fonts: [{ ref: null }],
   };
 
   const x = annotation.position.x;
@@ -322,37 +362,36 @@ function writeStamp(
 
   builder.saveState();
 
-  // Draw border rectangle
+  // Border rectangle
   builder.setStrokeColor({ space: 'DeviceRGB', values: [color.r, color.g, color.b] });
   builder.setLineWidth(2);
   builder.rectangle(x, y, w, h);
   builder.stroke();
 
-  // Draw text centered in the rectangle
+  // Centered text
   builder.setFillColor({ space: 'DeviceRGB', values: [color.r, color.g, color.b] });
   builder.beginText();
 
   const fontSize = Math.min(16, h * 0.5);
   builder.setFont('__F_0__', fontSize);
 
-  // Approximate text centering: estimate text width
-  const approxTextWidth = annotation.text.length * fontSize * 0.5;
-  const textX = x + (w - approxTextWidth) / 2;
-  const textY = y + (h - fontSize) / 2 + fontSize * 0.2; // Slight vertical adjust for baseline
+  // Use measured width from font metrics if available, otherwise estimate
+  const textWidth = options?.measuredTextWidth ?? (annotation.text.length * fontSize * 0.5);
+  const textX = x + (w - textWidth) / 2;
+  const textY = y + (h - fontSize) / 2 + fontSize * 0.2;
 
   builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: textX, f: textY });
   builder.showText(annotation.text);
   builder.endText();
 
   builder.restoreState();
-
   return { contentBytes: builder.build(), resources };
 }
 
 /**
  * Write a sticky note annotation.
- * Renders a small colored square as a visual marker in the content stream.
- * The actual note text is added as a PDF /Text annotation object separately.
+ * Fix #2: Returns metadata for the caller to create a proper PDF /Text annotation
+ * with the note content, so the text is stored in the PDF (not just the visual marker).
  */
 function writeStickyNote(
   annotation: StickyNoteAnnotation,
@@ -362,39 +401,43 @@ function writeStickyNote(
   const color = parseHexColor(annotation.color);
   const resources: ResourceRequirements = { extGStates: [], xObjects: [], fonts: [] };
 
-  // Draw a small colored square (24x24) as visual marker
   const markerSize = 24;
   const x = annotation.position.x;
-  const y = pageHeight - annotation.position.y - markerSize;
+  const pdfY = pageHeight - annotation.position.y - markerSize;
 
   builder.saveState();
 
   builder.setFillColor({ space: 'DeviceRGB', values: [color.r, color.g, color.b] });
   builder.setStrokeColor({ space: 'DeviceRGB', values: [0.4, 0.4, 0.4] });
   builder.setLineWidth(0.5);
-  builder.rectangle(x, y, markerSize, markerSize);
+  builder.rectangle(x, pdfY, markerSize, markerSize);
   builder.fillStroke();
 
-  // Draw a small "N" icon inside to indicate it's a note
+  // "N" icon inside the marker
   builder.setFillColor({ space: 'DeviceRGB', values: [0.2, 0.2, 0.2] });
   builder.beginText();
   builder.setFont('__F_0__', 14);
-  builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: x + 6, f: y + 6 });
+  builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: x + 6, f: pdfY + 6 });
   builder.showText('N');
   builder.endText();
 
   builder.restoreState();
 
-  // Flag that this needs a font
   resources.fonts.push({ ref: null });
 
-  return { contentBytes: builder.build(), resources };
+  return {
+    contentBytes: builder.build(),
+    resources,
+    // Signal to pipeline that a PDF /Text annotation object is needed
+    needsPdfAnnotation: annotation.content ? true : false,
+    pdfAnnotationContent: annotation.content || '',
+    pdfAnnotationRect: { x, y: pdfY, width: markerSize, height: markerSize },
+    pdfAnnotationColor: color,
+  };
 }
 
 /**
  * Write a text annotation using direct text operators.
- * Replaces pdfPage.drawText().
- * Requires a font resource.
  */
 function writeTextAnnotation(
   annotation: TextAnnotation,
@@ -405,7 +448,7 @@ function writeTextAnnotation(
   const resources: ResourceRequirements = {
     extGStates: [],
     xObjects: [],
-    fonts: [{ ref: null }], // Font ref will be assigned by caller
+    fonts: [{ ref: null }],
   };
 
   builder.saveState();
@@ -414,7 +457,6 @@ function writeTextAnnotation(
 
   builder.setFont('__F_0__', annotation.fontSize);
 
-  // Convert from page coords to PDF coords
   const pdfX = annotation.position.x;
   const pdfY = pageHeight - annotation.position.y - annotation.fontSize;
 
@@ -428,8 +470,6 @@ function writeTextAnnotation(
 
 /**
  * Write an image annotation using XObject placement.
- * The image must already be embedded in the PDF document; we just reference it.
- * Requires an XObject resource.
  */
 function writeImageAnnotation(
   annotation: ImageAnnotation,
@@ -438,7 +478,7 @@ function writeImageAnnotation(
   const builder = new ContentStreamBuilder();
   const resources: ResourceRequirements = {
     extGStates: [],
-    xObjects: [{ ref: null }], // XObject ref will be assigned by caller
+    xObjects: [{ ref: null }],
     fonts: [],
   };
 
@@ -448,8 +488,6 @@ function writeImageAnnotation(
   const h = annotation.size.height;
 
   builder.saveState();
-  // Image placement: cm matrix scales and positions the XObject
-  // [width 0 0 height x y] cm
   builder.setMatrix({ a: w, b: 0, c: 0, d: h, e: x, f: y });
   builder.drawXObject('__Im_0__');
   builder.restoreState();
@@ -459,11 +497,12 @@ function writeImageAnnotation(
 
 /**
  * Convert a single annotation to content stream bytes.
- * Returns the raw bytes and resource requirements that must be registered on the page.
+ * Returns the raw bytes, resource requirements, and optional PDF annotation metadata.
  */
 export function writeAnnotation(
   annotation: Annotation,
-  pageHeight: number
+  pageHeight: number,
+  options?: WriteAnnotationOptions
 ): AnnotationWriteResult | null {
   switch (annotation.type) {
     case 'highlight':
@@ -473,7 +512,7 @@ export function writeAnnotation(
     case 'shape':
       return writeShape(annotation, pageHeight);
     case 'stamp':
-      return writeStamp(annotation, pageHeight);
+      return writeStamp(annotation, pageHeight, options);
     case 'note':
       return writeStickyNote(annotation, pageHeight);
     case 'text':

@@ -10,9 +10,10 @@
  * 3. For each page:
  *    a. Blank deleted text items (content stream + cover rectangle)
  *    b. Apply text edits (content stream + fallback overlay via ContentStreamBuilder)
- *    c. Convert ALL annotations to content stream
+ *    c. Convert ALL annotations to content stream (batched per page)
  *    d. Register required resources
- *    e. Inject content stream
+ *    e. Inject single content stream per page
+ *    f. Add PDF /Text annotation dicts for sticky notes
  * 4. Save form field values
  * 5. Return pdfDoc.save() bytes
  */
@@ -23,14 +24,18 @@ import {
   PDFFont,
   PDFRef,
   PDFName,
+  PDFArray,
+  PDFDict,
+  PDFNumber,
+  PDFHexString,
+  PDFString,
 } from 'pdf-lib';
 
 import type {
   PDFPage,
-  PDFTextItem,
   Annotation,
-  TextAnnotation,
   ImageAnnotation,
+  StampAnnotation,
 } from '../types';
 
 import { replaceTextInPage } from './pdfTextReplacer';
@@ -41,12 +46,7 @@ import {
   writeAnnotation,
   AnnotationWriteResult,
 } from './annotationContentStreamWriter';
-import {
-  ensureExtGState,
-  ensureFont,
-  ensureXObject,
-  resetResourceCounter,
-} from './pdfResourceManager';
+import { ResourceAllocator } from './pdfResourceManager';
 import { appendContentStream } from './contentStreamInjector';
 
 // Map common PDF font names to pdf-lib StandardFonts
@@ -96,20 +96,21 @@ export async function applyEditsAndAnnotations(
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const helveticaRef = getFontRef(pdfDoc, helvetica);
 
-  resetResourceCounter();
+  // Per-save resource allocator (Fix #6: no global counter)
+  const resources = new ResourceAllocator();
 
   for (const page of pages) {
     const pdfPage = pdfDoc.getPage(page.index);
     const { height } = pdfPage.getSize();
 
     // --- (a) Blank deleted text items ---
-    await processDeletedTextItems(pdfDoc, page, height);
+    await processDeletedTextItems(pdfDoc, resources, page, height);
 
     // --- (b) Apply text edits ---
-    await processTextEdits(pdfDoc, page, height);
+    await processTextEdits(pdfDoc, resources, page, height);
 
-    // --- (c) Convert all annotations to content stream ---
-    await processAnnotations(pdfDoc, page, height, helvetica, helveticaRef);
+    // --- (c) Convert all annotations to content stream (batched) ---
+    await processAnnotations(pdfDoc, resources, page, height, helvetica, helveticaRef);
   }
 
   // --- (d) Save form field values ---
@@ -125,10 +126,11 @@ export async function applyEditsAndAnnotations(
 }
 
 /**
- * Process deleted text items: blank in content stream + draw cover rectangle via ContentStreamBuilder.
+ * Process deleted text items: blank in content stream + draw cover rectangle.
  */
 async function processDeletedTextItems(
   pdfDoc: PDFLib,
+  resources: ResourceAllocator,
   page: PDFPage,
   pageHeight: number
 ): Promise<void> {
@@ -138,10 +140,8 @@ async function processDeletedTextItems(
   const builder = new ContentStreamBuilder();
 
   for (const deletedItem of deletedItems) {
-    // Try to blank in content stream (best effort)
     await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
 
-    // Draw background-colored cover rectangle
     const textHeight = deletedItem.fontSize;
     const baselineY = deletedItem.transform
       ? deletedItem.transform[5]
@@ -169,10 +169,11 @@ async function processDeletedTextItems(
 }
 
 /**
- * Process text edits: try content stream modification first, fall back to overlay via ContentStreamBuilder.
+ * Process text edits: content stream modification first, fallback to overlay.
  */
 async function processTextEdits(
   pdfDoc: PDFLib,
+  resources: ResourceAllocator,
   page: PDFPage,
   pageHeight: number
 ): Promise<void> {
@@ -180,13 +181,11 @@ async function processTextEdits(
 
   const fontCache = new Map<string, { font: PDFFont; ref: PDFRef }>();
   const builder = new ContentStreamBuilder();
-  const fontsNeeded: Array<{ name: string; ref: PDFRef }> = [];
 
   for (const edit of page.textEdits) {
     const textItem = page.textItems?.find(t => t.id === edit.itemId);
     if (!textItem) continue;
 
-    // First, try content stream modification
     const contentStreamModified = await replaceTextInPage(
       pdfDoc,
       page.index,
@@ -195,10 +194,9 @@ async function processTextEdits(
     );
 
     if (contentStreamModified) {
-      continue; // Success - move to next edit
+      continue;
     }
 
-    // Fall back to overlay: blank original + draw replacement
     await blankTextInContentStream(pdfDoc, page.index, edit.originalText);
 
     const standardFontName = mapToStandardFont(textItem.fontName);
@@ -210,15 +208,14 @@ async function processTextEdits(
       fontCache.set(standardFontName, fontEntry);
     }
 
-    // Register font on page if not already
-    const fontResName = ensureFont(pdfDoc, page.index, fontEntry.ref);
+    const fontResName = resources.ensureFont(pdfDoc, page.index, fontEntry.ref);
 
     const textHeight = textItem.fontSize;
     const baselineY = textItem.transform
       ? textItem.transform[5]
       : (pageHeight - textItem.y - textHeight);
 
-    // Draw background cover rectangle
+    // Cover rectangle
     const bgColor = textItem.backgroundColor || { r: 1, g: 1, b: 1 };
     builder.saveState();
     builder.setFillColor({
@@ -234,7 +231,7 @@ async function processTextEdits(
     builder.fill();
     builder.restoreState();
 
-    // Draw replacement text
+    // Replacement text
     const txtColor = textItem.textColor || { r: 0, g: 0, b: 0 };
     builder.saveState();
     builder.setFillColor({
@@ -255,10 +252,23 @@ async function processTextEdits(
 }
 
 /**
- * Process all annotations on a page: convert to content stream and inject.
+ * Pending sticky note that needs a PDF /Text annotation dict after content stream injection.
+ */
+interface PendingStickyNote {
+  content: string;
+  rect: { x: number; y: number; width: number; height: number };
+  color: { r: number; g: number; b: number };
+}
+
+/**
+ * Process all annotations on a page.
+ * Fix #3: Batches all annotation content into a single stream per page.
+ * Fix #2: Creates PDF /Text annotation dicts for sticky notes.
+ * Fix #4: Uses font metrics for accurate stamp text centering.
  */
 async function processAnnotations(
   pdfDoc: PDFLib,
+  resources: ResourceAllocator,
   page: PDFPage,
   pageHeight: number,
   helvetica: PDFFont,
@@ -266,61 +276,75 @@ async function processAnnotations(
 ): Promise<void> {
   if (page.annotations.length === 0) return;
 
-  const builder = new ContentStreamBuilder();
+  // Collect all annotation content bytes into one batch
+  const batchedChunks: Uint8Array[] = [];
+  const pendingStickyNotes: PendingStickyNote[] = [];
 
   for (const annotation of page.annotations) {
-    // Handle image embedding specially (needs to embed image data first)
+    // Handle image embedding specially (needs async embed)
     if (annotation.type === 'image') {
-      await processImageAnnotation(pdfDoc, page.index, annotation, pageHeight, builder);
+      const imageChunk = await buildImageChunk(pdfDoc, resources, page.index, annotation, pageHeight);
+      if (imageChunk) batchedChunks.push(imageChunk);
       continue;
     }
 
-    const result = writeAnnotation(annotation, pageHeight);
+    // Fix #4: Measure stamp text width from font metrics
+    let writeOptions: { measuredTextWidth?: number } | undefined;
+    if (annotation.type === 'stamp') {
+      const stamp = annotation as StampAnnotation;
+      const fontSize = Math.min(16, stamp.size.height * 0.5);
+      writeOptions = {
+        measuredTextWidth: helvetica.widthOfTextAtSize(stamp.text, fontSize),
+      };
+    }
+
+    const result = writeAnnotation(annotation, pageHeight, writeOptions);
     if (!result) continue;
 
-    // Register required resources and patch placeholder names in content bytes
-    let contentStr = new TextDecoder('latin1').decode(result.contentBytes);
+    // Patch placeholder resource names with real registered names
+    const patchedBytes = patchResourceNames(pdfDoc, resources, page.index, result, helveticaRef);
+    batchedChunks.push(patchedBytes);
 
-    // Register ExtGStates
-    for (let i = 0; i < result.resources.extGStates.length; i++) {
-      const gs = result.resources.extGStates[i];
-      const gsName = ensureExtGState(pdfDoc, page.index, {
-        fillOpacity: gs.fillOpacity,
-        strokeOpacity: gs.strokeOpacity,
+    // Fix #2: Collect sticky notes that need PDF annotation objects
+    if (result.needsPdfAnnotation && result.pdfAnnotationContent) {
+      pendingStickyNotes.push({
+        content: result.pdfAnnotationContent,
+        rect: result.pdfAnnotationRect!,
+        color: result.pdfAnnotationColor!,
       });
-      contentStr = contentStr.replace(`/__GS_${i}__`, `/${gsName}`);
     }
+  }
 
-    // Register Fonts
-    for (let i = 0; i < result.resources.fonts.length; i++) {
-      const fontResName = ensureFont(pdfDoc, page.index, helveticaRef);
-      contentStr = contentStr.replace(`/__F_${i}__`, `/${fontResName}`);
-      // Also patch Tf operator which has the font name without leading /
-      contentStr = contentStr.replace(`/${`__F_${i}__`} `, `/${fontResName} `);
+  // Fix #3: Inject all annotation content as a single stream per page
+  if (batchedChunks.length > 0) {
+    const totalLength = batchedChunks.reduce((sum, chunk) => sum + chunk.length + 1, 0);
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of batchedChunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+      merged[offset] = 0x0A; // newline separator between annotation chunks
+      offset += 1;
     }
+    appendContentStream(pdfDoc, page.index, merged.subarray(0, offset));
+  }
 
-    // Convert patched string back to bytes
-    const patchedBytes = new Uint8Array(contentStr.length);
-    for (let i = 0; i < contentStr.length; i++) {
-      patchedBytes[i] = contentStr.charCodeAt(i) & 0xFF;
-    }
-
-    // Append the content for this annotation
-    appendContentStream(pdfDoc, page.index, patchedBytes);
+  // Fix #2: Add PDF /Text annotation dicts for sticky notes
+  for (const note of pendingStickyNotes) {
+    addPdfTextAnnotation(pdfDoc, page.index, note);
   }
 }
 
 /**
- * Process an image annotation: embed image, register XObject, write placement operators.
+ * Build content stream bytes for an image annotation (async: needs embed).
  */
-async function processImageAnnotation(
+async function buildImageChunk(
   pdfDoc: PDFLib,
+  resources: ResourceAllocator,
   pageIndex: number,
   annotation: ImageAnnotation,
-  pageHeight: number,
-  builder: ContentStreamBuilder
-): Promise<void> {
-  // Embed the image
+  pageHeight: number
+): Promise<Uint8Array | null> {
   const imageBytes = Uint8Array.from(atob(annotation.data), c => c.charCodeAt(0));
   let image;
   if (annotation.imageType === 'png') {
@@ -329,47 +353,139 @@ async function processImageAnnotation(
     image = await pdfDoc.embedJpg(imageBytes);
   }
 
-  // Get the image's indirect reference from pdf-lib
   const imageRef = getImageRef(image);
+  const imName = resources.ensureXObject(pdfDoc, pageIndex, imageRef);
 
-  // Register as XObject on the page
-  const imName = ensureXObject(pdfDoc, pageIndex, imageRef);
-
-  // Build placement content stream
-  const imgBuilder = new ContentStreamBuilder();
+  const builder = new ContentStreamBuilder();
   const x = annotation.position.x;
   const y = pageHeight - annotation.position.y - annotation.size.height;
   const w = annotation.size.width;
   const h = annotation.size.height;
 
-  imgBuilder.saveState();
-  imgBuilder.setMatrix({ a: w, b: 0, c: 0, d: h, e: x, f: y });
-  imgBuilder.drawXObject(imName);
-  imgBuilder.restoreState();
+  builder.saveState();
+  builder.setMatrix({ a: w, b: 0, c: 0, d: h, e: x, f: y });
+  builder.drawXObject(imName);
+  builder.restoreState();
 
-  appendContentStream(pdfDoc, pageIndex, imgBuilder.build());
+  return builder.build();
+}
+
+/**
+ * Patch placeholder resource names (__GS_0__, __F_0__, __Im_0__) with real registered names.
+ */
+function patchResourceNames(
+  pdfDoc: PDFLib,
+  resources: ResourceAllocator,
+  pageIndex: number,
+  result: AnnotationWriteResult,
+  helveticaRef: PDFRef
+): Uint8Array {
+  let contentStr = new TextDecoder('latin1').decode(result.contentBytes);
+
+  // Register ExtGStates
+  for (let i = 0; i < result.resources.extGStates.length; i++) {
+    const gs = result.resources.extGStates[i];
+    const gsName = resources.ensureExtGState(pdfDoc, pageIndex, {
+      fillOpacity: gs.fillOpacity,
+      strokeOpacity: gs.strokeOpacity,
+    });
+    contentStr = contentStr.replaceAll(`/__GS_${i}__`, `/${gsName}`);
+  }
+
+  // Register Fonts
+  for (let i = 0; i < result.resources.fonts.length; i++) {
+    const fontResName = resources.ensureFont(pdfDoc, pageIndex, helveticaRef);
+    contentStr = contentStr.replaceAll(`/__F_${i}__`, `/${fontResName}`);
+  }
+
+  // Convert patched string back to latin1 bytes
+  const patchedBytes = new Uint8Array(contentStr.length);
+  for (let i = 0; i < contentStr.length; i++) {
+    patchedBytes[i] = contentStr.charCodeAt(i) & 0xFF;
+  }
+
+  return patchedBytes;
+}
+
+/**
+ * Fix #2: Add a proper PDF /Text annotation dict to the page's /Annots array.
+ * This creates a standard popup note that works in Adobe Reader and other viewers.
+ */
+function addPdfTextAnnotation(
+  pdfDoc: PDFLib,
+  pageIndex: number,
+  note: PendingStickyNote
+): void {
+  const context = pdfDoc.context;
+  const page = pdfDoc.getPages()[pageIndex];
+  const pageDict = page.node;
+
+  // Build the annotation dictionary
+  const annotDict = context.obj({});
+  annotDict.set(PDFName.of('Type'), PDFName.of('Annot'));
+  annotDict.set(PDFName.of('Subtype'), PDFName.of('Text'));
+
+  // Rect: [x, y, x+width, y+height]
+  const rect = context.obj([
+    PDFNumber.of(note.rect.x),
+    PDFNumber.of(note.rect.y),
+    PDFNumber.of(note.rect.x + note.rect.width),
+    PDFNumber.of(note.rect.y + note.rect.height),
+  ]);
+  annotDict.set(PDFName.of('Rect'), rect);
+
+  // Contents - the actual note text
+  annotDict.set(PDFName.of('Contents'), PDFHexString.fromText(note.content));
+
+  // Color array [r, g, b]
+  const colorArray = context.obj([
+    PDFNumber.of(note.color.r),
+    PDFNumber.of(note.color.g),
+    PDFNumber.of(note.color.b),
+  ]);
+  annotDict.set(PDFName.of('C'), colorArray);
+
+  // Name: icon type
+  annotDict.set(PDFName.of('Name'), PDFName.of('Note'));
+
+  // Open: false (collapsed by default)
+  annotDict.set(PDFName.of('Open'), context.obj(false));
+
+  // F: print flag (bit 3 = print)
+  annotDict.set(PDFName.of('F'), PDFNumber.of(4));
+
+  const annotRef = context.register(annotDict);
+
+  // Get or create the page's /Annots array
+  const annotsRef = pageDict.get(PDFName.of('Annots'));
+  if (annotsRef) {
+    const annots = context.lookup(annotsRef);
+    if (annots instanceof PDFArray) {
+      annots.push(annotRef);
+    } else {
+      // Replace with new array containing existing + new
+      const newArray = context.obj([annotsRef as PDFRef, annotRef]);
+      pageDict.set(PDFName.of('Annots'), newArray);
+    }
+  } else {
+    const newArray = context.obj([annotRef]);
+    pageDict.set(PDFName.of('Annots'), newArray);
+  }
 }
 
 /**
  * Extract the indirect PDFRef for an embedded font.
- * pdf-lib stores the ref internally; we access it to register in page resources.
  */
 function getFontRef(pdfDoc: PDFLib, font: PDFFont): PDFRef {
-  // pdf-lib PDFFont stores its ref at font.ref
   const ref = (font as any).ref;
   if (ref) return ref;
-
-  // Fallback: search the document's font cache
-  // This shouldn't normally be needed but provides robustness
   throw new Error('Could not extract font reference from pdf-lib PDFFont');
 }
 
 /**
  * Extract the indirect PDFRef for an embedded image.
- * pdf-lib stores the ref internally on the image object.
  */
 function getImageRef(image: any): PDFRef {
-  // pdf-lib PDFImage stores its ref at image.ref
   const ref = image.ref;
   if (ref) return ref;
   throw new Error('Could not extract image reference from pdf-lib PDFImage');

@@ -48,34 +48,13 @@ import {
 } from './annotationContentStreamWriter';
 import { ResourceAllocator } from './pdfResourceManager';
 import { appendContentStream } from './contentStreamInjector';
-
-// Map common PDF font names to pdf-lib StandardFonts
-function mapToStandardFont(fontName: string): typeof StandardFonts[keyof typeof StandardFonts] {
-  const name = fontName.toLowerCase();
-
-  if (name.includes('helvetica') || name.includes('arial') || name.includes('sans')) {
-    if (name.includes('bold') && name.includes('oblique')) return StandardFonts.HelveticaBoldOblique;
-    if (name.includes('bold')) return StandardFonts.HelveticaBold;
-    if (name.includes('oblique') || name.includes('italic')) return StandardFonts.HelveticaOblique;
-    return StandardFonts.Helvetica;
-  }
-
-  if (name.includes('times') || name.includes('serif')) {
-    if (name.includes('bold') && name.includes('italic')) return StandardFonts.TimesRomanBoldItalic;
-    if (name.includes('bold')) return StandardFonts.TimesRomanBold;
-    if (name.includes('italic')) return StandardFonts.TimesRomanItalic;
-    return StandardFonts.TimesRoman;
-  }
-
-  if (name.includes('courier') || name.includes('mono')) {
-    if (name.includes('bold') && name.includes('oblique')) return StandardFonts.CourierBoldOblique;
-    if (name.includes('bold')) return StandardFonts.CourierBold;
-    if (name.includes('oblique') || name.includes('italic')) return StandardFonts.CourierOblique;
-    return StandardFonts.Courier;
-  }
-
-  return StandardFonts.Helvetica;
-}
+import {
+  mapToStandardFontName,
+  measureTextWidth,
+  getTextHeight,
+  getDescentBelow,
+  calculateCharacterSpacing,
+} from './standardFontMetrics';
 
 export interface SavePipelineInput {
   pdfData: Uint8Array;
@@ -101,13 +80,13 @@ export async function applyEditsAndAnnotations(
 
   for (const page of pages) {
     const pdfPage = pdfDoc.getPage(page.index);
-    const { height } = pdfPage.getSize();
+    const { height, width } = pdfPage.getSize();
 
     // --- (a) Blank deleted text items ---
     await processDeletedTextItems(pdfDoc, resources, page, height);
 
-    // --- (b) Apply text edits ---
-    await processTextEdits(pdfDoc, resources, page, height);
+    // --- (b) Apply text edits (Issue #10: two-pass) ---
+    await processTextEdits(pdfDoc, resources, page, height, width);
 
     // --- (c) Convert all annotations to content stream (batched) ---
     await processAnnotations(pdfDoc, resources, page, height, helvetica, helveticaRef);
@@ -127,6 +106,7 @@ export async function applyEditsAndAnnotations(
 
 /**
  * Process deleted text items: blank in content stream + draw cover rectangle.
+ * Issue #5 fix: use real font metrics for cover rectangle dimensions.
  */
 async function processDeletedTextItems(
   pdfDoc: PDFLib,
@@ -142,7 +122,9 @@ async function processDeletedTextItems(
   for (const deletedItem of deletedItems) {
     await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
 
-    const textHeight = deletedItem.fontSize;
+    const stdFont = mapToStandardFontName(deletedItem.fontName);
+    const textHeight = getTextHeight(stdFont, deletedItem.fontSize);
+    const descentBelow = getDescentBelow(stdFont, deletedItem.fontSize);
     const baselineY = deletedItem.transform
       ? deletedItem.transform[5]
       : (pageHeight - deletedItem.y - textHeight);
@@ -155,9 +137,9 @@ async function processDeletedTextItems(
     });
     builder.rectangle(
       deletedItem.x - 1,
-      baselineY - (textHeight * 0.25),
+      baselineY - descentBelow,
       deletedItem.width + 2,
-      textHeight * 1.3
+      textHeight
     );
     builder.fill();
     builder.restoreState();
@@ -169,18 +151,23 @@ async function processDeletedTextItems(
 }
 
 /**
- * Process text edits: content stream modification first, fallback to overlay.
+ * Process text edits: Issue #10 — two-pass approach.
+ * Pass 1: Try replaceTextInPage() for ALL edits (no blanking yet).
+ * Pass 2: For failed edits only, blank + overlay.
+ *
+ * This prevents early blanking from corrupting the stream for later replacements.
  */
 async function processTextEdits(
   pdfDoc: PDFLib,
   resources: ResourceAllocator,
   page: PDFPage,
-  pageHeight: number
+  pageHeight: number,
+  pageWidth: number
 ): Promise<void> {
   if (!page.textEdits || page.textEdits.length === 0) return;
 
-  const fontCache = new Map<string, { font: PDFFont; ref: PDFRef }>();
-  const builder = new ContentStreamBuilder();
+  // Pass 1: Try content stream replacement for ALL edits first
+  const failedEdits: typeof page.textEdits = [];
 
   for (const edit of page.textEdits) {
     const textItem = page.textItems?.find(t => t.id === edit.itemId);
@@ -193,55 +180,142 @@ async function processTextEdits(
       edit.newText
     );
 
-    if (contentStreamModified) {
-      continue;
+    if (!contentStreamModified) {
+      failedEdits.push(edit);
     }
+  }
+
+  // Pass 2: For failed edits, apply blank + overlay fallback
+  if (failedEdits.length === 0) return;
+
+  const fontCache = new Map<string, { font: PDFFont; ref: PDFRef }>();
+  const builder = new ContentStreamBuilder();
+
+  for (const edit of failedEdits) {
+    const textItem = page.textItems?.find(t => t.id === edit.itemId);
+    if (!textItem) continue;
 
     await blankTextInContentStream(pdfDoc, page.index, edit.originalText);
 
-    const standardFontName = mapToStandardFont(textItem.fontName);
-    let fontEntry = fontCache.get(standardFontName);
+    const standardFontName = mapToStandardFontName(textItem.fontName);
+    const stdFontEnum = standardFontName;
+
+    // Map to pdf-lib StandardFonts for embedding
+    const pdfLibFontName = mapToPdfLibStandardFont(textItem.fontName);
+    let fontEntry = fontCache.get(pdfLibFontName);
     if (!fontEntry) {
-      const font = await pdfDoc.embedFont(standardFontName);
+      const font = await pdfDoc.embedFont(pdfLibFontName);
       const ref = getFontRef(pdfDoc, font);
       fontEntry = { font, ref };
-      fontCache.set(standardFontName, fontEntry);
+      fontCache.set(pdfLibFontName, fontEntry);
     }
 
     const fontResName = resources.ensureFont(pdfDoc, page.index, fontEntry.ref);
 
-    const textHeight = textItem.fontSize;
+    // Issue #5: Use real font metrics for cover rectangle
+    const textHeight = getTextHeight(stdFontEnum, textItem.fontSize);
+    const descentBelow = getDescentBelow(stdFontEnum, textItem.fontSize);
     const baselineY = textItem.transform
       ? textItem.transform[5]
       : (pageHeight - textItem.y - textHeight);
 
-    // Cover rectangle
+    // Cover rectangle with correct metrics
     const bgColor = textItem.backgroundColor || { r: 1, g: 1, b: 1 };
     builder.saveState();
     builder.setFillColor({
       space: 'DeviceRGB',
       values: [bgColor.r, bgColor.g, bgColor.b],
     });
-    builder.rectangle(
-      textItem.x - 1,
-      baselineY - (textHeight * 0.25),
-      textItem.width + 2,
-      textHeight * 1.3
-    );
+
+    // Issue #9: For rotated text, transform cover rect through text matrix
+    if (textItem.transform && (textItem.transform[1] !== 0 || textItem.transform[2] !== 0)) {
+      // Rotated text — apply CTM to position the cover rectangle
+      const t = textItem.transform;
+      builder.setMatrix({
+        a: t[0] / textItem.fontSize,
+        b: t[1] / textItem.fontSize,
+        c: t[2] / textItem.fontSize,
+        d: t[3] / textItem.fontSize,
+        e: t[4],
+        f: t[5],
+      });
+      // In the rotated coordinate system, position relative to origin
+      builder.rectangle(
+        -1,
+        -descentBelow,
+        textItem.width + 2,
+        textHeight
+      );
+    } else {
+      builder.rectangle(
+        textItem.x - 1,
+        baselineY - descentBelow,
+        textItem.width + 2,
+        textHeight
+      );
+    }
     builder.fill();
     builder.restoreState();
 
+    // Issue #12: Use original color space when available
+    let fillColorSpec: { space: string; values: number[] };
+    if (textItem.colorSpace && textItem.originalColorValues) {
+      fillColorSpec = {
+        space: textItem.colorSpace,
+        values: textItem.originalColorValues,
+      };
+    } else {
+      const txtColor = textItem.textColor || { r: 0, g: 0, b: 0 };
+      fillColorSpec = {
+        space: 'DeviceRGB',
+        values: [txtColor.r, txtColor.g, txtColor.b],
+      };
+    }
+
     // Replacement text
-    const txtColor = textItem.textColor || { r: 0, g: 0, b: 0 };
     builder.saveState();
-    builder.setFillColor({
-      space: 'DeviceRGB',
-      values: [txtColor.r, txtColor.g, txtColor.b],
-    });
+    builder.setFillColor(fillColorSpec as any);
+
+    // Issue #9: For rotated pages, apply inverse rotation CTM
+    const pageRotation = page.rotation || 0;
+    if (pageRotation !== 0) {
+      applyInversePageRotation(builder, pageRotation, pageWidth, pageHeight);
+    }
+
     builder.beginText();
     builder.setFont(fontResName, textItem.fontSize);
-    builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: textItem.x, f: baselineY });
-    builder.showText(edit.newText);
+
+    // Issue #1: Use actual transform matrix instead of identity
+    if (textItem.transform && (textItem.transform[1] !== 0 || textItem.transform[2] !== 0)) {
+      const t = textItem.transform;
+      builder.setTextMatrix({
+        a: t[0] / textItem.fontSize,
+        b: t[1] / textItem.fontSize,
+        c: t[2] / textItem.fontSize,
+        d: t[3] / textItem.fontSize,
+        e: textItem.x,
+        f: t[5],
+      });
+    } else {
+      builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: textItem.x, f: baselineY });
+    }
+
+    // Issue #6: Calculate character spacing to match original width
+    const tcValue = calculateCharacterSpacing(
+      edit.newText,
+      textItem.width,
+      stdFontEnum,
+      textItem.fontSize,
+    );
+
+    if (tcValue !== null) {
+      builder.setCharacterSpacing(tcValue);
+      builder.showText(edit.newText);
+      builder.setCharacterSpacing(0);
+    } else {
+      builder.showText(edit.newText);
+    }
+
     builder.endText();
     builder.restoreState();
   }
@@ -249,6 +323,55 @@ async function processTextEdits(
   if (builder.commandCount > 0) {
     appendContentStream(pdfDoc, page.index, builder.build());
   }
+}
+
+/**
+ * Issue #9: Apply inverse rotation CTM for rotated pages.
+ * Transforms coordinates so that overlay text appears correctly on rotated pages.
+ */
+function applyInversePageRotation(
+  builder: ContentStreamBuilder,
+  rotation: number,
+  pageWidth: number,
+  pageHeight: number
+): void {
+  switch (rotation % 360) {
+    case 90:
+      builder.setMatrix({ a: 0, b: -1, c: 1, d: 0, e: 0, f: pageWidth });
+      break;
+    case 180:
+      builder.setMatrix({ a: -1, b: 0, c: 0, d: -1, e: pageWidth, f: pageHeight });
+      break;
+    case 270:
+      builder.setMatrix({ a: 0, b: 1, c: -1, d: 0, e: pageHeight, f: 0 });
+      break;
+  }
+}
+
+/**
+ * Map PDF font name to pdf-lib StandardFonts enum value.
+ */
+function mapToPdfLibStandardFont(fontName: string): typeof StandardFonts[keyof typeof StandardFonts] {
+  const name = fontName.toLowerCase();
+
+  if (name.includes('courier') || name.includes('mono') || name.includes('consolas') || name.includes('menlo') || name.includes('monaco')) {
+    if (name.includes('bold') && (name.includes('oblique') || name.includes('italic'))) return StandardFonts.CourierBoldOblique;
+    if (name.includes('bold')) return StandardFonts.CourierBold;
+    if (name.includes('oblique') || name.includes('italic')) return StandardFonts.CourierOblique;
+    return StandardFonts.Courier;
+  }
+
+  if (name.includes('times') || name.includes('georgia') || name.includes('garamond') || name.includes('palatino') || (name.includes('serif') && !name.includes('sans'))) {
+    if (name.includes('bold') && name.includes('italic')) return StandardFonts.TimesRomanBoldItalic;
+    if (name.includes('bold')) return StandardFonts.TimesRomanBold;
+    if (name.includes('italic')) return StandardFonts.TimesRomanItalic;
+    return StandardFonts.TimesRoman;
+  }
+
+  if (name.includes('bold') && (name.includes('oblique') || name.includes('italic'))) return StandardFonts.HelveticaBoldOblique;
+  if (name.includes('bold')) return StandardFonts.HelveticaBold;
+  if (name.includes('oblique') || name.includes('italic')) return StandardFonts.HelveticaOblique;
+  return StandardFonts.Helvetica;
 }
 
 /**
@@ -276,19 +399,16 @@ async function processAnnotations(
 ): Promise<void> {
   if (page.annotations.length === 0) return;
 
-  // Collect all annotation content bytes into one batch
   const batchedChunks: Uint8Array[] = [];
   const pendingStickyNotes: PendingStickyNote[] = [];
 
   for (const annotation of page.annotations) {
-    // Handle image embedding specially (needs async embed)
     if (annotation.type === 'image') {
       const imageChunk = await buildImageChunk(pdfDoc, resources, page.index, annotation, pageHeight);
       if (imageChunk) batchedChunks.push(imageChunk);
       continue;
     }
 
-    // Fix #4: Measure stamp text width from font metrics
     let writeOptions: { measuredTextWidth?: number } | undefined;
     if (annotation.type === 'stamp') {
       const stamp = annotation as StampAnnotation;
@@ -301,11 +421,9 @@ async function processAnnotations(
     const result = writeAnnotation(annotation, pageHeight, writeOptions);
     if (!result) continue;
 
-    // Patch placeholder resource names with real registered names
     const patchedBytes = patchResourceNames(pdfDoc, resources, page.index, result, helveticaRef);
     batchedChunks.push(patchedBytes);
 
-    // Fix #2: Collect sticky notes that need PDF annotation objects
     if (result.needsPdfAnnotation && result.pdfAnnotationContent) {
       pendingStickyNotes.push({
         content: result.pdfAnnotationContent,
@@ -315,7 +433,6 @@ async function processAnnotations(
     }
   }
 
-  // Fix #3: Inject all annotation content as a single stream per page
   if (batchedChunks.length > 0) {
     const totalLength = batchedChunks.reduce((sum, chunk) => sum + chunk.length + 1, 0);
     const merged = new Uint8Array(totalLength);
@@ -323,13 +440,12 @@ async function processAnnotations(
     for (const chunk of batchedChunks) {
       merged.set(chunk, offset);
       offset += chunk.length;
-      merged[offset] = 0x0A; // newline separator between annotation chunks
+      merged[offset] = 0x0A;
       offset += 1;
     }
     appendContentStream(pdfDoc, page.index, merged.subarray(0, offset));
   }
 
-  // Fix #2: Add PDF /Text annotation dicts for sticky notes
   for (const note of pendingStickyNotes) {
     addPdfTextAnnotation(pdfDoc, page.index, note);
   }
@@ -382,7 +498,6 @@ function patchResourceNames(
 ): Uint8Array {
   let contentStr = new TextDecoder('latin1').decode(result.contentBytes);
 
-  // Register ExtGStates
   for (let i = 0; i < result.resources.extGStates.length; i++) {
     const gs = result.resources.extGStates[i];
     const gsName = resources.ensureExtGState(pdfDoc, pageIndex, {
@@ -392,13 +507,11 @@ function patchResourceNames(
     contentStr = contentStr.replaceAll(`/__GS_${i}__`, `/${gsName}`);
   }
 
-  // Register Fonts
   for (let i = 0; i < result.resources.fonts.length; i++) {
     const fontResName = resources.ensureFont(pdfDoc, pageIndex, helveticaRef);
     contentStr = contentStr.replaceAll(`/__F_${i}__`, `/${fontResName}`);
   }
 
-  // Convert patched string back to latin1 bytes
   const patchedBytes = new Uint8Array(contentStr.length);
   for (let i = 0; i < contentStr.length; i++) {
     patchedBytes[i] = contentStr.charCodeAt(i) & 0xFF;
@@ -409,7 +522,6 @@ function patchResourceNames(
 
 /**
  * Fix #2: Add a proper PDF /Text annotation dict to the page's /Annots array.
- * This creates a standard popup note that works in Adobe Reader and other viewers.
  */
 function addPdfTextAnnotation(
   pdfDoc: PDFLib,
@@ -420,12 +532,10 @@ function addPdfTextAnnotation(
   const page = pdfDoc.getPages()[pageIndex];
   const pageDict = page.node;
 
-  // Build the annotation dictionary
   const annotDict = context.obj({});
   annotDict.set(PDFName.of('Type'), PDFName.of('Annot'));
   annotDict.set(PDFName.of('Subtype'), PDFName.of('Text'));
 
-  // Rect: [x, y, x+width, y+height]
   const rect = context.obj([
     PDFNumber.of(note.rect.x),
     PDFNumber.of(note.rect.y),
@@ -434,10 +544,8 @@ function addPdfTextAnnotation(
   ]);
   annotDict.set(PDFName.of('Rect'), rect);
 
-  // Contents - the actual note text
   annotDict.set(PDFName.of('Contents'), PDFHexString.fromText(note.content));
 
-  // Color array [r, g, b]
   const colorArray = context.obj([
     PDFNumber.of(note.color.r),
     PDFNumber.of(note.color.g),
@@ -445,25 +553,18 @@ function addPdfTextAnnotation(
   ]);
   annotDict.set(PDFName.of('C'), colorArray);
 
-  // Name: icon type
   annotDict.set(PDFName.of('Name'), PDFName.of('Note'));
-
-  // Open: false (collapsed by default)
   annotDict.set(PDFName.of('Open'), context.obj(false));
-
-  // F: print flag (bit 3 = print)
   annotDict.set(PDFName.of('F'), PDFNumber.of(4));
 
   const annotRef = context.register(annotDict);
 
-  // Get or create the page's /Annots array
   const annotsRef = pageDict.get(PDFName.of('Annots'));
   if (annotsRef) {
     const annots = context.lookup(annotsRef);
     if (annots instanceof PDFArray) {
       annots.push(annotRef);
     } else {
-      // Replace with new array containing existing + new
       const newArray = context.obj([annotsRef as PDFRef, annotRef]);
       pageDict.set(PDFName.of('Annots'), newArray);
     }

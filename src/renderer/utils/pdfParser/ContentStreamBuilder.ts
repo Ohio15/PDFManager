@@ -437,19 +437,12 @@ export class TextEditCompiler {
       const newWidth = this.calculateTextWidth(newText, fontInfo, fontSize);
 
       if (Math.abs(originalWidth - newWidth) > 1) {
-        // Need to adjust spacing to fit
+        // Use Tc operator to distribute width difference evenly across all characters
         const widthDiff = originalWidth - newWidth;
-        const adjustment = (widthDiff / (newText.length - 1)) * 1000 / fontSize;
-
-        // Use TJ with positioning
-        const items: (string | number)[] = [];
-        for (let i = 0; i < newText.length; i++) {
-          items.push(newText[i]);
-          if (i < newText.length - 1) {
-            items.push(-adjustment);
-          }
-        }
-        this.builder.showTextWithPositioning(items);
+        const tcValue = widthDiff / newText.length;
+        this.builder.setCharacterSpacing(tcValue);
+        this.builder.showText(newText);
+        this.builder.setCharacterSpacing(0);
       } else {
         this.builder.showText(newText);
       }

@@ -30,6 +30,8 @@ export interface TextColorEntry {
   x: number;
   y: number;
   color: { r: number; g: number; b: number };
+  originalSpace?: string;
+  originalValues?: number[];
 }
 
 /** Normalize a color component from pdfjs — values > 1 are 0-255 range */
@@ -62,8 +64,10 @@ export function buildTextColorMap(
 
   // Graphics state
   let fillColor = { r: 0, g: 0, b: 0 };
-  const fillColorStack: Array<{ r: number; g: number; b: number }>[] = [];
-  let currentStack: Array<{ r: number; g: number; b: number }> = [];
+  let fillColorSpace = 'DeviceRGB';
+  let fillColorValues = [0, 0, 0];
+  const fillColorStack: Array<{ r: number; g: number; b: number; space: string; values: number[] }>[] = [];
+  let currentStack: Array<{ r: number; g: number; b: number; space: string; values: number[] }> = [];
 
   // Simple CTM tracking for text position
   let ctm = [1, 0, 0, 1, 0, 0];
@@ -77,7 +81,7 @@ export function buildTextColorMap(
     switch (op) {
       case OPS.save: {
         ctmStack.push([...ctm]);
-        currentStack.push({ ...fillColor });
+        currentStack.push({ ...fillColor, space: fillColorSpace, values: [...fillColorValues] });
         fillColorStack.push([...currentStack]);
         currentStack = [];
         break;
@@ -87,7 +91,10 @@ export function buildTextColorMap(
         if (prevCtm) ctm = prevCtm;
         const prevStack = fillColorStack.pop();
         if (prevStack && prevStack.length > 0) {
-          fillColor = prevStack[prevStack.length - 1];
+          const last = prevStack[prevStack.length - 1];
+          fillColor = { r: last.r, g: last.g, b: last.b };
+          fillColorSpace = last.space;
+          fillColorValues = last.values;
           currentStack = prevStack;
         }
         break;
@@ -112,15 +119,21 @@ export function buildTextColorMap(
           g: normalizeComponent(args[1]),
           b: normalizeComponent(args[2]),
         };
+        fillColorSpace = 'DeviceRGB';
+        fillColorValues = [args[0], args[1], args[2]];
         break;
       }
       case OPS.setFillGray: {
         const g = normalizeComponent(args[0]);
         fillColor = { r: g, g: g, b: g };
+        fillColorSpace = 'DeviceGray';
+        fillColorValues = [args[0]];
         break;
       }
       case OPS.setFillCMYKColor: {
         fillColor = cmykToRgb(args[0], args[1], args[2], args[3]);
+        fillColorSpace = 'DeviceCMYK';
+        fillColorValues = [args[0], args[1], args[2], args[3]];
         break;
       }
       case OPS.setTextMatrix: {
@@ -136,6 +149,8 @@ export function buildTextColorMap(
           x: tx,
           y: ty,
           color: { ...fillColor },
+          originalSpace: fillColorSpace,
+          originalValues: [...fillColorValues],
         });
         break;
       }
@@ -145,6 +160,14 @@ export function buildTextColorMap(
   return colorMap;
 }
 
+export interface MatchedTextColor {
+  r: number;
+  g: number;
+  b: number;
+  originalSpace?: string;
+  originalValues?: number[];
+}
+
 /**
  * Match a text item to the closest color entry using Euclidean distance.
  *
@@ -152,19 +175,19 @@ export function buildTextColorMap(
  * @param itemY       Y position of the text item (top-left origin)
  * @param fontSize    Font size for distance tolerance
  * @param colorMap    The color map built from buildTextColorMap()
- * @returns The matched RGB color, or default black
+ * @returns The matched color with original space info, or default black
  */
 export function matchTextColor(
   itemX: number,
   itemY: number,
   fontSize: number,
   colorMap: TextColorEntry[],
-): { r: number; g: number; b: number } {
+): MatchedTextColor {
   if (colorMap.length === 0) return { r: 0, g: 0, b: 0 };
 
   const tolerance = fontSize * 2; // match PageAnalyzer's tolerance
   let bestDist = Infinity;
-  let bestColor = { r: 0, g: 0, b: 0 };
+  let bestEntry: TextColorEntry | null = null;
 
   for (const entry of colorMap) {
     const dx = itemX - entry.x;
@@ -172,11 +195,17 @@ export function matchTextColor(
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < bestDist && dist <= tolerance) {
       bestDist = dist;
-      bestColor = entry.color;
+      bestEntry = entry;
     }
   }
 
-  return bestColor;
+  if (!bestEntry) return { r: 0, g: 0, b: 0 };
+
+  return {
+    ...bestEntry.color,
+    originalSpace: bestEntry.originalSpace,
+    originalValues: bestEntry.originalValues,
+  };
 }
 
 // ─── Background Color Extraction (from filled rectangles in operator list) ────

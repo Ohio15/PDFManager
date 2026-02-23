@@ -109,6 +109,8 @@ export interface PDFTextItem {
   italic?: boolean;
   underline?: boolean;
   strikethrough?: boolean;
+  colorSpace?: 'DeviceRGB' | 'DeviceGray' | 'DeviceCMYK';
+  originalColorValues?: number[];
 }
 
 export interface PDFSourceAnnotation {

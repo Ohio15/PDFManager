@@ -8,6 +8,7 @@ import { buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver
 import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
+import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -245,10 +246,15 @@ export function usePDFDocument() {
               const transform = item.transform;
               const baseX = transform[4];
               const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
-              const height = item.height || fontSize * 1.2;
-              const y = viewport.height - transform[5] - height;
-              const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
               const rawFontName = item.fontName || 'default';
+              const stdFont = mapToStandardFontName(rawFontName);
+              const height = item.height || getTextHeight(stdFont, fontSize);
+              const y = viewport.height - transform[5] - height;
+
+              // Use real font metrics for width scaling
+              const metricsFullWidth = measureTextWidth(item.str, stdFont, fontSize, false);
+              const pdfJsWidth = item.width || metricsFullWidth;
+              const scaleFactor = metricsFullWidth > 0 ? pdfJsWidth / metricsFullWidth : 1;
 
               // Split into words, preserving spaces
               const words = item.str.split(/( +)/);
@@ -257,12 +263,13 @@ export function usePDFDocument() {
               words.forEach((word: string) => {
                 if (!word) return;
 
-                const wordWidth = word.length * avgCharWidth;
+                const wordMetricsWidth = measureTextWidth(word, stdFont, fontSize, false);
+                const wordWidth = wordMetricsWidth * scaleFactor;
 
                 // Only create items for non-empty words (skip pure whitespace)
                 if (word.trim()) {
                   // Match colors from operator list data (not canvas rendering)
-                  const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                  const matchedColor = matchTextColor(currentX, y, fontSize, textColorMap);
                   const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
                   const bold = isBoldFontName(rawFontName);
                   const italic = isItalicFontName(rawFontName);
@@ -281,9 +288,11 @@ export function usePDFDocument() {
                     isEdited: false,
                     parentTransform: transform,
                     backgroundColor,
-                    textColor,
+                    textColor: { r: matchedColor.r, g: matchedColor.g, b: matchedColor.b },
                     bold,
                     italic,
+                    colorSpace: matchedColor.originalSpace as any,
+                    originalColorValues: matchedColor.originalValues,
                   });
                 }
 
@@ -390,20 +399,25 @@ export function usePDFDocument() {
               const transform = item.transform;
               const baseX = transform[4];
               const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
-              const height = item.height || fontSize * 1.2;
-              const y = viewport.height - transform[5] - height;
-              const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
               const rawFontName = item.fontName || 'default';
+              const stdFont = mapToStandardFontName(rawFontName);
+              const height = item.height || getTextHeight(stdFont, fontSize);
+              const y = viewport.height - transform[5] - height;
+
+              const metricsFullWidth = measureTextWidth(item.str, stdFont, fontSize, false);
+              const pdfJsWidth = item.width || metricsFullWidth;
+              const scaleFactor = metricsFullWidth > 0 ? pdfJsWidth / metricsFullWidth : 1;
 
               const words = item.str.split(/( +)/);
               let currentX = baseX;
 
               words.forEach((word: string) => {
                 if (!word) return;
-                const wordWidth = word.length * avgCharWidth;
+                const wordMetricsWidth = measureTextWidth(word, stdFont, fontSize, false);
+                const wordWidth = wordMetricsWidth * scaleFactor;
 
                 if (word.trim()) {
-                  const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                  const matchedColor = matchTextColor(currentX, y, fontSize, textColorMap);
                   const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
                   const bold = isBoldFontName(rawFontName);
                   const italic = isItalicFontName(rawFontName);
@@ -421,9 +435,11 @@ export function usePDFDocument() {
                     transform: [...transform.slice(0, 4), currentX, transform[5]],
                     isEdited: false,
                     backgroundColor,
-                    textColor,
+                    textColor: { r: matchedColor.r, g: matchedColor.g, b: matchedColor.b },
                     bold,
                     italic,
+                    colorSpace: matchedColor.originalSpace as any,
+                    originalColorValues: matchedColor.originalValues,
                   });
                 }
 

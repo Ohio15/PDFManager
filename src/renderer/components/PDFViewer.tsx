@@ -1,9 +1,10 @@
-import React, { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useCallback, useState, useMemo, forwardRef, useImperativeHandle } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { AnnotationLayer } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, AnnotationStyle, PDFTextItem, Position, Size } from '../types';
 import { Tool } from '../App';
+import { FormFieldMapping } from '../utils/formFieldSaver';
 
 interface TextEditDialogState {
   isOpen: boolean;
@@ -80,9 +81,14 @@ interface PDFViewerProps {
   loading: boolean;
   onFormFieldsDetected?: (count: number) => void;
   onAnnotationStorageReady?: (storage: any) => void;
+  formFieldMappings?: FormFieldMapping[];
 }
 
-const PDFViewer: React.FC<PDFViewerProps> = ({
+export interface PDFViewerHandle {
+  scrollToField: (pageIndex: number, rect: [number, number, number, number] | null) => void;
+}
+
+const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   document,
   zoom,
   currentPage,
@@ -106,7 +112,8 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
   loading,
   onFormFieldsDetected,
   onAnnotationStorageReady,
-}) => {
+  formFieldMappings,
+}, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
   const [renderedPages, setRenderedPages] = useState<Map<number, HTMLCanvasElement>>(new Map());
@@ -282,6 +289,17 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
         renderForms: true,
         imageResourcesPath: '',
       } as any);
+
+      // Post-render: decorate required/readonly fields with data attributes for CSS targeting
+      if (formFieldMappings && formFieldMappings.length > 0) {
+        const pageMappings = formFieldMappings.filter(m => m.pageIndex === pageNum - 1);
+        for (const mapping of pageMappings) {
+          const section = div.querySelector(`[data-annotation-id="${mapping.annotationId}"]`);
+          if (!section) continue;
+          if (mapping.required) section.setAttribute('data-required', 'true');
+          if (mapping.readOnly) section.setAttribute('data-readonly', 'true');
+        }
+      }
     } catch (error) {
       console.error(`Failed to render annotation layer for page ${pageNum}:`, error);
       renderedAnnotLayersRef.current.delete(pageNum);
@@ -297,6 +315,57 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       }
     });
   }, [renderedPages, hasFormFields, renderAnnotationLayer]);
+
+  // Expose scrollToField to parent via ref
+  useImperativeHandle(ref, () => ({
+    scrollToField(pageIndex: number, rect: [number, number, number, number] | null) {
+      const container = containerRef.current;
+      if (!container) return;
+
+      const pageNum = pageIndex + 1;
+      const pageEl = container.querySelector(`[data-page="${pageNum}"]`) as HTMLElement | null;
+      if (pageEl) {
+        pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      // After scrolling, find and focus the annotation element
+      setTimeout(() => {
+        // Try to find the field by iterating mappings for this page
+        const annotDiv = annotationLayerDivsRef.current.get(pageNum);
+        if (!annotDiv) return;
+
+        // Find the matching annotation element by checking all sections with data-annotation-id
+        let target: HTMLElement | null = null;
+        if (formFieldMappings) {
+          const pageFields = formFieldMappings.filter(m => m.pageIndex === pageIndex);
+          for (const field of pageFields) {
+            if (field.rect && rect &&
+                field.rect[0] === rect[0] && field.rect[1] === rect[1] &&
+                field.rect[2] === rect[2] && field.rect[3] === rect[3]) {
+              target = annotDiv.querySelector(`[data-annotation-id="${field.annotationId}"]`) as HTMLElement;
+              break;
+            }
+          }
+        }
+
+        if (!target) {
+          // Fallback: find first section in the annotation layer
+          target = annotDiv.querySelector('section') as HTMLElement;
+        }
+
+        if (target) {
+          // Focus the input/select/textarea inside
+          const focusable = target.querySelector('input, select, textarea') as HTMLElement;
+          if (focusable) {
+            focusable.focus();
+          }
+          // Add highlight pulse
+          target.classList.add('form-field-highlight-pulse');
+          setTimeout(() => target!.classList.remove('form-field-highlight-pulse'), 1200);
+        }
+      }, 400);
+    },
+  }), [formFieldMappings]);
 
   // Clear rendered pages when zoom or page rotation changes
   const rotationsKey = useMemo(() => document.pages.map(p => p.rotation).join(','), [document.pages]);
@@ -1491,6 +1560,8 @@ const PDFViewer: React.FC<PDFViewerProps> = ({
       )}
     </div>
   );
-};
+});
+
+PDFViewer.displayName = 'PDFViewer';
 
 export default PDFViewer;

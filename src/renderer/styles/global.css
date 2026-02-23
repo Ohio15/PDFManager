@@ -5284,6 +5284,180 @@ input:focus:not(:focus-visible) {
   height: 14px;
 }
 
+/* ============================================
+   Form Field Required / Read-Only Indicators
+   ============================================ */
+
+/* Required field highlight on annotation layer */
+.pdfjs-annotation-layer section[data-required="true"] input,
+.pdfjs-annotation-layer section[data-required="true"] textarea,
+.pdfjs-annotation-layer section[data-required="true"] select {
+  border-color: rgba(239, 68, 68, 0.5) !important;
+  background: rgba(239, 68, 68, 0.06) !important;
+}
+
+.pdfjs-annotation-layer section[data-readonly="true"] input,
+.pdfjs-annotation-layer section[data-readonly="true"] textarea,
+.pdfjs-annotation-layer section[data-readonly="true"] select {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Scroll-to-field pulse animation */
+@keyframes fieldHighlightPulse {
+  0% { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.6); }
+  100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
+
+.form-field-highlight-pulse {
+  animation: fieldHighlightPulse 1s ease-out;
+}
+
+/* ============================================
+   Form Progress Bar
+   ============================================ */
+
+.form-progress-container {
+  padding: 8px 16px 4px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.form-progress-bar {
+  height: 4px;
+  background: var(--border-color);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.form-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--primary-color);
+  transition: width 0.3s ease;
+}
+
+.form-progress-text {
+  font-size: 10px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.form-progress-text .required-remaining {
+  color: var(--danger-color);
+  font-weight: 500;
+}
+
+/* ============================================
+   Form Field Search
+   ============================================ */
+
+.form-field-search {
+  padding: 0 16px 8px;
+  flex-shrink: 0;
+}
+
+.form-field-search input {
+  width: 100%;
+  padding: 6px 10px 6px 30px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--background-color);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.form-field-search input:focus {
+  border-color: var(--primary-color);
+}
+
+.form-field-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.form-field-search-wrapper {
+  position: relative;
+}
+
+.form-field-search-wrapper svg {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+/* ============================================
+   Clickable Form Field Items
+   ============================================ */
+
+.form-field-item-clickable {
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--background-color);
+  border: 1px solid transparent;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+  cursor: pointer;
+  user-select: none;
+}
+
+.form-field-item-clickable:hover {
+  border-color: var(--primary-color);
+  background: var(--primary-light);
+}
+
+.form-field-item-clickable.readonly-field {
+  opacity: 0.6;
+}
+
+/* ============================================
+   Required / Filled Badges
+   ============================================ */
+
+.form-field-badge-required {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--danger-color);
+  background: rgba(239, 68, 68, 0.1);
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.form-field-badge-filled {
+  display: inline-flex;
+  align-items: center;
+  color: var(--success-color, #22c55e);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.form-field-badge-readonly {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.form-field-page-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* Reduce motion for accessibility */
 @media (prefers-reduced-motion: reduce) {
   *,

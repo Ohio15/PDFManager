@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { PDFDocument as PDFLib } from 'pdf-lib';
 import Toolbar, { ZoomMode } from './components/Toolbar';
 import Sidebar from './components/Sidebar';
-import PDFViewer from './components/PDFViewer';
+import PDFViewer, { PDFViewerHandle } from './components/PDFViewer';
 import WelcomeScreen from './components/WelcomeScreen';
 import StatusBar from './components/StatusBar';
 import UpdateNotification from './components/UpdateNotification';
@@ -126,6 +126,7 @@ const App: React.FC = () => {
   const [formFieldCount, setFormFieldCount] = useState(0);
   const [formPanelVisible, setFormPanelVisible] = useState(false);
   const annotationStorageRef = useRef<any>(null);
+  const pdfViewerRef = useRef<PDFViewerHandle>(null);
 
   const [annotationStyle, setAnnotationStyle] = useState<AnnotationStyle>({
     color: '#000000',
@@ -468,6 +469,50 @@ const App: React.FC = () => {
       toast.error('Failed to flatten form');
     }
   }, [document, formFieldMappings, toast, openFile]);
+
+  const handleImportFormData = useCallback(async () => {
+    if (!annotationStorageRef.current || formFieldMappings.length === 0) {
+      toast.warning('No form fields available to import into');
+      return;
+    }
+
+    try {
+      // Open file dialog filtered to JSON
+      const result = await window.electronAPI.openFileDialog();
+      if (!result) return;
+
+      // readFileByPath or openFileDialog returns base64 data
+      let jsonStr: string;
+      try {
+        jsonStr = atob(result.data);
+      } catch {
+        // If not base64, try using raw
+        jsonStr = result.data;
+      }
+
+      const parsed = JSON.parse(jsonStr);
+      if (typeof parsed !== 'object' || parsed === null) {
+        toast.error('Invalid form data file: expected a JSON object');
+        return;
+      }
+
+      const { importFormData } = await import('./utils/formFieldSaver');
+      const count = await importFormData(annotationStorageRef.current, formFieldMappings, parsed);
+
+      if (count > 0) {
+        toast.success(`Imported ${count} field value${count !== 1 ? 's' : ''}`);
+      } else {
+        toast.warning('No matching fields found in the imported data');
+      }
+    } catch (error) {
+      console.error('Failed to import form data:', error);
+      toast.error('Failed to import form data: invalid JSON file');
+    }
+  }, [formFieldMappings, toast]);
+
+  const handleScrollToField = useCallback((pageIndex: number, rect: [number, number, number, number] | null) => {
+    pdfViewerRef.current?.scrollToField(pageIndex, rect);
+  }, []);
 
   const handleFileDrop = useCallback(async (filePath: string) => {
     const result = await window.electronAPI.readFileByPath(filePath);
@@ -1184,6 +1229,7 @@ const App: React.FC = () => {
         {document ? (
           <>
             <PDFViewer
+              ref={pdfViewerRef}
               document={document}
               zoom={zoom}
               currentPage={currentPage}
@@ -1205,6 +1251,7 @@ const App: React.FC = () => {
               loading={loading}
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
+              formFieldMappings={formFieldMappings}
             />
             <ConversionActionBar
               visible={showConversionBar}
@@ -1262,8 +1309,10 @@ const App: React.FC = () => {
           formFields={formFieldMappings}
           annotationStorage={annotationStorageRef.current}
           onExportFormData={handleExportFormData}
+          onImportFormData={handleImportFormData}
           onResetForm={handleResetForm}
           onFlattenForm={handleFlattenForm}
+          onScrollToField={handleScrollToField}
         />
       </div>
 

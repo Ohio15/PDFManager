@@ -40,7 +40,7 @@ import type {
 
 import { replaceTextInPage } from './pdfTextReplacer';
 import { blankTextInContentStream } from './blankText';
-import { saveFormFieldValues, FormFieldMapping } from './formFieldSaver';
+import { saveFormFieldValues, FormFieldMapping, getFormFieldStats, getEmptyRequiredFieldNames } from './formFieldSaver';
 import { ContentStreamBuilder } from './pdfParser/ContentStreamBuilder';
 import {
   writeAnnotation,
@@ -61,6 +61,7 @@ export interface SavePipelineInput {
   pages: PDFPage[];
   annotationStorage: any;
   formFieldMappings: FormFieldMapping[];
+  onSaveValidationWarning?: (msg: string) => boolean;
 }
 
 /**
@@ -69,7 +70,7 @@ export interface SavePipelineInput {
 export async function applyEditsAndAnnotations(
   input: SavePipelineInput
 ): Promise<Uint8Array> {
-  const { pdfData, pages, annotationStorage, formFieldMappings } = input;
+  const { pdfData, pages, annotationStorage, formFieldMappings, onSaveValidationWarning } = input;
 
   const pdfDoc = await PDFLib.load(pdfData);
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -92,8 +93,27 @@ export async function applyEditsAndAnnotations(
     await processAnnotations(pdfDoc, resources, page, height, helvetica, helveticaRef);
   }
 
-  // --- (d) Save form field values ---
+  // --- (d) Validate required fields and save form field values ---
   if (annotationStorage && formFieldMappings.length > 0) {
+    // Check for empty required fields before saving
+    const stats = getFormFieldStats(formFieldMappings, annotationStorage);
+    if (stats.requiredFilled < stats.required) {
+      const emptyNames = getEmptyRequiredFieldNames(formFieldMappings, annotationStorage);
+      const displayNames = emptyNames.length <= 5
+        ? emptyNames.join(', ')
+        : `${emptyNames.slice(0, 5).join(', ')} and ${emptyNames.length - 5} more`;
+      const msg = `${emptyNames.length} required field${emptyNames.length !== 1 ? 's are' : ' is'} empty: ${displayNames}. Save anyway?`;
+
+      if (onSaveValidationWarning) {
+        const proceed = onSaveValidationWarning(msg);
+        if (!proceed) {
+          throw new Error('Save cancelled: required fields are empty');
+        }
+      } else {
+        console.warn(`[SavePipeline] ${msg}`);
+      }
+    }
+
     try {
       await saveFormFieldValues(pdfDoc, annotationStorage, formFieldMappings);
     } catch (e) {

@@ -1,14 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { PDFDocument as PDFLib, rgb, StandardFonts, PDFFont } from 'pdf-lib';
+
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, Position, Size, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, PDFTextItem, TabInfo } from '../types';
 
-import { replaceTextInPage } from '../utils/pdfTextReplacer';
-import { blankTextInContentStream } from '../utils/blankText';
-import { saveFormFieldValues, buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
+import { buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
 import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
+import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -22,39 +21,6 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode.apply(null, chunk as unknown as number[]);
   }
   return btoa(binary);
-}
-
-
-// Map common PDF font names to pdf-lib StandardFonts
-function mapToStandardFont(fontName: string): typeof StandardFonts[keyof typeof StandardFonts] {
-  const name = fontName.toLowerCase();
-
-  // Helvetica variants
-  if (name.includes('helvetica') || name.includes('arial') || name.includes('sans')) {
-    if (name.includes('bold') && name.includes('oblique')) return StandardFonts.HelveticaBoldOblique;
-    if (name.includes('bold')) return StandardFonts.HelveticaBold;
-    if (name.includes('oblique') || name.includes('italic')) return StandardFonts.HelveticaOblique;
-    return StandardFonts.Helvetica;
-  }
-
-  // Times variants
-  if (name.includes('times') || name.includes('serif')) {
-    if (name.includes('bold') && name.includes('italic')) return StandardFonts.TimesRomanBoldItalic;
-    if (name.includes('bold')) return StandardFonts.TimesRomanBold;
-    if (name.includes('italic')) return StandardFonts.TimesRomanItalic;
-    return StandardFonts.TimesRoman;
-  }
-
-  // Courier variants
-  if (name.includes('courier') || name.includes('mono')) {
-    if (name.includes('bold') && name.includes('oblique')) return StandardFonts.CourierBoldOblique;
-    if (name.includes('bold')) return StandardFonts.CourierBold;
-    if (name.includes('oblique') || name.includes('italic')) return StandardFonts.CourierOblique;
-    return StandardFonts.Courier;
-  }
-
-  // Default to Helvetica
-  return StandardFonts.Helvetica;
 }
 
 
@@ -392,255 +358,139 @@ export function usePDFDocument() {
     }
   }, [saveCurrentTabState, switchTab]);
 
+  // Shared post-save logic: re-extract text items from the modified PDF
+  const reExtractTextAfterSave = useCallback(async (
+    modifiedPdfBytes: Uint8Array,
+    newFilePath?: string | null,
+    newFileName?: string
+  ) => {
+    try {
+      const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
+      const pdfDocReload = await pdfjsLib.getDocument({ data: dataCopyForPdfJs }).promise;
+
+      const updatedPages = await Promise.all(
+        (document?.pages || []).map(async (page, i) => {
+          const pdfPage = await pdfDocReload.getPage(i + 1);
+          const viewport = pdfPage.getViewport({ scale: 1 });
+
+          const [textContent, operatorList] = await Promise.all([
+            pdfPage.getTextContent(),
+            pdfPage.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
+          ]);
+
+          const textColorMap = buildTextColorMap(operatorList, viewport.height);
+          const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
+
+          let itemCounter = 0;
+          const newTextItems: any[] = [];
+
+          textContent.items
+            .filter((item: any) => item.str && item.str.trim())
+            .forEach((item: any) => {
+              const transform = item.transform;
+              const baseX = transform[4];
+              const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
+              const height = item.height || fontSize * 1.2;
+              const y = viewport.height - transform[5] - height;
+              const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
+              const rawFontName = item.fontName || 'default';
+
+              const words = item.str.split(/( +)/);
+              let currentX = baseX;
+
+              words.forEach((word: string) => {
+                if (!word) return;
+                const wordWidth = word.length * avgCharWidth;
+
+                if (word.trim()) {
+                  const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
+                  const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
+                  const bold = isBoldFontName(rawFontName);
+                  const italic = isItalicFontName(rawFontName);
+
+                  newTextItems.push({
+                    id: `text-item-${i}-${itemCounter++}`,
+                    str: word,
+                    originalStr: word,
+                    x: currentX,
+                    y,
+                    width: wordWidth,
+                    height,
+                    fontName: rawFontName,
+                    fontSize,
+                    transform: [...transform.slice(0, 4), currentX, transform[5]],
+                    isEdited: false,
+                    backgroundColor,
+                    textColor,
+                    bold,
+                    italic,
+                  });
+                }
+
+                currentX += wordWidth;
+              });
+            });
+
+          return {
+            ...page,
+            textEdits: [],
+            textItems: newTextItems,
+          };
+        })
+      );
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
+          ...(newFileName ? { fileName: newFileName } : {}),
+          pdfData: modifiedPdfBytes,
+          pages: updatedPages,
+        };
+      });
+    } catch (reloadError) {
+      console.error('Error re-extracting text after save:', reloadError);
+      setDocument((prev) => {
+        if (!prev) return null;
+        const updatedPages = prev.pages.map(page => ({
+          ...page,
+          textEdits: [],
+          textItems: page.textItems?.map(item => ({
+            ...item,
+            originalStr: item.str,
+            isEdited: false,
+          })),
+        }));
+        return {
+          ...prev,
+          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
+          ...(newFileName ? { fileName: newFileName } : {}),
+          pdfData: modifiedPdfBytes,
+          pages: updatedPages,
+        };
+      });
+    }
+  }, [document]);
+
   const saveFile = useCallback(async () => {
     if (!document) return;
 
     setLoading(true);
     try {
-      const pdfDoc = await PDFLib.load(document.pdfData);
-      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const modifiedPdfBytes = await applyEditsAndAnnotations({
+        pdfData: document.pdfData,
+        pages: document.pages,
+        annotationStorage: annotationStorageRef.current,
+        formFieldMappings,
+      });
 
-      for (const page of document.pages) {
-        const pdfPage = pdfDoc.getPage(page.index);
-        const { height } = pdfPage.getSize();
-
-        // Handle text edits - try content stream modification first, then overlay fallback
-        console.log('Processing page', page.index, 'textEdits:', page.textEdits?.length || 0);
-        // Handle deleted text items - blank them in the content stream, with overlay fallback
-        const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
-        for (const deletedItem of deletedItems) {
-          console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
-          const blanked = await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
-
-          // Always draw a background-colored rectangle to cover the text as fallback
-          // This ensures deletion works even if content stream modification fails
-          const textHeight = deletedItem.fontSize;
-          const baselineY = deletedItem.transform ? deletedItem.transform[5] : (height - deletedItem.y - textHeight);
-          const bgColor = deletedItem.backgroundColor || { r: 1, g: 1, b: 1 };
-
-          console.log('[SAVE] Drawing cover rectangle for deleted text:', deletedItem.originalStr, 'blanked:', blanked);
-          pdfPage.drawRectangle({
-            x: deletedItem.x - 1,
-            y: baselineY - (textHeight * 0.25),
-            width: deletedItem.width + 2,
-            height: textHeight * 1.3,
-            color: rgb(bgColor.r, bgColor.g, bgColor.b),
-          });
-        }
-
-        if (page.textEdits && page.textEdits.length > 0) {
-          const fontCache = new Map<string, PDFFont>();
-
-          for (const edit of page.textEdits) {
-            const textItem = page.textItems?.find(t => t.id === edit.itemId);
-            if (textItem) {
-              // First, try to modify the content stream directly
-              console.log('[SAVE] Attempting content stream modification for:', edit.originalText, '->', edit.newText, 'pageIndex:', page.index);
-              const contentStreamModified = await replaceTextInPage(
-                pdfDoc,
-                page.index,
-                edit.originalText,
-                edit.newText
-              );
-
-              if (contentStreamModified) {
-                console.log('Content stream modification successful for:', edit.newText);
-              } else {
-                // Fall back to overlay approach if content stream modification fails
-                console.log('Content stream modification failed, using overlay for:', edit.newText);
-                // Try to blank the original text in content stream so PDF.js doesn't re-extract it
-                await blankTextInContentStream(pdfDoc, page.index, edit.originalText);
-                const standardFontName = mapToStandardFont(textItem.fontName);
-                let itemFont = fontCache.get(standardFontName);
-                if (!itemFont) {
-                  itemFont = await pdfDoc.embedFont(standardFontName);
-                  fontCache.set(standardFontName, itemFont);
-                }
-
-                const textHeight = textItem.fontSize;
-                const baselineY = textItem.transform ? textItem.transform[5] : (height - textItem.y - textHeight);
-
-                // Use detected background color or default to white
-                const bgColor = textItem.backgroundColor || { r: 1, g: 1, b: 1 };
-                pdfPage.drawRectangle({
-                  x: textItem.x - 1,
-                  y: baselineY - (textHeight * 0.25),
-                  width: textItem.width + 2,
-                  height: textHeight * 1.3,
-                  color: rgb(bgColor.r, bgColor.g, bgColor.b),
-                });
-
-                // Use detected text color or default to black
-                const txtColor = textItem.textColor || { r: 0, g: 0, b: 0 };
-                console.log('Drawing edited text (overlay):', edit.newText, 'at', textItem.x, baselineY);
-                pdfPage.drawText(edit.newText, {
-                  x: textItem.x,
-                  y: baselineY,
-                  size: textItem.fontSize,
-                  font: itemFont,
-                  color: rgb(txtColor.r, txtColor.g, txtColor.b),
-                });
-              }
-            }
-          }
-        }
-
-        for (const annotation of page.annotations) {
-          if (annotation.type === 'text') {
-            const textAnnotation = annotation as TextAnnotation;
-            pdfPage.drawText(textAnnotation.content, {
-              x: textAnnotation.position.x,
-              y: height - textAnnotation.position.y - textAnnotation.fontSize,
-              size: textAnnotation.fontSize,
-              font,
-              color: hexToRgb(textAnnotation.color),
-            });
-          } else if (annotation.type === 'image') {
-            const imgAnnotation = annotation as ImageAnnotation;
-            let image;
-            if (imgAnnotation.imageType === 'png') {
-              image = await pdfDoc.embedPng(
-                Uint8Array.from(atob(imgAnnotation.data), (c) => c.charCodeAt(0))
-              );
-            } else {
-              image = await pdfDoc.embedJpg(
-                Uint8Array.from(atob(imgAnnotation.data), (c) => c.charCodeAt(0))
-              );
-            }
-            pdfPage.drawImage(image, {
-              x: imgAnnotation.position.x,
-              y: height - imgAnnotation.position.y - imgAnnotation.size.height,
-              width: imgAnnotation.size.width,
-              height: imgAnnotation.size.height,
-            });
-          }
-        }
-      }
-
-      // Save form field values from AnnotationStorage into pdf-lib form fields
-      if (annotationStorageRef.current && formFieldMappings.length > 0) {
-        try {
-          await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
-        } catch (e) {
-          console.warn('Failed to save form field values:', e);
-        }
-      }
-
-      const modifiedPdfBytes = await pdfDoc.save();
       const base64 = uint8ArrayToBase64(modifiedPdfBytes);
 
       // Save directly to the existing file path
       const result = await window.electronAPI.saveFile(base64, document.filePath);
       if (result.success) {
-        // After successful save, re-extract text from the modified PDF to get accurate text items
-        try {
-          const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
-          const pdfDocReload = await pdfjsLib.getDocument({ data: dataCopyForPdfJs }).promise;
-          
-          const updatedPages = await Promise.all(
-            document.pages.map(async (page, i) => {
-              const pdfPage = await pdfDocReload.getPage(i + 1);
-              const viewport = pdfPage.getViewport({ scale: 1 });
-
-              // Get text content and operator list in parallel (data stream extraction)
-              const [textContent, operatorList] = await Promise.all([
-                pdfPage.getTextContent(),
-                pdfPage.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
-              ]);
-
-              // Build color maps from operator list (source of truth — no hardcoded defaults)
-              const textColorMap = buildTextColorMap(operatorList, viewport.height);
-              const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
-
-              // Re-extract text items from the saved PDF, split into words
-              let itemCounter = 0;
-              const newTextItems: any[] = [];
-
-              textContent.items
-                .filter((item: any) => item.str && item.str.trim())
-                .forEach((item: any) => {
-                  const transform = item.transform;
-                  const baseX = transform[4];
-                  const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
-                  const height = item.height || fontSize * 1.2;
-                  const y = viewport.height - transform[5] - height;
-                  const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
-                  const rawFontName = item.fontName || 'default';
-
-                  const words = item.str.split(/( +)/);
-                  let currentX = baseX;
-
-                  words.forEach((word: string) => {
-                    if (!word) return;
-                    const wordWidth = word.length * avgCharWidth;
-
-                    if (word.trim()) {
-                      // Match colors from operator list data (data stream source of truth)
-                      const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
-                      const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
-                      const bold = isBoldFontName(rawFontName);
-                      const italic = isItalicFontName(rawFontName);
-
-                      newTextItems.push({
-                        id: `text-item-${i}-${itemCounter++}`,
-                        str: word,
-                        originalStr: word,
-                        x: currentX,
-                        y,
-                        width: wordWidth,
-                        height,
-                        fontName: rawFontName,
-                        fontSize,
-                        transform: [...transform.slice(0, 4), currentX, transform[5]],
-                        isEdited: false,
-                        backgroundColor,
-                        textColor,
-                        bold,
-                        italic,
-                      });
-                    }
-
-                    currentX += wordWidth;
-                  });
-                });
-
-              return {
-                ...page,
-                textEdits: [],
-                textItems: newTextItems,
-              };
-            })
-          );
-
-          setDocument((prev) => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              pdfData: modifiedPdfBytes,
-              pages: updatedPages,
-            };
-          });
-        } catch (reloadError) {
-          console.error('Error re-extracting text after save:', reloadError);
-          // Fallback: just update pdfData and clear edits
-          setDocument((prev) => {
-            if (!prev) return null;
-            const updatedPages = prev.pages.map(page => ({
-              ...page,
-              textEdits: [],
-              textItems: page.textItems?.map(item => ({
-                ...item,
-                originalStr: item.str,
-                isEdited: false,
-              })),
-            }));
-            return {
-              ...prev,
-              pdfData: modifiedPdfBytes,
-              pages: updatedPages,
-            };
-          });
-        }
+        await reExtractTextAfterSave(modifiedPdfBytes);
         setModified(false);
       } else {
         throw new Error(result.error || 'Failed to save file');
@@ -658,254 +508,20 @@ export function usePDFDocument() {
 
     setLoading(true);
     try {
-      const pdfDoc = await PDFLib.load(document.pdfData);
-      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const modifiedPdfBytes = await applyEditsAndAnnotations({
+        pdfData: document.pdfData,
+        pages: document.pages,
+        annotationStorage: annotationStorageRef.current,
+        formFieldMappings,
+      });
 
-      for (const page of document.pages) {
-        const pdfPage = pdfDoc.getPage(page.index);
-        const { height } = pdfPage.getSize();
-
-        // Handle text edits - try content stream modification first, then overlay fallback
-        // Handle deleted text items - blank them in the content stream, with overlay fallback
-        const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
-        for (const deletedItem of deletedItems) {
-          console.log('[SAVE] Blanking deleted text item:', deletedItem.originalStr);
-          const blanked = await blankTextInContentStream(pdfDoc, page.index, deletedItem.originalStr);
-
-          // Always draw a background-colored rectangle to cover the text as fallback
-          // This ensures deletion works even if content stream modification fails
-          const textHeight = deletedItem.fontSize;
-          const baselineY = deletedItem.transform ? deletedItem.transform[5] : (height - deletedItem.y - textHeight);
-          const bgColor = deletedItem.backgroundColor || { r: 1, g: 1, b: 1 };
-
-          console.log('[SAVE] Drawing cover rectangle for deleted text:', deletedItem.originalStr, 'blanked:', blanked);
-          pdfPage.drawRectangle({
-            x: deletedItem.x - 1,
-            y: baselineY - (textHeight * 0.25),
-            width: deletedItem.width + 2,
-            height: textHeight * 1.3,
-            color: rgb(bgColor.r, bgColor.g, bgColor.b),
-          });
-        }
-
-        if (page.textEdits && page.textEdits.length > 0) {
-          const fontCache = new Map<string, PDFFont>();
-
-          for (const edit of page.textEdits) {
-            const textItem = page.textItems?.find(t => t.id === edit.itemId);
-            if (textItem) {
-              // First, try to modify the content stream directly
-              console.log('[SAVE] Attempting content stream modification for:', edit.originalText, '->', edit.newText, 'pageIndex:', page.index);
-              const contentStreamModified = await replaceTextInPage(
-                pdfDoc,
-                page.index,
-                edit.originalText,
-                edit.newText
-              );
-
-              if (contentStreamModified) {
-                console.log('Content stream modification successful for:', edit.newText);
-              } else {
-                // Fall back to overlay approach if content stream modification fails
-                console.log('Content stream modification failed, using overlay for:', edit.newText);
-                // Try to blank the original text in content stream so PDF.js doesn't re-extract it
-                await blankTextInContentStream(pdfDoc, page.index, edit.originalText);
-                const standardFontName = mapToStandardFont(textItem.fontName);
-                let itemFont = fontCache.get(standardFontName);
-                if (!itemFont) {
-                  itemFont = await pdfDoc.embedFont(standardFontName);
-                  fontCache.set(standardFontName, itemFont);
-                }
-
-                const textHeight = textItem.fontSize;
-                const baselineY = textItem.transform ? textItem.transform[5] : (height - textItem.y - textHeight);
-
-                // Use detected background color or default to white
-                const bgColor = textItem.backgroundColor || { r: 1, g: 1, b: 1 };
-                pdfPage.drawRectangle({
-                  x: textItem.x - 1,
-                  y: baselineY - (textHeight * 0.25),
-                  width: textItem.width + 2,
-                  height: textHeight * 1.3,
-                  color: rgb(bgColor.r, bgColor.g, bgColor.b),
-                });
-
-                // Use detected text color or default to black
-                const txtColor = textItem.textColor || { r: 0, g: 0, b: 0 };
-                console.log('Drawing edited text (overlay):', edit.newText, 'at', textItem.x, baselineY);
-                pdfPage.drawText(edit.newText, {
-                  x: textItem.x,
-                  y: baselineY,
-                  size: textItem.fontSize,
-                  font: itemFont,
-                  color: rgb(txtColor.r, txtColor.g, txtColor.b),
-                });
-              }
-            }
-          }
-        }
-
-        for (const annotation of page.annotations) {
-          if (annotation.type === 'text') {
-            const textAnnotation = annotation as TextAnnotation;
-            pdfPage.drawText(textAnnotation.content, {
-              x: textAnnotation.position.x,
-              y: height - textAnnotation.position.y - textAnnotation.fontSize,
-              size: textAnnotation.fontSize,
-              font,
-              color: hexToRgb(textAnnotation.color),
-            });
-          } else if (annotation.type === 'image') {
-            const imgAnnotation = annotation as ImageAnnotation;
-            let image;
-            if (imgAnnotation.imageType === 'png') {
-              image = await pdfDoc.embedPng(
-                Uint8Array.from(atob(imgAnnotation.data), (c) => c.charCodeAt(0))
-              );
-            } else {
-              image = await pdfDoc.embedJpg(
-                Uint8Array.from(atob(imgAnnotation.data), (c) => c.charCodeAt(0))
-              );
-            }
-            pdfPage.drawImage(image, {
-              x: imgAnnotation.position.x,
-              y: height - imgAnnotation.position.y - imgAnnotation.size.height,
-              width: imgAnnotation.size.width,
-              height: imgAnnotation.size.height,
-            });
-          }
-        }
-      }
-
-      // Save form field values from AnnotationStorage into pdf-lib form fields
-      if (annotationStorageRef.current && formFieldMappings.length > 0) {
-        try {
-          await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
-        } catch (e) {
-          console.warn('Failed to save form field values:', e);
-        }
-      }
-
-      const modifiedPdfBytes = await pdfDoc.save();
       const base64 = uint8ArrayToBase64(modifiedPdfBytes);
 
       // Show Save As dialog
       const result = await window.electronAPI.saveFileDialog(base64, document.fileName);
       if (result.success && result.path) {
         const fileName = result.path.split(/[\\/]/).pop() || 'Untitled';
-        // After successful save, re-extract text from the modified PDF to get accurate text items
-        try {
-          const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
-          const pdfDocReload = await pdfjsLib.getDocument({ data: dataCopyForPdfJs }).promise;
-
-          const updatedPages = await Promise.all(
-            document.pages.map(async (page, i) => {
-              const pdfPage = await pdfDocReload.getPage(i + 1);
-              const viewport = pdfPage.getViewport({ scale: 1 });
-
-              // Get text content and operator list in parallel (data stream extraction)
-              const [textContent, operatorList] = await Promise.all([
-                pdfPage.getTextContent(),
-                pdfPage.getOperatorList().catch(() => ({ fnArray: [], argsArray: [] })),
-              ]);
-
-              // Build color maps from operator list (source of truth — no hardcoded defaults)
-              const textColorMap = buildTextColorMap(operatorList, viewport.height);
-              const filledRectMap = buildFilledRectMap(operatorList, viewport.height);
-
-              // Re-extract text items from the saved PDF, split into words
-              let itemCounter = 0;
-              const newTextItems: any[] = [];
-
-              textContent.items
-                .filter((item: any) => item.str && item.str.trim())
-                .forEach((item: any) => {
-                  const transform = item.transform;
-                  const baseX = transform[4];
-                  const fontSize = Math.sqrt(transform[0] * transform[0] + transform[1] * transform[1]);
-                  const height = item.height || fontSize * 1.2;
-                  const y = viewport.height - transform[5] - height;
-                  const avgCharWidth = (item.width || (item.str.length * fontSize * 0.5)) / item.str.length;
-                  const rawFontName = item.fontName || 'default';
-
-                  const words = item.str.split(/( +)/);
-                  let currentX = baseX;
-
-                  words.forEach((word: string) => {
-                    if (!word) return;
-                    const wordWidth = word.length * avgCharWidth;
-
-                    if (word.trim()) {
-                      // Match colors from operator list data (data stream source of truth)
-                      const textColor = matchTextColor(currentX, y, fontSize, textColorMap);
-                      const backgroundColor = matchBackgroundColor(currentX, y, wordWidth, height, filledRectMap);
-                      const bold = isBoldFontName(rawFontName);
-                      const italic = isItalicFontName(rawFontName);
-
-                      newTextItems.push({
-                        id: `text-item-${i}-${itemCounter++}`,
-                        str: word,
-                        originalStr: word,
-                        x: currentX,
-                        y,
-                        width: wordWidth,
-                        height,
-                        fontName: rawFontName,
-                        fontSize,
-                        transform: [...transform.slice(0, 4), currentX, transform[5]],
-                        isEdited: false,
-                        backgroundColor,
-                        textColor,
-                        bold,
-                        italic,
-                      });
-                    }
-
-                    currentX += wordWidth;
-                  });
-                });
-
-              return {
-                ...page,
-                textEdits: [],
-                textItems: newTextItems,
-              };
-            })
-          );
-
-          setDocument((prev) => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              filePath: result.path,
-              fileName,
-              pdfData: modifiedPdfBytes,
-              pages: updatedPages,
-            };
-          });
-        } catch (reloadError) {
-          console.error('Error re-extracting text after save:', reloadError);
-          // Fallback: just update pdfData and clear edits
-          setDocument((prev) => {
-            if (!prev) return null;
-            const updatedPages = prev.pages.map(page => ({
-              ...page,
-              textEdits: [],
-              textItems: page.textItems?.map(item => ({
-                ...item,
-                originalStr: item.str,
-                isEdited: false,
-              })),
-            }));
-            return {
-              ...prev,
-              filePath: result.path,
-              fileName,
-              pdfData: modifiedPdfBytes,
-              pages: updatedPages,
-            };
-          });
-        }
+        await reExtractTextAfterSave(modifiedPdfBytes, result.path, fileName);
         setModified(false);
       }
     } catch (error) {
@@ -1701,14 +1317,3 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
   };
 }
 
-function hexToRgb(hex: string) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (result) {
-    return rgb(
-      parseInt(result[1], 16) / 255,
-      parseInt(result[2], 16) / 255,
-      parseInt(result[3], 16) / 255
-    );
-  }
-  return rgb(0, 0, 0);
-}

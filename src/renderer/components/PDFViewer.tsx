@@ -266,6 +266,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       const viewport = page.getViewport({ scale: scaleRef.current, rotation });
 
       div.innerHTML = '';
+      // pdfjs 4.x AnnotationLayer uses --scale-factor CSS var for sizing
+      div.style.setProperty('--scale-factor', `${scaleRef.current}`);
       div.style.width = `${viewport.width}px`;
       div.style.height = `${viewport.height}px`;
 

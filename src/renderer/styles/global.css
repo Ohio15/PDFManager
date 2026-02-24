@@ -1006,7 +1006,7 @@ body {
 
 .annotation-layer.active {
   /* Keep the overlay itself transparent to clicks so it doesn't block
-     the pdfjs form-field layer (z-index: 5) beneath it.
+     the pdfjs form-field layer (z-index: 15) above it.
      Individual annotation elements receive pointer-events via the rule below. */
   pointer-events: none;
 }
@@ -4928,14 +4928,13 @@ input:focus:not(:focus-visible) {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  z-index: 5;
+  z-index: 15;
   overflow: hidden;
 }
 
 .pdfjs-annotation-layer section {
   position: absolute;
   pointer-events: auto;
-  z-index: 1;
 }
 
 /* Text input fields */

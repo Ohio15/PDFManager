@@ -22,6 +22,7 @@
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
+import { PDFJS_DOCUMENT_OPTIONS } from '../pdfjsConfig';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument } from 'pdf-lib';
 import type { PageScene, PageLayout, ImageElement, ImageFile, ConvertOptions } from './types';
@@ -414,7 +415,7 @@ export async function generateDocx(
 
   // ─── Phase 1: Load documents (SHARED) ─────────────────────
 
-  const pdfJsDoc = await pdfjsLib.getDocument({ data: pdfData.slice() }).promise;
+  const pdfJsDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData.slice() }).promise;
 
   let pdfLibDoc: PDFDocument | null = null;
   try {

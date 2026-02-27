@@ -4921,20 +4921,12 @@ input:focus:not(:focus-visible) {
    pdfjs AnnotationLayer — AcroForm Fields
    ============================================ */
 
+/* pdfjs pdf_viewer.css handles base .annotationLayer positioning/sizing.
+   We add z-index and overflow on our companion class. Width/height come
+   from pdfjs setLayerDimensions() inline styles (data stream coordinates). */
 .pdfjs-annotation-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
   z-index: 15;
   overflow: hidden;
-}
-
-.pdfjs-annotation-layer section {
-  position: absolute;
-  pointer-events: auto;
 }
 
 /* Text input fields */
@@ -4966,15 +4958,13 @@ input:focus:not(:focus-visible) {
   border-color: var(--primary-color, #2563eb);
 }
 
-/* Checkbox and radio */
+/* Checkbox and radio — pdfjs pdf_viewer.css provides native
+   ::before/::after pseudo-element rendering for checked states.
+   We only add cursor and remove the default background/border
+   to let the PDF's printed checkbox squares show through. */
 .pdfjs-annotation-layer .buttonWidgetAnnotation input[type="checkbox"],
 .pdfjs-annotation-layer .buttonWidgetAnnotation input[type="radio"] {
-  appearance: auto;
   cursor: pointer;
-  margin: 0;
-  width: 100%;
-  height: 100%;
-  accent-color: var(--primary-color, #2563eb);
 }
 
 /* Dropdown / list box */

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useCallback, useState, useMemo, forwardRef, useImperativeHandle } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { AnnotationLayer } from 'pdfjs-dist';
+import { AnnotationLayer, AnnotationMode } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnnotation, DrawingAnnotation, ShapeAnnotation, StickyNoteAnnotation, StampAnnotation, AnnotationStyle, PDFTextItem, Position, Size } from '../types';
 import { Tool } from '../App';
 import { FormFieldMapping } from '../utils/formFieldSaver';
+import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 
 interface TextEditDialogState {
   isOpen: boolean;
@@ -41,6 +42,125 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 // Minimum size for annotations
 const MIN_SIZE = 20;
+
+// ---- Format mask utilities for form fields with placeholder patterns ----
+
+interface FormatMask {
+  /** The raw pattern string, e.g. "MM/DD/YYYY" */
+  pattern: string;
+  /** Array of segment definitions: each has length (digits expected) and the separator after it */
+  segments: { len: number; separator: string }[];
+  /** Total max length of the formatted string */
+  maxLength: number;
+}
+
+/**
+ * Detects if a placeholder string represents a format pattern.
+ * Returns a FormatMask if detected, null otherwise.
+ * Recognizes patterns like: MM/DD/YYYY, MM-DD-YYYY, ###-###-####,
+ * ##/##/####, XX-XXXXXXX, etc.
+ */
+function detectFormatMask(placeholder: string): FormatMask | null {
+  // Must have at least one separator character between groups of format chars
+  // Format chars: letters that repeat (MM, DD, YYYY) or # symbols
+  const formatPattern = /^([A-Z#0X]+)([/\-. ])([A-Z#0X]+)(?:([/\-. ])([A-Z#0X]+))?(?:([/\-. ])([A-Z#0X]+))?$/i;
+  const match = placeholder.trim().match(formatPattern);
+  if (!match) return null;
+
+  // Verify the groups use repeating format characters (not regular words)
+  const groups = [match[1]];
+  const separators = [match[2]];
+  if (match[3]) { groups.push(match[3]); }
+  if (match[4] && match[5]) { separators.push(match[4]); groups.push(match[5]); }
+  if (match[6] && match[7]) { separators.push(match[6]); groups.push(match[7]); }
+
+  // Each group should be repeating chars (MM, DD, YYYY, ##, XX) or single recognized tokens
+  for (const group of groups) {
+    const isRepeating = /^(.)\1*$/.test(group); // All same char
+    const isHashGroup = /^#+$/.test(group);
+    const isFormatToken = /^(M{1,2}|D{1,2}|Y{2,4}|H{1,2}|m{1,2}|s{1,2}|X+|0+)$/i.test(group);
+    if (!isRepeating && !isHashGroup && !isFormatToken) return null;
+  }
+
+  const segments: FormatMask['segments'] = [];
+  for (let i = 0; i < groups.length; i++) {
+    segments.push({
+      len: groups[i].length,
+      separator: i < separators.length ? separators[i] : '',
+    });
+  }
+
+  const maxLength = groups.reduce((sum, g) => sum + g.length, 0) + separators.length;
+  return { pattern: placeholder.trim(), segments, maxLength };
+}
+
+/**
+ * Applies a format mask to an input element.
+ * Auto-inserts separators as the user types digits.
+ * Enforces segment lengths and total max length.
+ */
+function applyFormatMask(
+  input: HTMLInputElement,
+  mask: FormatMask,
+  annotId: string,
+  annotationStorage: any
+): void {
+  input.maxLength = mask.maxLength;
+
+  const formatValue = (raw: string): string => {
+    // Strip everything except digits
+    const digits = raw.replace(/\D/g, '');
+    let result = '';
+    let digitIdx = 0;
+
+    for (let i = 0; i < mask.segments.length; i++) {
+      const seg = mask.segments[i];
+      const segDigits = digits.slice(digitIdx, digitIdx + seg.len);
+      if (segDigits.length === 0) break;
+      result += segDigits;
+      digitIdx += segDigits.length;
+      // Add separator if this segment is full and there are more digits
+      if (segDigits.length === seg.len && seg.separator && digitIdx < digits.length) {
+        result += seg.separator;
+      }
+    }
+
+    return result;
+  };
+
+  input.addEventListener('input', (e: Event) => {
+    const ev = e as InputEvent;
+    const cursorPos = input.selectionStart ?? 0;
+    const oldLen = input.value.length;
+    const formatted = formatValue(input.value);
+    input.value = formatted;
+
+    // Update annotation storage with the formatted value
+    if (annotationStorage) {
+      annotationStorage.setValue(annotId, { value: formatted });
+    }
+
+    // Adjust cursor position after formatting
+    const newLen = formatted.length;
+    const diff = newLen - oldLen;
+    const newPos = Math.max(0, Math.min(cursorPos + diff, newLen));
+    input.setSelectionRange(newPos, newPos);
+  });
+
+  // Prevent non-digit keypresses (allow navigation keys)
+  input.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Allow: backspace, delete, tab, escape, enter, arrows, home, end, select-all
+    if ([8, 9, 13, 27, 46].includes(e.keyCode) ||
+        (e.keyCode >= 35 && e.keyCode <= 40) ||
+        (e.ctrlKey && (e.key === 'a' || e.key === 'c' || e.key === 'v' || e.key === 'x'))) {
+      return;
+    }
+    // Block non-digit characters
+    if (!/^\d$/.test(e.key)) {
+      e.preventDefault();
+    }
+  });
+}
 
 // Minimal link service required by AnnotationLayer
 const simpleLinkService = {
@@ -130,6 +250,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   const annotationLayerDivsRef = useRef<Map<number, HTMLDivElement>>(new Map());
   const renderedAnnotLayersRef = useRef<Set<number>>(new Set());
   const [hasFormFields, setHasFormFields] = useState(false);
+  const hasFormFieldsRef = useRef(false);
   const [selectedAnnotation, setSelectedAnnotation] = useState<string | null>(null);
   const [editingAnnotation, setEditingAnnotation] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{ id: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -161,6 +282,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   const [shapePreview, setShapePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   // Note editing state
   const [editingNote, setEditingNote] = useState<string | null>(null);
+  // Counter bumped when pdfDocRef is ready so visible pages can be rendered
+  const [pdfReadyCounter, setPdfReadyCounter] = useState(0);
 
   const scale = zoom / 100;
   scaleRef.current = scale;
@@ -189,8 +312,24 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       if (!document.pdfData || document.pdfData.length === 0) return;
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdf = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+        const pdf = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         pdfDocRef.current = pdf;
+
+        // Detect form fields BEFORE triggering any page renders.
+        // setRenderedPages() causes a re-render → IntersectionObserver → renderPage().
+        // hasFormFieldsRef must be set first so renderPage uses the correct annotationMode.
+        let formFieldCount = 0;
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const annotations = await page.getAnnotations();
+          formFieldCount += annotations.filter((a: any) => a.subtype === 'Widget').length;
+        }
+        const hasFields = formFieldCount > 0;
+        hasFormFieldsRef.current = hasFields;
+        setHasFormFields(hasFields);
+        onFormFieldsDetected?.(formFieldCount);
+
+        // Now safe to trigger page rendering — annotationMode will be correct
         renderedPagesRef.current = new Map();
         setRenderedPages(new Map());
         renderingRef.current.clear();
@@ -201,15 +340,11 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
         annotationStorageRef.current = (pdf as any).annotationStorage;
         onAnnotationStorageReady?.(annotationStorageRef.current);
 
-        // Detect form fields across all pages
-        let formFieldCount = 0;
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const annotations = await page.getAnnotations();
-          formFieldCount += annotations.filter((a: any) => a.subtype === 'Widget').length;
-        }
-        setHasFormFields(formFieldCount > 0);
-        onFormFieldsDetected?.(formFieldCount);
+        // Signal that pdfDocRef is ready so visible pages can be rendered.
+        // The IntersectionObserver may have already fired before loadPdf completed,
+        // in which case renderPage returned early because pdfDocRef was null.
+        // Bump a counter to trigger re-observation of visible pages.
+        setPdfReadyCounter(c => c + 1);
       } catch (error) {
         console.error('Failed to load PDF:', error);
       }
@@ -233,7 +368,35 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       const ctx = canvas.getContext('2d')!;
-      await page.render({ canvasContext: ctx, viewport }).promise;
+      // Always use ENABLE_FORMS to skip rendering form field appearance
+      // streams on the canvas. The HTML AnnotationLayer displays field values
+      // from the data stream instead. For PDFs without form fields this is
+      // harmless — there are no widget annotations to skip.
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+        annotationMode: 2,  // AnnotationMode.ENABLE_FORMS = 2
+      } as any).promise;
+
+      // ENABLE_FORMS skips widget appearances EXCEPT those with hasOwnCanvas.
+      // For hasOwnCanvas fields, pdfjs still draws the appearance on the main
+      // canvas. Clear those areas so the HTML input is the sole text source.
+      const annotations = await page.getAnnotations();
+      for (const annot of annotations) {
+        if (annot.subtype === 'Widget' && annot.hasOwnCanvas && annot.rect) {
+          const [x1, y1, x2, y2] = annot.rect;
+          // Convert PDF rect (bottom-left origin) to canvas coords (top-left origin)
+          const [cx1, cy1] = viewport.convertToViewportPoint(x1, y1);
+          const [cx2, cy2] = viewport.convertToViewportPoint(x2, y2);
+          const left = Math.min(cx1, cx2);
+          const top = Math.min(cy1, cy2);
+          const width = Math.abs(cx2 - cx1);
+          const height = Math.abs(cy2 - cy1);
+          // Paint over with white to erase the canvas-rendered appearance text
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(left, top, width, height);
+        }
+      }
 
       // Discard if scale changed during async render
       if (scaleRef.current !== currentScale) {
@@ -248,6 +411,22 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       renderingRef.current.delete(pageNum);
     }
   }, []);
+
+  // When pdfDocRef becomes ready, render visible pages that the IntersectionObserver
+  // may have already tried to render before the PDF document proxy was available.
+  useEffect(() => {
+    if (pdfReadyCounter === 0 || !containerRef.current) return;
+    requestAnimationFrame(() => {
+      containerRef.current?.querySelectorAll('.pdf-page-container').forEach(el => {
+        const rect = el.getBoundingClientRect();
+        const viewerRect = containerRef.current!.getBoundingClientRect();
+        if (rect.bottom > viewerRect.top && rect.top < viewerRect.bottom) {
+          const pageNum = parseInt(el.getAttribute('data-page') || '0');
+          if (pageNum > 0) renderPage(pageNum);
+        }
+      });
+    });
+  }, [pdfReadyCounter, renderPage]);
 
   // Render pdfjs AnnotationLayer for a page (form fields)
   const renderAnnotationLayer = useCallback(async (pageNum: number) => {
@@ -301,6 +480,82 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
           if (mapping.required) section.setAttribute('data-required', 'true');
           if (mapping.readOnly) section.setAttribute('data-readonly', 'true');
         }
+      }
+
+      // Post-render: enable ALL form fields for editing.
+      // pdfjs sets disabled=true on readOnly fields (from fieldFlags bit 1),
+      // and sets hidden=true on fields with hasOwnCanvas (readOnly fields with
+      // pre-rendered appearance streams). A form filler should allow editing
+      // every field, so we remove all restrictive attributes.
+      const allInputs = div.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+        'input, textarea, select'
+      );
+      for (const input of allInputs) {
+        input.disabled = false;
+        input.hidden = false;
+        input.removeAttribute('hidden');
+        input.removeAttribute('readOnly');
+        input.removeAttribute('readonly');
+      }
+
+      // Hide annotation content canvases — these are pdfjs-rendered appearance
+      // streams for hasOwnCanvas fields that duplicate the text already shown
+      // in the HTML input. Hiding them prevents doubled/blurred text.
+      const annotCanvases = div.querySelectorAll<HTMLCanvasElement>('canvas.annotationContent');
+      for (const canvas of annotCanvases) {
+        canvas.style.display = 'none';
+      }
+
+      // Post-render: apply input format masks for fields with format placeholders
+      // from the data stream (defaultFieldValue). Detects patterns like MM/DD/YYYY,
+      // ###-###-####, etc. and enforces the format as the user types.
+      for (const annot of formAnnotations) {
+        const placeholder = (annot as any).defaultFieldValue;
+        if (!placeholder || typeof placeholder !== 'string' || (annot as any).fieldType !== 'Tx') continue;
+        // Skip fields whose defaultFieldValue is just plain data (not a format pattern)
+        // Format patterns contain repeated format chars: M, D, Y, #, X, 0, etc.
+        const mask = detectFormatMask(placeholder);
+        if (!mask) continue;
+
+        const section = div.querySelector(`[data-annotation-id="${(annot as any).id}"]`);
+        const input = section?.querySelector('input, textarea') as HTMLInputElement | null;
+        if (!input) continue;
+
+        // Set placeholder text showing the format, clear the pre-filled pattern value
+        input.placeholder = placeholder;
+        if (input.value === placeholder) {
+          input.value = '';
+          // Also clear in annotation storage so the placeholder isn't saved as data
+          if (annotationStorageRef.current) {
+            annotationStorageRef.current.setValue((annot as any).id, { value: '' });
+          }
+        }
+
+        // Attach the format mask handler
+        applyFormatMask(input, mask, (annot as any).id, annotationStorageRef.current);
+      }
+
+      // Post-render: enable toggle-off for radio buttons and checkboxes.
+      // HTML radio inputs can't be unchecked natively — this adds click-to-toggle
+      // behavior matching standard PDF form editors (Adobe, Chrome PDF viewer).
+      const toggleInputs = div.querySelectorAll<HTMLInputElement>(
+        '.buttonWidgetAnnotation input[type="radio"], .buttonWidgetAnnotation input[type="checkbox"]'
+      );
+      for (const input of toggleInputs) {
+        let wasChecked = false;
+        input.addEventListener('mousedown', () => {
+          wasChecked = input.checked;
+        });
+        input.addEventListener('click', () => {
+          if (wasChecked) {
+            input.checked = false;
+            // Update pdfjs annotation storage to reflect unchecked state
+            const annotId = input.closest('section')?.getAttribute('data-annotation-id');
+            if (annotId && annotationStorageRef.current) {
+              annotationStorageRef.current.setValue(annotId, { value: false });
+            }
+          }
+        });
       }
     } catch (error) {
       console.error(`Failed to render annotation layer for page ${pageNum}:`, error);
@@ -1394,7 +1649,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
             {/* pdfjs AnnotationLayer for AcroForm fields — always interactive */}
             {hasFormFields && (
               <div
-                className="pdfjs-annotation-layer"
+                className="pdfjs-annotation-layer annotationLayer"
                 ref={(el) => {
                   if (el) {
                     annotationLayerDivsRef.current.set(pageNum, el);

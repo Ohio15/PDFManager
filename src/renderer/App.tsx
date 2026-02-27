@@ -27,6 +27,7 @@ import FormDataPanel from './components/FormDataPanel';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
+import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
 
 declare global {
   interface Window {
@@ -794,7 +795,7 @@ const App: React.FC = () => {
       import.meta.url
     ).toString();
 
-    const pdfDoc = await pdfjsLib.getDocument({ data: pdfData }).promise;
+    const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
 
     for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
@@ -868,7 +869,7 @@ const App: React.FC = () => {
       ).toString();
 
       const dataCopy = new Uint8Array(document.pdfData);
-      const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
       const totalPages = pdfDoc.numPages;
 
       for (let i = 0; i < totalPages; i++) {

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import * as pdfjsLib from 'pdfjs-dist';
 import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2, AlertCircle, Link, Eye } from 'lucide-react';
 import { PDFDocument, Annotation, PDFSourceAnnotation } from '../types';
+import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 
 export type SidebarTab = 'pages' | 'bookmarks' | 'annotations';
 
@@ -88,7 +89,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     const generateThumbnails = async () => {
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const newThumbnails: string[] = [];
 
         for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -127,7 +128,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     const extractOutline = async () => {
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const rawOutline = await pdfDoc.getOutline();
 
         if (!rawOutline || rawOutline.length === 0) {

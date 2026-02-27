@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import Modal from './Modal';
 import { PDFDocument } from '../types';
+import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 
 interface DocumentPropertiesDialogProps {
   isOpen: boolean;
@@ -74,7 +75,7 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
       setLoading(true);
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const meta = await pdfDoc.getMetadata();
 
         const info = (meta?.info as Record<string, any>) || {};

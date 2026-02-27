@@ -9,6 +9,7 @@ import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundC
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
+import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -202,6 +203,7 @@ export function usePDFDocument() {
       const binaryData = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
       const dataCopyForPdfJs = new Uint8Array(binaryData);
       const loadingTask = pdfjsLib.getDocument({
+        ...PDFJS_DOCUMENT_OPTIONS,
         data: dataCopyForPdfJs,
         password: password || undefined,
       });
@@ -375,7 +377,7 @@ export function usePDFDocument() {
   ) => {
     try {
       const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
-      const pdfDocReload = await pdfjsLib.getDocument({ data: dataCopyForPdfJs }).promise;
+      const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs }).promise;
 
       const updatedPages = await Promise.all(
         (document?.pages || []).map(async (page, i) => {

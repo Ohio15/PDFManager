@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { X, ChevronUp, ChevronDown } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument } from '../types';
+import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 
 export interface SearchResult {
   pageIndex: number;
@@ -67,7 +68,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
 
     try {
       const dataCopy = new Uint8Array(document.pdfData);
-      const pdfDoc = await pdfjsLib.getDocument({ data: dataCopy }).promise;
+      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
         const page = await pdfDoc.getPage(i);

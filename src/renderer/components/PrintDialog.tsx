@@ -110,7 +110,8 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
         'pdfjs-dist/build/pdf.worker.min.mjs',
         import.meta.url
       ).toString();
-      const doc = await pdfjsLib.getDocument({ data: pdfData }).promise;
+      const { PDFJS_DOCUMENT_OPTIONS } = await import('../utils/pdfjsConfig');
+      const doc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
       if (!cancelled) {
         setPdfDoc(doc);
 

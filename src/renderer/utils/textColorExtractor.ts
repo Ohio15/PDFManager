@@ -100,6 +100,7 @@ export function buildTextColorMap(
         break;
       }
       case OPS.transform: {
+        if (!args) break;
         // Simplified: just track translation for position
         const [a, b, c, d, e, f] = args;
         const newCtm = [
@@ -114,6 +115,7 @@ export function buildTextColorMap(
         break;
       }
       case OPS.setFillRGBColor: {
+        if (!args) break;
         fillColor = {
           r: normalizeComponent(args[0]),
           g: normalizeComponent(args[1]),
@@ -124,6 +126,7 @@ export function buildTextColorMap(
         break;
       }
       case OPS.setFillGray: {
+        if (!args) break;
         const g = normalizeComponent(args[0]);
         fillColor = { r: g, g: g, b: g };
         fillColorSpace = 'DeviceGray';
@@ -131,12 +134,14 @@ export function buildTextColorMap(
         break;
       }
       case OPS.setFillCMYKColor: {
+        if (!args) break;
         fillColor = cmykToRgb(args[0], args[1], args[2], args[3]);
         fillColorSpace = 'DeviceCMYK';
         fillColorValues = [args[0], args[1], args[2], args[3]];
         break;
       }
       case OPS.setTextMatrix: {
+        if (!args) break;
         textMatrix = [args[0], args[1], args[2], args[3], args[4], args[5]];
         break;
       }
@@ -272,6 +277,7 @@ export function buildFilledRectMap(
         break;
       }
       case OPS.transform: {
+        if (!args) break;
         const [a, b, c, d, e, f] = args;
         ctm = [
           ctm[0] * a + ctm[1] * c,
@@ -284,6 +290,7 @@ export function buildFilledRectMap(
         break;
       }
       case OPS.setFillRGBColor: {
+        if (!args) break;
         fillColor = {
           r: normalizeComponent(args[0]),
           g: normalizeComponent(args[1]),
@@ -292,15 +299,18 @@ export function buildFilledRectMap(
         break;
       }
       case OPS.setFillGray: {
+        if (!args) break;
         const g = normalizeComponent(args[0]);
         fillColor = { r: g, g: g, b: g };
         break;
       }
       case OPS.setFillCMYKColor: {
+        if (!args) break;
         fillColor = cmykToRgb(args[0], args[1], args[2], args[3]);
         break;
       }
       case OPS.rectangle: {
+        if (!args) break;
         // Record pending rectangle in user space
         pendingRect = { x: args[0], y: args[1], w: args[2], h: args[3] };
         break;

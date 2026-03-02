@@ -11,6 +11,7 @@ import MergePdfsDialog from './components/MergePdfsDialog';
 import SplitPdfDialog from './components/SplitPdfDialog';
 import ExtractPagesDialog from './components/ExtractPagesDialog';
 import ExtractImagesDialog from './components/ExtractImagesDialog';
+import ConvertToPdfDialog from './components/ConvertToPdfDialog';
 import ConvertFromPdfDialog from './components/ConvertFromPdfDialog';
 import ConvertToDocxDialog from './components/ConvertToDocxDialog';
 import PrintDialog from './components/PrintDialog';
@@ -70,6 +71,11 @@ declare global {
       getRecentFiles: () => Promise<string[]>;
       addRecentFile: (filePath: string) => Promise<string[]>;
       clearRecentFiles: () => Promise<string[]>;
+      // Document conversion
+      detectLibreOffice: () => Promise<string | null>;
+      onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
+      openDocumentsDialog: () => Promise<string[] | null>;
+      convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
       getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
       printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
       getLaunchFile: () => Promise<{ path: string; data: string } | null>;
@@ -103,11 +109,13 @@ const App: React.FC = () => {
   const [zoomMode, setZoomMode] = useState<ZoomMode>('custom');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
+  const [libreOfficeAvailable, setLibreOfficeAvailable] = useState(false);
   // Dialog states
   const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
   const [splitDialogOpen, setSplitDialogOpen] = useState(false);
   const [extractPagesDialogOpen, setExtractPagesDialogOpen] = useState(false);
   const [extractImagesDialogOpen, setExtractImagesDialogOpen] = useState(false);
+  const [convertDialogOpen, setConvertDialogOpen] = useState(false);
   const [convertFromDialogOpen, setConvertFromDialogOpen] = useState(false);
   const [convertToDocxDialogOpen, setConvertToDocxDialogOpen] = useState(false);
   const [convertToDocxInitialMode, setConvertToDocxInitialMode] = useState<'single' | 'batch'>('single');
@@ -190,7 +198,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Load persisted settings on mount
+  // Load persisted settings and check LibreOffice on mount
   useEffect(() => {
     const loadSettings = async () => {
       try {
@@ -202,6 +210,10 @@ const App: React.FC = () => {
 
         const savedZoom = await window.electronAPI.getStore('defaultZoom');
         if (typeof savedZoom === 'number') setZoom(savedZoom);
+
+        // Check LibreOffice availability via IPC
+        const loPath = await window.electronAPI.detectLibreOffice();
+        setLibreOfficeAvailable(!!loPath);
 
         // Load and apply theme
         const savedTheme = await window.electronAPI.getStore('theme') as 'light' | 'dark' | 'system' | null;
@@ -346,6 +358,13 @@ const App: React.FC = () => {
       }
     }
   }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
+
+  // Also listen for LibreOffice status from main process
+  useEffect(() => {
+    window.electronAPI.onLibreOfficeStatus((path) => {
+      setLibreOfficeAvailable(!!path);
+    });
+  }, []);
 
   const handleOpenRecentFile = useCallback(async (filePath: string) => {
     const result = await window.electronAPI.readFileByPath(filePath);
@@ -922,6 +941,7 @@ const App: React.FC = () => {
       'split-pdf': () => document && setSplitDialogOpen(true),
       'extract-pages': () => document && setExtractPagesDialogOpen(true),
       'extract-images': () => document && setExtractImagesDialogOpen(true),
+      'convert-to-pdf': () => setConvertDialogOpen(true),
       'settings': () => setSettingsDialogOpen(true),
       'document-properties': () => document && setPropertiesDialogOpen(true),
     };
@@ -1299,9 +1319,11 @@ const App: React.FC = () => {
           onExtractPages={() => setExtractPagesDialogOpen(true)}
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
+          onConvertToPdf={() => setConvertDialogOpen(true)}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
+          libreOfficeAvailable={libreOfficeAvailable}
         />
 
         <FormDataPanel
@@ -1361,6 +1383,12 @@ const App: React.FC = () => {
           />
         </>
       )}
+
+      <ConvertToPdfDialog
+        isOpen={convertDialogOpen}
+        onClose={() => setConvertDialogOpen(false)}
+        libreOfficeAvailable={libreOfficeAvailable}
+      />
 
       {document && (
         <ConvertFromPdfDialog

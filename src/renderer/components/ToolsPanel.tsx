@@ -10,6 +10,8 @@ import {
   Code,
   ChevronLeft,
   X,
+  ExternalLink,
+  AlertCircle,
 } from 'lucide-react';
 
 interface ToolsPanelProps {
@@ -21,9 +23,11 @@ interface ToolsPanelProps {
   onExtractPages: () => void;
   onExtractImages: () => void;
   onRotateAll: () => void;
+  onConvertToPdf: () => void;
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
   onExportSvg: () => void;
+  libreOfficeAvailable: boolean;
 }
 
 const ToolsPanel: React.FC<ToolsPanelProps> = ({
@@ -35,9 +39,11 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onExtractPages,
   onExtractImages,
   onRotateAll,
+  onConvertToPdf,
   onConvertFromPdf,
   onConvertToDocx,
   onExportSvg,
+  libreOfficeAvailable,
 }) => {
   const tools = [
     {
@@ -128,6 +134,15 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
           <h4>Document Conversion</h4>
           <button
             className="tool-btn"
+            onClick={onConvertToPdf}
+            disabled={!libreOfficeAvailable}
+            title={libreOfficeAvailable ? 'Convert Word, Excel, PowerPoint to PDF' : 'LibreOffice required'}
+          >
+            <FileText size={18} />
+            <span>Documents to PDF</span>
+          </button>
+          <button
+            className="tool-btn"
             onClick={onConvertToDocx}
             disabled={disabled}
             title="Convert PDF to Word document (.docx)"
@@ -153,6 +168,22 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
             <Code size={18} />
             <span>PDF to SVG</span>
           </button>
+          {!libreOfficeAvailable && (
+            <div className="tools-notice">
+              <div className="tools-notice-header">
+                <AlertCircle size={16} />
+                <span>LibreOffice Required</span>
+              </div>
+              <p>Install LibreOffice to enable document-to-PDF conversion.</p>
+              <button
+                className="tools-notice-link"
+                onClick={() => window.electronAPI.openExternal('https://www.libreoffice.org/download/download/')}
+              >
+                <ExternalLink size={14} />
+                Download LibreOffice
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

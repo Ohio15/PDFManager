@@ -2132,6 +2132,12 @@ input:focus:not(:focus-visible) {
   pointer-events: none;
 }
 
+/* Signature mode - disable all overlays so page click reaches handler */
+.pdf-page-container.signature-mode .annotation-layer,
+.pdf-page-container.signature-mode .text-layer {
+  pointer-events: none;
+}
+
 /* Eraser region selection preview */
 .eraser-preview {
   position: absolute;

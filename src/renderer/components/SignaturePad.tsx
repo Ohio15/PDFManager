@@ -17,9 +17,11 @@ interface StrokePoint {
   pressure: number;
 }
 
-const PAD_WIDTH = 420;
-const PAD_HEIGHT = 180;
+const PAD_WIDTH = 480;
+const PAD_HEIGHT = 200;
 const SIGNATURE_COLORS = ['#000000', '#1a237e', '#0d47a1', '#b71c1c'];
+const MIN_PEN_WIDTH = 1.5;
+const MAX_PEN_WIDTH = 6;
 
 const SignaturePad: React.FC<SignaturePadProps> = ({
   anchorX,
@@ -43,14 +45,33 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const [padPosition, setPadPosition] = useState({ x: 0, y: 0 });
 
-  // Position the pad centered on the click point
+  // Effective pen width for signatures (thicker than regular drawing)
+  const effectivePenWidth = Math.max(MIN_PEN_WIDTH, Math.min(MAX_PEN_WIDTH, penWidth * 1.5));
+
+  // Position the pad centered on the click point within the viewport
   useEffect(() => {
+    // Convert PDF coordinates to approximate screen position
     const screenX = anchorX * scale;
     const screenY = anchorY * scale;
-    setPadPosition({
-      x: screenX - PAD_WIDTH / 2,
-      y: screenY - 20,
-    });
+
+    // Find the PDF viewer container to get scroll offset
+    const viewer = document.querySelector('.pdf-viewer');
+    const viewerRect = viewer?.getBoundingClientRect();
+
+    let finalX = screenX - PAD_WIDTH / 2;
+    let finalY = screenY;
+
+    if (viewerRect) {
+      // Offset by viewer position and scroll
+      finalX += viewerRect.left + (viewer?.scrollLeft ?? 0) * 0 ;
+      finalY += viewerRect.top;
+    }
+
+    // Clamp to viewport
+    finalX = Math.max(20, Math.min(window.innerWidth - PAD_WIDTH - 20, finalX));
+    finalY = Math.max(60, Math.min(window.innerHeight - PAD_HEIGHT - 100, finalY));
+
+    setPadPosition({ x: finalX, y: finalY });
   }, [anchorX, anchorY, scale]);
 
   // Initialize canvas with devicePixelRatio scaling
@@ -78,7 +99,6 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
         onCancel();
         return;
       }
-      // Let Ctrl+Z through for potential undo, block tool shortcuts
       if (!e.ctrlKey && !e.metaKey) {
         e.stopPropagation();
       }
@@ -107,18 +127,14 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
     smoothedPressureRef.current = smoothedPressureRef.current * 0.7 + to.pressure * 0.3;
     const pressure = smoothedPressureRef.current;
 
-    // Width varies from 30% to 150% of base width based on pressure
-    const width = baseWidth * (0.3 + pressure * 1.2);
+    // Width varies from 40% to 160% of base width based on pressure
+    const width = baseWidth * (0.4 + pressure * 1.2);
 
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.beginPath();
     ctx.moveTo(from.x, from.y);
-
-    // Quadratic bezier to midpoint for smooth curves
-    const midX = (from.x + to.x) / 2;
-    const midY = (from.y + to.y) / 2;
-    ctx.quadraticCurveTo(from.x, from.y, midX, midY);
+    ctx.lineTo(to.x, to.y);
     ctx.stroke();
   }, []);
 
@@ -146,10 +162,10 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
     const ctx = canvas.getContext('2d');
     if (ctx) {
       const pressure = smoothedPressureRef.current;
-      const radius = (penWidth * (0.3 + pressure * 1.2)) / 2;
+      const radius = (effectivePenWidth * (0.4 + pressure * 1.2)) / 2;
       ctx.fillStyle = activeColor;
       ctx.beginPath();
-      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.arc(point.x, point.y, Math.max(0.5, radius), 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -157,7 +173,7 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
       hasStrokesRef.current = true;
       setHasStrokes(true);
     }
-  }, [getCanvasPoint, activeColor, penWidth]);
+  }, [getCanvasPoint, activeColor, effectivePenWidth]);
 
   const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!isDrawingRef.current) return;
@@ -172,11 +188,11 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
     for (const coalescedEvent of events) {
       const point = getCanvasPoint(coalescedEvent);
       if (lastPointRef.current) {
-        drawSegment(lastPointRef.current, point, activeColor, penWidth);
+        drawSegment(lastPointRef.current, point, activeColor, effectivePenWidth);
       }
       lastPointRef.current = point;
     }
-  }, [getCanvasPoint, drawSegment, activeColor, penWidth]);
+  }, [getCanvasPoint, drawSegment, activeColor, effectivePenWidth]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.pointerId !== activePointerIdRef.current) return;
@@ -232,7 +248,7 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
     if (maxX <= minX || maxY <= minY) return;
 
     // Add padding
-    const pad = Math.ceil(4 * dpr);
+    const pad = Math.ceil(6 * dpr);
     minX = Math.max(0, minX - pad);
     minY = Math.max(0, minY - pad);
     maxX = Math.min(canvas.width, maxX + pad);
@@ -287,7 +303,7 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
   }, [isDragging]);
 
   return (
-    <div className="signature-pad-backdrop" onClick={onCancel}>
+    <div className="signature-pad-backdrop" onMouseDown={(e) => { e.stopPropagation(); onCancel(); }}>
       <div
         ref={overlayRef}
         className="signature-pad-overlay"
@@ -295,6 +311,7 @@ const SignaturePad: React.FC<SignaturePadProps> = ({
           left: padPosition.x,
           top: padPosition.y,
         }}
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Title bar */}

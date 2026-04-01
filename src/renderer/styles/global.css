@@ -4505,6 +4505,39 @@ input:focus:not(:focus-visible) {
   color: #4ade80;
 }
 
+.signature-pad-btn-cleanup {
+  color: #a78bfa;
+  border-color: #a78bfa44;
+}
+
+.signature-pad-btn-cleanup:hover:not(:disabled) {
+  background: rgba(167, 139, 250, 0.15);
+  color: #c4b5fd;
+}
+
+.signature-pad-btn-undo-cleanup {
+  color: #a78bfa;
+  border-color: #a78bfa44;
+  border-style: dashed;
+}
+
+.signature-pad-btn-undo-cleanup:hover {
+  background: rgba(167, 139, 250, 0.1);
+}
+
+.signature-pad-cleaned-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.15);
+  border-radius: 3px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 /* ============================================
    Annotations List Panel
    ============================================ */

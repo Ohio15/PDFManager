@@ -24,6 +24,7 @@ import {
   PanelLeft,
   FileX,
   MoreHorizontal,
+  PenLine,
 } from 'lucide-react';
 
 export type ZoomMode = 'custom' | 'fit-width' | 'fit-page';
@@ -145,6 +146,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
     { id: 'shape', icon: <Shapes />, label: 'Shape', shortcut: 'S' },
     { id: 'note', icon: <StickyNote />, label: 'Sticky Note', shortcut: 'N' },
     { id: 'stamp', icon: <Stamp />, label: 'Stamp' },
+    { id: 'signature', icon: <PenLine />, label: 'Signature', shortcut: 'G' },
     { id: 'image', icon: <Image />, label: 'Add Image', shortcut: 'I' },
     { id: 'erase', icon: <Eraser />, label: 'Eraser', shortcut: 'E' },
   ];

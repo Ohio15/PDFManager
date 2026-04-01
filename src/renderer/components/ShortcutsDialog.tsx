@@ -40,6 +40,7 @@ const shortcuts = [
       { keys: 'D', description: 'Freehand draw' },
       { keys: 'S', description: 'Shape tool' },
       { keys: 'N', description: 'Sticky note' },
+      { keys: 'G', description: 'Signature tool' },
       { keys: 'I', description: 'Add image' },
       { keys: 'E', description: 'Eraser tool' },
     ],

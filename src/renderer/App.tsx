@@ -88,7 +88,7 @@ declare global {
   }
 }
 
-export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature';
 
 // Helper to convert Uint8Array to base64
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -1018,6 +1018,9 @@ const App: React.FC = () => {
           case 'n':
             handleToolChange('note');
             break;
+          case 'g':
+            handleToolChange('signature');
+            break;
           case 'delete':
           case 'backspace':
             if (selectedAnnotationId) {
@@ -1268,6 +1271,7 @@ const App: React.FC = () => {
               onAddShape={addShape}
               onAddStickyNote={addStickyNote}
               onAddStamp={addStamp}
+              onAddImage={addImage}
               annotationStyle={annotationStyle}
               loading={loading}
               onFormFieldsDetected={handleFormFieldsDetected}

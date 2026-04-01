@@ -6,6 +6,7 @@ import { PDFDocument, Annotation, TextAnnotation, ImageAnnotation, HighlightAnno
 import { Tool } from '../App';
 import { FormFieldMapping } from '../utils/formFieldSaver';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
+import SignaturePad from './SignaturePad';
 
 interface TextEditDialogState {
   isOpen: boolean;
@@ -197,6 +198,7 @@ interface PDFViewerProps {
   onAddShape?: (pageIndex: number, shapeType: ShapeAnnotation['shapeType'], position: Position, size: Size, strokeColor: string, fillColor: string, strokeWidth: number) => void;
   onAddStickyNote?: (pageIndex: number, position: Position, color?: string) => void;
   onAddStamp?: (pageIndex: number, position: Position, stampType: StampAnnotation['stampType'], text: string, color: string) => void;
+  onAddImage?: (pageIndex: number, position: Position, data: string, imageType: string, size?: { width: number; height: number }) => void;
   annotationStyle?: AnnotationStyle;
   loading: boolean;
   onFormFieldsDetected?: (count: number) => void;
@@ -228,6 +230,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   onAddShape,
   onAddStickyNote,
   onAddStamp,
+  onAddImage,
   annotationStyle,
   loading,
   onFormFieldsDetected,
@@ -280,6 +283,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   // Shape tool state
   const [shapeStart, setShapeStart] = useState<{ pageNum: number; x: number; y: number } | null>(null);
   const [shapePreview, setShapePreview] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  // Signature tool state
+  const [signaturePadState, setSignaturePadState] = useState<{ pageNum: number; x: number; y: number } | null>(null);
   // Note editing state
   const [editingNote, setEditingNote] = useState<string | null>(null);
   // Counter bumped when pdfDocRef is ready so visible pages can be rendered
@@ -770,6 +775,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
         onAddStamp(pageNum, { x, y }, annotationStyle.stampType, annotationStyle.stampText, annotationStyle.color);
       }
       onToolChange?.('select');
+    } else if (currentTool === 'signature') {
+      setSignaturePadState({ pageNum, x, y });
     }
   };
 
@@ -1613,7 +1620,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
           <div
             key={pageNum}
             data-page={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''} ${currentTool === 'signature' ? 'signature-mode' : ''}`}
             style={{
               width: pageWidth,
               height: pageHeight,
@@ -1745,6 +1752,34 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
                   />
                 )}
               </svg>
+            )}
+            {/* Signature pad overlay */}
+            {signaturePadState && signaturePadState.pageNum === pageNum && (
+              <SignaturePad
+                anchorX={signaturePadState.x}
+                anchorY={signaturePadState.y}
+                scale={scale}
+                penColor={annotationStyle?.strokeColor || '#000000'}
+                penWidth={annotationStyle?.strokeWidth || 2}
+                onApply={(dataUrl, bounds) => {
+                  if (onAddImage) {
+                    // Place signature centered on the click point, scaled to PDF coordinates
+                    const pdfWidth = bounds.width / scale;
+                    const pdfHeight = bounds.height / scale;
+                    const position = {
+                      x: signaturePadState.x - pdfWidth / 2,
+                      y: signaturePadState.y - pdfHeight / 2,
+                    };
+                    onAddImage(signaturePadState.pageNum, position, dataUrl, 'signature', { width: pdfWidth, height: pdfHeight });
+                  }
+                  setSignaturePadState(null);
+                  onToolChange?.('select');
+                }}
+                onCancel={() => {
+                  setSignaturePadState(null);
+                  onToolChange?.('select');
+                }}
+              />
             )}
           </div>
         );

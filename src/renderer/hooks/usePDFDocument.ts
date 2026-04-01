@@ -611,7 +611,7 @@ export function usePDFDocument() {
   );
 
   const addImage = useCallback(
-    (pageIndex: number, position: Position, data: string, imageType: string) => {
+    (pageIndex: number, position: Position, data: string, imageType: string, size?: { width: number; height: number }) => {
       if (!document) return;
 
       const annotation: ImageAnnotation = {
@@ -619,7 +619,7 @@ export function usePDFDocument() {
         type: 'image',
         pageIndex,
         position,
-        size: { width: 200, height: 200 },
+        size: size ?? { width: 200, height: 200 },
         data,
         imageType,
       };

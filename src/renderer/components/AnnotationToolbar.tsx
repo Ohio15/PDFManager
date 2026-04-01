@@ -78,7 +78,7 @@ const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
 }) => {
   const [customStampText, setCustomStampText] = useState(style.stampText || 'CUSTOM');
 
-  const showToolbar = ['text', 'highlight', 'draw', 'shape', 'note', 'stamp'].includes(currentTool);
+  const showToolbar = ['text', 'highlight', 'draw', 'shape', 'note', 'stamp', 'signature'].includes(currentTool);
   if (!showToolbar) return null;
 
   const renderColorPresets = (
@@ -227,6 +227,19 @@ const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
       {currentTool === 'note' && (
         <>
           {renderColorPresets(NOTE_COLORS, style.noteColor, (c) => onStyleChange({ noteColor: c }), 'Color')}
+        </>
+      )}
+
+      {/* Signature tool */}
+      {currentTool === 'signature' && (
+        <>
+          {renderColorPresets(
+            ['#000000', '#1a237e', '#0d47a1', '#b71c1c', '#1b5e20', '#4a148c'],
+            style.strokeColor,
+            (c) => onStyleChange({ strokeColor: c }),
+            'Pen Color'
+          )}
+          {renderStrokeWidth()}
         </>
       )}
 

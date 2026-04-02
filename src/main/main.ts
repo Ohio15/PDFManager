@@ -686,7 +686,7 @@ ipcMain.handle('print-pdf', async (_event, { html, printerName, copies, landscap
 
   return new Promise<{ success: boolean; error?: string }>((resolve) => {
     const printOptions: Electron.WebContentsPrintOptions = {
-      silent: true,
+      silent: false,
       printBackground: true,
       copies: copies || 1,
       landscape: !!landscape,

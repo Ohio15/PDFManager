@@ -38,6 +38,7 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
   const [colorMode, setColorMode] = useState(true);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -161,6 +162,7 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
   const handlePrint = useCallback(async () => {
     if (!pdfDoc || pagesToPrint.length === 0) return;
     setPrinting(true);
+    setPrintError(null);
 
     try {
       // Render pages at print quality
@@ -232,9 +234,12 @@ ${pagesHtml}
 
       if (result.success) {
         onClose();
+      } else {
+        setPrintError(result.error || 'Print failed. Please check your printer connection and try again.');
       }
     } catch (error) {
       console.error('Print failed:', error);
+      setPrintError(error instanceof Error ? error.message : 'An unexpected error occurred during printing.');
     } finally {
       setPrinting(false);
     }
@@ -448,6 +453,17 @@ ${pagesHtml}
       </div>
 
       {/* Footer */}
+      {printError && (
+        <div className="print-error-bar" style={{
+          padding: '8px 16px',
+          background: 'rgba(239, 68, 68, 0.15)',
+          color: '#ef4444',
+          fontSize: '13px',
+          borderTop: '1px solid rgba(239, 68, 68, 0.3)',
+        }}>
+          {printError}
+        </div>
+      )}
       <div className="print-dialog-footer">
         <span className="print-page-summary">
           {pagesToPrint.length} page{pagesToPrint.length !== 1 ? 's' : ''} selected

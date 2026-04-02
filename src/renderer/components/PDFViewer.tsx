@@ -289,6 +289,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   const [editingNote, setEditingNote] = useState<string | null>(null);
   // Counter bumped when pdfDocRef is ready so visible pages can be rendered
   const [pdfReadyCounter, setPdfReadyCounter] = useState(0);
+  // Track previous page to detect external navigation (sidebar click, search nav)
+  const prevCurrentPageRef = useRef(currentPage);
 
   const scale = zoom / 100;
   scaleRef.current = scale;
@@ -653,6 +655,20 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       }, 0);
     }
   }, [scale, rotationsKey, renderPage]);
+
+  // Scroll to page when currentPage changes externally (sidebar click, search navigation)
+  useEffect(() => {
+    if (currentPage === prevCurrentPageRef.current) return;
+    prevCurrentPageRef.current = currentPage;
+
+    const container = containerRef.current;
+    if (!container) return;
+
+    const pageEl = container.querySelector(`[data-page="${currentPage}"]`) as HTMLElement | null;
+    if (pageEl) {
+      pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [currentPage]);
 
   // IntersectionObserver for lazy page rendering
   useEffect(() => {

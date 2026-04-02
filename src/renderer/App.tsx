@@ -167,6 +167,7 @@ const App: React.FC = () => {
     addStickyNote,
     addStamp,
     insertBlankPage,
+    replacePage,
     deletePage,
     reorderPages,
     rotatePage,
@@ -657,6 +658,27 @@ const App: React.FC = () => {
     }
     toast.success('All pages rotated');
   }, [document, rotatePage, toast]);
+
+  const handleReplacePage = useCallback(async (pageIndex: number) => {
+    if (!document) return;
+    try {
+      const result = await window.electronAPI.openFileDialog();
+      if (!result) return;
+
+      // Decode base64 to Uint8Array
+      const binary = atob(result.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      await replacePage(pageIndex, bytes);
+      toast.success(`Page ${pageIndex} replaced successfully`);
+    } catch (error) {
+      console.error('Failed to replace page:', error);
+      toast.error(`Failed to replace page: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [document, replacePage, toast]);
 
   const handleDeleteSelected = useCallback(() => {
     if (document && selectedAnnotationId) {
@@ -1247,6 +1269,7 @@ const App: React.FC = () => {
           onDeleteAnnotation={deleteAnnotation}
           onSelectAnnotation={(id) => setSelectedAnnotationId(id)}
           onInsertBlankPage={insertBlankPage}
+          onReplacePage={handleReplacePage}
           onDeletePage={(pageIndex) => deletePage(pageIndex)}
         />
 

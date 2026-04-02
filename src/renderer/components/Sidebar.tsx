@@ -22,6 +22,7 @@ interface SidebarProps {
   onDeleteAnnotation?: (pageIndex: number, annotationId: string) => void;
   onSelectAnnotation?: (annotationId: string) => void;
   onInsertBlankPage?: (afterPageIndex: number) => void;
+  onReplacePage?: (pageIndex: number) => void;
   onDeletePage?: (pageIndex: number) => void;
 }
 
@@ -34,6 +35,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onDeleteAnnotation,
   onSelectAnnotation,
   onInsertBlankPage,
+  onReplacePage,
   onDeletePage,
 }) => {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
@@ -553,6 +555,17 @@ const Sidebar: React.FC<SidebarProps> = ({
                 Insert blank page after
               </button>
             </>
+          )}
+          {onReplacePage && (
+            <button
+              className="context-menu-item"
+              onClick={() => {
+                onReplacePage(pageContextMenu.pageIndex);
+                setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+              }}
+            >
+              Replace page...
+            </button>
           )}
           {onDeletePage && document && document.pageCount > 1 && (
             <button

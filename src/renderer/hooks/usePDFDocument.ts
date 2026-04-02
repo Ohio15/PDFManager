@@ -1248,6 +1248,87 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [document, addToHistory]
   );
 
+  const replacePage = useCallback(
+    async (pageIndex: number, newPdfData: Uint8Array) => {
+      if (!document) return;
+
+      const { PDFDocument: PDFLib } = await import('pdf-lib');
+
+      // Load both the current document and the replacement
+      const currentDoc = await PDFLib.load(document.pdfData, { ignoreEncryption: true });
+      const replacementDoc = await PDFLib.load(newPdfData, { ignoreEncryption: true });
+
+      if (replacementDoc.getPageCount() === 0) return;
+
+      // Copy the first page from the replacement into the current document
+      const [copiedPage] = await currentDoc.copyPages(replacementDoc, [0]);
+
+      // Remove the old page and insert the new one at the same position
+      const zeroIndex = pageIndex - 1; // pageIndex is 1-based
+      currentDoc.removePage(zeroIndex);
+      currentDoc.insertPage(zeroIndex, copiedPage);
+
+      // Save the modified PDF
+      const updatedPdfBytes = await currentDoc.save();
+      const updatedPdfData = new Uint8Array(updatedPdfBytes);
+
+      // Get the new page dimensions
+      const newPage = currentDoc.getPage(zeroIndex);
+      const { width, height } = newPage.getSize();
+
+      const previousPages = [...document.pages];
+      const previousPdfData = document.pdfData;
+
+      setDocument((prev) => {
+        if (!prev) return null;
+        const newPages = [...prev.pages];
+        newPages[zeroIndex] = {
+          ...newPages[zeroIndex],
+          width,
+          height,
+          rotation: 0,
+          annotations: [],
+          textItems: [],
+          textEdits: [],
+          sourceAnnotations: [],
+        };
+        const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
+        return { ...prev, pages: reindexed, pdfData: updatedPdfData };
+      });
+
+      setModified(true);
+
+      addToHistory({
+        type: 'replacePage',
+        undo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            return { ...prev, pages: previousPages, pdfData: previousPdfData };
+          });
+        },
+        redo: () => {
+          setDocument((prev) => {
+            if (!prev) return null;
+            const newPages = [...previousPages];
+            newPages[zeroIndex] = {
+              ...newPages[zeroIndex],
+              width,
+              height,
+              rotation: 0,
+              annotations: [],
+              textItems: [],
+              textEdits: [],
+              sourceAnnotations: [],
+            };
+            const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
+            return { ...prev, pages: reindexed, pdfData: updatedPdfData };
+          });
+        },
+      });
+    },
+    [document, addToHistory]
+  );
+
   const reorderPages = useCallback(
     (fromIndex: number, toIndex: number) => {
       if (!document) return;
@@ -1315,6 +1396,7 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     addStickyNote,
     addStamp,
     insertBlankPage,
+    replacePage,
     deletePage,
     reorderPages,
     rotatePage,

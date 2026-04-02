@@ -1260,11 +1260,30 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
 
       if (replacementDoc.getPageCount() === 0) return;
 
+      // Get original page dimensions before removing it
+      const zeroIndex = pageIndex - 1; // pageIndex is 1-based
+      const originalPage = currentDoc.getPage(zeroIndex);
+      const originalSize = originalPage.getSize();
+
       // Copy the first page from the replacement into the current document
       const [copiedPage] = await currentDoc.copyPages(replacementDoc, [0]);
 
-      // Remove the old page and insert the new one at the same position
-      const zeroIndex = pageIndex - 1; // pageIndex is 1-based
+      // Scale the replacement page to match the original page dimensions.
+      // Scanners often produce pages at different DPI/size than the original.
+      const replacementSize = copiedPage.getSize();
+      const scaleX = originalSize.width / replacementSize.width;
+      const scaleY = originalSize.height / replacementSize.height;
+
+      if (Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01) {
+        // Resize the page mediabox to match the original
+        copiedPage.setSize(originalSize.width, originalSize.height);
+
+        // Scale the page content to fit the new dimensions.
+        // Prepend a scale transform to the page's content stream.
+        copiedPage.scaleContent(scaleX, scaleY);
+      }
+
+      // Remove the old page and insert the scaled replacement
       currentDoc.removePage(zeroIndex);
       currentDoc.insertPage(zeroIndex, copiedPage);
 
@@ -1272,9 +1291,9 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
       const updatedPdfBytes = await currentDoc.save();
       const updatedPdfData = new Uint8Array(updatedPdfBytes);
 
-      // Get the new page dimensions
-      const newPage = currentDoc.getPage(zeroIndex);
-      const { width, height } = newPage.getSize();
+      // Use original dimensions for the app's page model
+      const width = originalSize.width;
+      const height = originalSize.height;
 
       const previousPages = [...document.pages];
       const previousPdfData = document.pdfData;

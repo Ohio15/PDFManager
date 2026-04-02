@@ -124,35 +124,41 @@ test.describe('Edge Cases', () => {
   });
 
   test('app remains responsive after opening large PDF', async ({ electronApp, appPage }) => {
-    // scan-document.pdf is typically a larger scanned document
+    // scan-document.pdf is typically a larger scanned document.
+    // Use a longer timeout for the initial open since openPDFViaIPC has a 20s canvas wait.
+    // For very large PDFs, the base64 encoding and IPC transfer can take time.
+    test.setTimeout(120_000);
+
     await openPDFViaIPC(electronApp, appPage, 'scan-document.pdf');
 
     // Verify the PDF loaded — canvas should be present
     const canvas = appPage.locator('canvas').first();
-    await expect(canvas).toBeVisible({ timeout: 30_000 });
+    await expect(canvas).toBeVisible({ timeout: 45_000 });
 
     // Verify toolbar is still interactive
     await selectTool(appPage, 'Select');
-    const isActive = await appPage.locator('.toolbar-btn[aria-label="Select"]').getAttribute('class');
+    const selectBtn = appPage.locator('.toolbar-btn[aria-label="Select"]');
+    const isActive = await selectBtn.getAttribute('class');
     expect(isActive).toContain('active');
 
-    // Verify scrolling works (the page should respond to scroll input)
+    // Verify page container rendered
     const viewer = appPage.locator('.pdf-page-container').first();
-    await expect(viewer).toBeVisible();
+    await expect(viewer).toBeVisible({ timeout: 10_000 });
 
     // Perform a zoom action to test responsiveness
     await appPage.keyboard.press('Control+=');
-    await appPage.waitForTimeout(300);
+    await appPage.waitForTimeout(500);
     await appPage.keyboard.press('Control+-');
-    await appPage.waitForTimeout(300);
+    await appPage.waitForTimeout(500);
 
-    // Verify keyboard shortcuts still work
+    // Verify keyboard shortcuts still work (search bar)
     await appPage.keyboard.press('Control+f');
-    await appPage.waitForTimeout(300);
+    await appPage.waitForTimeout(500);
     const searchBar = appPage.locator('.search-bar');
     const searchVisible = await searchBar.isVisible().catch(() => false);
     if (searchVisible) {
       await appPage.keyboard.press('Escape');
+      await appPage.waitForTimeout(300);
     }
 
     // Final check: app is alive and responsive

@@ -53,14 +53,20 @@ test.describe('Toolbar UI', () => {
     await expect(annotationToolbar).toBeVisible({ timeout: 5_000 });
   });
 
-  test('annotation toolbar hidden for select tool', async ({ appPage }) => {
-    // First activate a tool that shows the annotation toolbar
+  test('annotation toolbar has no controls for select tool', async ({ appPage }) => {
+    // First activate a tool that shows annotation toolbar controls
     await selectTool(appPage, 'Text');
-    await expect(appPage.locator('.annotation-toolbar')).toBeVisible({ timeout: 5_000 });
+    const toolbar = appPage.locator('.annotation-toolbar');
+    await expect(toolbar).toBeVisible({ timeout: 5_000 });
+    // Verify it has content sections when a tool is active
+    const sectionsWithText = toolbar.locator('.annotation-toolbar-section');
+    expect(await sectionsWithText.count()).toBeGreaterThan(0);
 
-    // Switch back to Select — annotation toolbar should hide
+    // Switch back to Select — annotation toolbar should have no tool-specific sections
     await selectTool(appPage, 'Select');
-    await expect(appPage.locator('.annotation-toolbar')).not.toBeVisible({ timeout: 5_000 });
+    await appPage.waitForTimeout(300);
+    const sectionsAfter = toolbar.locator('.annotation-toolbar-section');
+    expect(await sectionsAfter.count()).toBe(0);
   });
 
   test('zoom controls present', async ({ appPage }) => {

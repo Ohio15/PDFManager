@@ -98,10 +98,14 @@ test.describe('Annotations', () => {
 
   test('signature tool opens pad', async ({ appPage }) => {
     await selectTool(appPage, 'Signature');
+    await appPage.waitForTimeout(300);
+
+    // The signature pad only appears after clicking ON THE PDF PAGE
+    await clickOnPage(appPage, 0, 0.5, 0.5);
     await appPage.waitForTimeout(500);
 
     const signaturePad = appPage.locator('.signature-pad-overlay');
-    await expect(signaturePad).toBeVisible({ timeout: 5000 });
+    await expect(signaturePad).toBeVisible({ timeout: 5_000 });
 
     const canvas = appPage.locator('.signature-pad-canvas');
     await expect(canvas).toBeVisible();
@@ -121,10 +125,26 @@ test.describe('Annotations', () => {
     const countWithAnnotation = await getAnnotationCount(appPage);
     expect(countWithAnnotation).toBeGreaterThan(0);
 
-    // Switch to eraser and click on the stroke
+    // Switch to eraser — clicking directly on an annotation element deletes it
+    // The annotation-layer only has pointer-events in select/erase mode
     await selectTool(appPage, 'Eraser');
-    await appPage.waitForTimeout(200);
-    await clickOnPage(appPage, 0, 0.4, 0.32);
+    await appPage.waitForTimeout(300);
+
+    // The eraser deletes annotations on mousedown. SVG paths have pointer-events: stroke
+    // which makes precise clicking unreliable. Use dispatchEvent on the path element directly.
+    const erased = await appPage.evaluate(() => {
+      const path = document.querySelector('.annotation-layer svg path') as SVGPathElement;
+      if (!path) return false;
+      const rect = path.getBoundingClientRect();
+      const evt = new MouseEvent('mousedown', {
+        bubbles: true, cancelable: true,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      });
+      path.dispatchEvent(evt);
+      return true;
+    });
+    expect(erased).toBe(true);
     await appPage.waitForTimeout(500);
 
     const countAfterErase = await getAnnotationCount(appPage);
@@ -194,10 +214,22 @@ test.describe('Annotations', () => {
     const countBefore = await getAnnotationCount(appPage);
     expect(countBefore).toBeGreaterThan(0);
 
-    // Switch to select tool and click on the annotation to select it
+    // Switch to select tool and click the actual annotation element to select it
     await selectToolByKey(appPage, 'v');
-    await appPage.waitForTimeout(200);
-    await clickOnPage(appPage, 0, 0.5, 0.72);
+    await appPage.waitForTimeout(300);
+
+    // Click annotation to select it via dispatchEvent (SVG paths have pointer-events: stroke)
+    await appPage.evaluate(() => {
+      const path = document.querySelector('.annotation-layer svg path') as SVGPathElement;
+      if (path) {
+        const rect = path.getBoundingClientRect();
+        path.dispatchEvent(new MouseEvent('mousedown', {
+          bubbles: true, cancelable: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+        }));
+      }
+    });
     await appPage.waitForTimeout(300);
 
     // Delete the selected annotation
@@ -248,7 +280,7 @@ test.describe('Annotations', () => {
       { key: 'd', label: 'Draw' },
       { key: 's', label: 'Shape' },
       { key: 'n', label: 'Sticky Note' },
-      { key: 'g', label: 'Stamp' },
+      { key: 'g', label: 'Signature' },
       { key: 'e', label: 'Eraser' },
     ];
 

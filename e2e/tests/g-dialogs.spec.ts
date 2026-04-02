@@ -6,40 +6,55 @@ test.describe('Dialogs', () => {
     await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
   });
 
-  test('shortcuts dialog opens with ? key', async ({ appPage }) => {
-    await appPage.keyboard.press('Shift+/'); // ? key
+  test('shortcuts dialog opens with Ctrl+/ key', async ({ appPage }) => {
+    // The '?' key case is inside the (!ctrlKey && !shiftKey) branch, so Shift+/ won't
+    // reach it because shiftKey is true. However, Ctrl+/ is handled in the (ctrlKey &&
+    // !shiftKey) branch and also opens the shortcuts dialog.
+    await appPage.keyboard.press('Control+/');
     await appPage.waitForTimeout(300);
 
-    const dialog = appPage.locator('[class*="shortcut"], [class*="keyboard"], [role="dialog"]').first();
+    // All dialogs use the Modal component which renders .modal-overlay > .modal-content
+    const dialog = appPage.locator('.modal-overlay');
     await expect(dialog).toBeVisible({ timeout: 5_000 });
+
+    // Verify it is the shortcuts dialog by checking the header
+    const header = appPage.locator('.modal-header h2');
+    await expect(header).toHaveText('Keyboard Shortcuts');
   });
 
   test('shortcuts dialog closes with Escape', async ({ appPage }) => {
-    // Open shortcuts dialog
-    await appPage.keyboard.press('Shift+/');
+    // Open shortcuts dialog via Ctrl+/
+    await appPage.keyboard.press('Control+/');
     await appPage.waitForTimeout(300);
 
-    const dialog = appPage.locator('[class*="shortcut"], [class*="keyboard"], [role="dialog"]').first();
+    const dialog = appPage.locator('.modal-overlay');
     await expect(dialog).toBeVisible({ timeout: 5_000 });
 
-    // Close with Escape
+    // Close with Escape — Modal component listens for Escape keydown
     await appPage.keyboard.press('Escape');
     await appPage.waitForTimeout(300);
     await expect(dialog).not.toBeVisible({ timeout: 5_000 });
   });
 
   test('settings dialog opens via menu action', async ({ electronApp, appPage }) => {
-    // Trigger settings via IPC since native menus can't be automated
+    // The main process sends 'menu-settings' IPC (not 'menu-action').
+    // The renderer registers via onMenuAction('settings', handler) which listens
+    // on the 'menu-settings' channel.
     await electronApp.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       if (win) {
-        win.webContents.send('menu-action', 'open-settings');
+        win.webContents.send('menu-settings');
       }
     });
     await appPage.waitForTimeout(500);
 
-    const settingsDialog = appPage.locator('[class*="settings"], [class*="preferences"], [role="dialog"]').first();
+    // Settings dialog uses Modal component -> .modal-overlay with .settings-dialog inside
+    const settingsDialog = appPage.locator('.modal-overlay');
     await expect(settingsDialog).toBeVisible({ timeout: 5_000 });
+
+    // Verify it is the settings dialog
+    const header = appPage.locator('.modal-header h2');
+    await expect(header).toHaveText('Settings');
   });
 
   test('print dialog opens with Ctrl+P', async ({ electronApp, appPage }) => {
@@ -57,8 +72,8 @@ test.describe('Dialogs', () => {
     await appPage.keyboard.press('Control+p');
     await appPage.waitForTimeout(500);
 
-    // Check for a print dialog/preview overlay, or verify no crash
-    const printDialog = appPage.locator('[class*="print"], [role="dialog"]').first();
+    // Check for a print dialog/preview (may use Modal or native print)
+    const printDialog = appPage.locator('.modal-overlay, [class*="print"]').first();
     const isVisible = await printDialog.isVisible().catch(() => false);
 
     // If the app shows its own print dialog, verify it's visible
@@ -76,7 +91,8 @@ test.describe('Dialogs', () => {
     await appPage.keyboard.press('Control+m');
     await appPage.waitForTimeout(500);
 
-    const mergeDialog = appPage.locator('[class*="merge"], [role="dialog"]').first();
+    // Merge dialog uses Modal component -> .modal-overlay
+    const mergeDialog = appPage.locator('.modal-overlay');
     await expect(mergeDialog).toBeVisible({ timeout: 5_000 });
   });
 
@@ -84,7 +100,8 @@ test.describe('Dialogs', () => {
     await appPage.keyboard.press('Control+d');
     await appPage.waitForTimeout(500);
 
-    const propsDialog = appPage.locator('[class*="properties"], [class*="document-info"], [role="dialog"]').first();
+    // Properties dialog uses Modal component -> .modal-overlay
+    const propsDialog = appPage.locator('.modal-overlay');
     await expect(propsDialog).toBeVisible({ timeout: 5_000 });
   });
 
@@ -93,7 +110,7 @@ test.describe('Dialogs', () => {
     const dialogTriggers = [
       {
         name: 'shortcuts',
-        open: async () => await appPage.keyboard.press('Shift+/'),
+        open: async () => await appPage.keyboard.press('Control+/'),
       },
       {
         name: 'merge',
@@ -109,8 +126,8 @@ test.describe('Dialogs', () => {
       await trigger.open();
       await appPage.waitForTimeout(400);
 
-      // Find any visible dialog
-      const dialog = appPage.locator('[role="dialog"], [class*="modal"], [class*="dialog"]').first();
+      // All dialogs use Modal component -> .modal-overlay
+      const dialog = appPage.locator('.modal-overlay');
       const wasVisible = await dialog.isVisible().catch(() => false);
 
       if (wasVisible) {

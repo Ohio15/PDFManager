@@ -16,7 +16,10 @@
     "dist:linux": "npm run build && electron-builder --linux",
     "test": "vitest run",
     "test:watch": "vitest",
-    "quality": "npx tsx test-pdfs/quality-harness.ts"
+    "quality": "npx tsx test-pdfs/quality-harness.ts",
+    "test:e2e": "npx playwright test",
+    "test:e2e:headed": "npx playwright test --headed",
+    "test:e2e:debug": "npx playwright test --debug"
   },
   "dependencies": {
     "@types/pako": "^2.0.4",
@@ -28,6 +31,7 @@
     "pdfjs-dist": "^4.0.379"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.45",
     "@types/react-dom": "^18.2.18",

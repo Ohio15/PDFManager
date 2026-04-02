@@ -1,14 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Minus, Plus, Printer, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Printer, Loader2 } from 'lucide-react';
 import Modal from './Modal';
-
-interface PrinterInfo {
-  name: string;
-  displayName: string;
-  description: string;
-  isDefault: boolean;
-  status: number;
-}
 
 interface PrintDialogProps {
   isOpen: boolean;
@@ -27,15 +19,10 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
   currentPage,
   fileName,
 }) => {
-  const [printers, setPrinters] = useState<PrinterInfo[]>([]);
-  const [selectedPrinter, setSelectedPrinter] = useState('');
   const [pageRangeType, setPageRangeType] = useState<'all' | 'current' | 'custom'>('all');
   const [customRange, setCustomRange] = useState('');
-  const [copies, setCopies] = useState(1);
   const [scaleMode, setScaleMode] = useState<'fit' | 'actual' | 'custom'>('fit');
   const [customScale, setCustomScale] = useState(100);
-  const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('portrait');
-  const [colorMode, setColorMode] = useState(true);
   const [previewIndex, setPreviewIndex] = useState(0);
   const [printing, setPrinting] = useState(false);
   const [printError, setPrintError] = useState<string | null>(null);
@@ -78,22 +65,16 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
     setPreviewIndex(0);
   }, [pageRangeType, customRange]);
 
-  // Load printers and reset state when dialog opens
+  // Reset state when dialog opens
   useEffect(() => {
     if (isOpen) {
-      window.electronAPI.getPrinters().then((list: PrinterInfo[]) => {
-        setPrinters(list);
-        const def = list.find(p => p.isDefault);
-        if (def) setSelectedPrinter(def.name);
-      });
       setPreviewIndex(0);
       setPageRangeType('all');
       setCustomRange('');
-      setCopies(1);
       setScaleMode('fit');
       setCustomScale(100);
-      setColorMode(true);
       setPrinting(false);
+      setPrintError(null);
       setLoadingPreview(true);
     } else {
       setPdfDoc(null);
@@ -115,11 +96,6 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
       const doc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
       if (!cancelled) {
         setPdfDoc(doc);
-
-        // Auto-detect orientation from first page
-        const firstPage = await doc.getPage(1);
-        const vp = firstPage.getViewport({ scale: 1.0 });
-        setOrientation(vp.width > vp.height ? 'landscape' : 'portrait');
       }
     })();
 
@@ -158,14 +134,13 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
     return () => { cancelled = true; };
   }, [pdfDoc, previewIndex, pagesToPrint]);
 
-  // Handle print
+  // Handle print — renders selected pages and sends to OS print dialog
   const handlePrint = useCallback(async () => {
     if (!pdfDoc || pagesToPrint.length === 0) return;
     setPrinting(true);
     setPrintError(null);
 
     try {
-      // Render pages at print quality
       const pageImages: string[] = [];
       const pageDimensions: Array<{ width: number; height: number }> = [];
 
@@ -186,13 +161,11 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
         pageImages.push(canvas.toDataURL('image/jpeg', 0.95));
       }
 
-      // Build image style based on scale mode
       let imgStyle: string;
       if (scaleMode === 'actual') {
-        imgStyle = ''; // Each image gets individual sizing below
+        imgStyle = '';
       } else if (scaleMode === 'custom') {
-        const pct = customScale;
-        imgStyle = `max-width:${pct}%;max-height:${pct}%;object-fit:contain;`;
+        imgStyle = `max-width:${customScale}%;max-height:${customScale}%;object-fit:contain;`;
       } else {
         imgStyle = 'max-width:100%;max-height:100%;object-fit:contain;';
       }
@@ -203,6 +176,10 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
           : imgStyle;
         return `<div class="print-page"><img src="${img}" style="${style}"></div>`;
       }).join('\n');
+
+      // Detect orientation from first page
+      const firstDim = pageDimensions[0];
+      const isLandscape = firstDim && firstDim.width > firstDim.height;
 
       const html = `<!DOCTYPE html>
 <html><head><style>
@@ -223,19 +200,20 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
 ${pagesHtml}
 </body></html>`;
 
+      // Send to OS print dialog — printer, copies, orientation, color all handled there
       const result = await window.electronAPI.printPdf({
         html,
-        printerName: selectedPrinter,
-        copies,
-        landscape: orientation === 'landscape',
-        color: colorMode,
+        printerName: '',
+        copies: 1,
+        landscape: isLandscape,
+        color: true,
         scaleFactor: scaleMode === 'custom' ? customScale : 100,
       });
 
       if (result.success) {
         onClose();
       } else {
-        setPrintError(result.error || 'Print failed. Please check your printer connection and try again.');
+        setPrintError(result.error || 'Print was cancelled or failed.');
       }
     } catch (error) {
       console.error('Print failed:', error);
@@ -243,7 +221,7 @@ ${pagesHtml}
     } finally {
       setPrinting(false);
     }
-  }, [pdfDoc, pagesToPrint, selectedPrinter, copies, orientation, colorMode, scaleMode, customScale, onClose]);
+  }, [pdfDoc, pagesToPrint, scaleMode, customScale, onClose]);
 
   const safePreviewIndex = Math.min(previewIndex, Math.max(0, pagesToPrint.length - 1));
   const currentPreviewPage = pagesToPrint[safePreviewIndex] || 1;
@@ -251,7 +229,7 @@ ${pagesHtml}
   if (!isOpen) return null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Print" width="780px">
+    <Modal isOpen={isOpen} onClose={onClose} title="Print" width="680px">
       <div className="print-dialog-layout">
         {/* Preview Section */}
         <div className="print-preview-section">
@@ -292,27 +270,8 @@ ${pagesHtml}
           </div>
         </div>
 
-        {/* Options Section */}
+        {/* Options Section — only PDF-specific settings, OS dialog handles the rest */}
         <div className="print-options-section">
-          {/* Printer */}
-          <div className="print-option-group">
-            <label className="print-option-label">Printer</label>
-            <select
-              className="print-option-select"
-              value={selectedPrinter}
-              onChange={e => setSelectedPrinter(e.target.value)}
-            >
-              {printers.length === 0 && (
-                <option value="">No printers found</option>
-              )}
-              {printers.map(p => (
-                <option key={p.name} value={p.name}>
-                  {p.displayName || p.name}{p.isDefault ? ' (Default)' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-
           {/* Pages */}
           <div className="print-option-group">
             <label className="print-option-label">Pages</label>
@@ -357,34 +316,6 @@ ${pagesHtml}
             </div>
           </div>
 
-          {/* Copies */}
-          <div className="print-option-group">
-            <label className="print-option-label">Copies</label>
-            <div className="print-copies-control">
-              <button
-                className="print-copies-btn"
-                onClick={() => setCopies(c => Math.max(1, c - 1))}
-                disabled={copies <= 1}
-              >
-                <Minus size={14} />
-              </button>
-              <input
-                type="number"
-                className="print-copies-input"
-                value={copies}
-                min={1}
-                max={999}
-                onChange={e => setCopies(Math.max(1, parseInt(e.target.value) || 1))}
-              />
-              <button
-                className="print-copies-btn"
-                onClick={() => setCopies(c => Math.min(999, c + 1))}
-              >
-                <Plus size={14} />
-              </button>
-            </div>
-          </div>
-
           {/* Scale */}
           <div className="print-option-group">
             <label className="print-option-label">Scale</label>
@@ -412,43 +343,14 @@ ${pagesHtml}
             )}
           </div>
 
-          {/* Orientation */}
-          <div className="print-option-group">
-            <label className="print-option-label">Orientation</label>
-            <div className="print-toggle-group">
-              <button
-                className={`print-toggle-btn ${orientation === 'portrait' ? 'active' : ''}`}
-                onClick={() => setOrientation('portrait')}
-              >
-                Portrait
-              </button>
-              <button
-                className={`print-toggle-btn ${orientation === 'landscape' ? 'active' : ''}`}
-                onClick={() => setOrientation('landscape')}
-              >
-                Landscape
-              </button>
-            </div>
-          </div>
-
-          {/* Color */}
-          <div className="print-option-group">
-            <label className="print-option-label">Color</label>
-            <div className="print-toggle-group">
-              <button
-                className={`print-toggle-btn ${colorMode ? 'active' : ''}`}
-                onClick={() => setColorMode(true)}
-              >
-                Color
-              </button>
-              <button
-                className={`print-toggle-btn ${!colorMode ? 'active' : ''}`}
-                onClick={() => setColorMode(false)}
-              >
-                Grayscale
-              </button>
-            </div>
-          </div>
+          <p className="print-hint" style={{
+            fontSize: '12px',
+            color: '#888',
+            marginTop: '8px',
+            lineHeight: '1.4',
+          }}>
+            Printer, copies, orientation, and color settings are configured in the system print dialog that appears next.
+          </p>
         </div>
       </div>
 
@@ -467,7 +369,6 @@ ${pagesHtml}
       <div className="print-dialog-footer">
         <span className="print-page-summary">
           {pagesToPrint.length} page{pagesToPrint.length !== 1 ? 's' : ''} selected
-          {copies > 1 ? ` \u00D7 ${copies} copies` : ''}
         </span>
         <div className="print-dialog-actions">
           <button className="print-cancel-btn" onClick={onClose} disabled={printing}>
@@ -476,12 +377,12 @@ ${pagesHtml}
           <button
             className="print-submit-btn"
             onClick={handlePrint}
-            disabled={printing || pagesToPrint.length === 0 || !selectedPrinter}
+            disabled={printing || pagesToPrint.length === 0}
           >
             {printing ? (
               <>
                 <Loader2 size={16} className="spin" />
-                Printing...
+                Preparing...
               </>
             ) : (
               <>

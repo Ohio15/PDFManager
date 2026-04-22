@@ -291,6 +291,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   const [pdfReadyCounter, setPdfReadyCounter] = useState(0);
   // Track previous page to detect external navigation (sidebar click, search nav)
   const prevCurrentPageRef = useRef(currentPage);
+  // Suppress onPageChange during programmatic smooth-scroll so handleScroll
+  // doesn't race the in-flight scroll and revert currentPage to the starting page.
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollTimerRef = useRef<number | null>(null);
 
   const scale = zoom / 100;
   scaleRef.current = scale;
@@ -363,6 +367,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   const renderPage = useCallback(async (pageNum: number) => {
     const pdfDoc = pdfDocRef.current;
     if (!pdfDoc || renderingRef.current.has(pageNum) || renderedPagesRef.current.has(pageNum)) return;
+    // Guard against callers with stale state (e.g. an observer closure from a
+    // previous, longer PDF) requesting a page that no longer exists.
+    if (pageNum < 1 || pageNum > pdfDoc.numPages) return;
 
     renderingRef.current.add(pageNum);
     try {
@@ -421,13 +428,16 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   // When pdfDocRef becomes ready, render visible pages that the IntersectionObserver
   // may have already tried to render before the PDF document proxy was available.
+  // The buffer must match the IntersectionObserver's rootMargin (500px): a page the
+  // observer already saw as "intersecting" will not re-fire its callback when the
+  // user later scrolls to it, so any page within the buffer must be rendered here.
   useEffect(() => {
     if (pdfReadyCounter === 0 || !containerRef.current) return;
     requestAnimationFrame(() => {
       containerRef.current?.querySelectorAll('.pdf-page-container').forEach(el => {
         const rect = el.getBoundingClientRect();
         const viewerRect = containerRef.current!.getBoundingClientRect();
-        if (rect.bottom > viewerRect.top && rect.top < viewerRect.bottom) {
+        if (rect.bottom > viewerRect.top - 500 && rect.top < viewerRect.bottom + 500) {
           const pageNum = parseInt(el.getAttribute('data-page') || '0');
           if (pageNum > 0) renderPage(pageNum);
         }
@@ -666,6 +676,16 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
     const pageEl = container.querySelector(`[data-page="${currentPage}"]`) as HTMLElement | null;
     if (pageEl) {
+      // Mark the scroll as programmatic so handleScroll's closest-page detection
+      // doesn't override currentPage back to the starting page mid-animation.
+      programmaticScrollRef.current = true;
+      if (programmaticScrollTimerRef.current !== null) {
+        window.clearTimeout(programmaticScrollTimerRef.current);
+      }
+      programmaticScrollTimerRef.current = window.setTimeout(() => {
+        programmaticScrollRef.current = false;
+        programmaticScrollTimerRef.current = null;
+      }, 800);
       pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }, [currentPage]);
@@ -679,12 +699,16 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
         entries.forEach(entry => {
           if (entry.isIntersecting) {
             const pageNum = parseInt(entry.target.getAttribute('data-page') || '0');
-            if (pageNum > 0) {
-              renderPage(pageNum);
-              // Pre-render buffer pages (2 above and below)
-              for (let i = Math.max(1, pageNum - 2); i <= Math.min(document.pageCount, pageNum + 2); i++) {
-                if (i !== pageNum) renderPage(i);
-              }
+            if (pageNum <= 0) return;
+            // Use refs for the page-count bound so stale closures from a
+            // previous document can't request pages that no longer exist
+            // (e.g. renderPage(2) on a 1-page PDF after a tab switch).
+            const maxPage = pdfDocRef.current?.numPages ?? pagesRef.current.length;
+            if (pageNum > maxPage) return;
+            renderPage(pageNum);
+            // Pre-render buffer pages (2 above and below)
+            for (let i = Math.max(1, pageNum - 2); i <= Math.min(maxPage, pageNum + 2); i++) {
+              if (i !== pageNum) renderPage(i);
             }
           }
         });
@@ -707,6 +731,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   const handleScroll = useCallback(() => {
     if (!containerRef.current) return;
+    // Skip while a programmatic scroll is animating — otherwise we feedback-loop
+    // the smooth scroll and revert currentPage before it reaches the target.
+    if (programmaticScrollRef.current) return;
 
     const container = containerRef.current;
     const children = container.querySelectorAll('.pdf-page-container');

@@ -323,7 +323,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       if (!document.pdfData || document.pdfData.length === 0) return;
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdf = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
+        const pdf = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
         pdfDocRef.current = pdf;
 
         // Detect form fields BEFORE triggering any page renders.

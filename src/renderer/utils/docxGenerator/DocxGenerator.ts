@@ -411,11 +411,12 @@ export async function generateDocx(
     conversionMode = 'flow',
     imageScale = 1.0,
     maxImageDimEmu = 6858000, // ~7.5 inches max width
+    password,
   } = options;
 
   // ─── Phase 1: Load documents (SHARED) ─────────────────────
 
-  const pdfJsDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData.slice() }).promise;
+  const pdfJsDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData.slice(), password }).promise;
 
   let pdfLibDoc: PDFDocument | null = null;
   try {

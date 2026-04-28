@@ -165,6 +165,7 @@ export interface PDFDocument {
   pageCount: number;
   pages: PDFPage[];
   pdfData: Uint8Array;
+  password?: string;
 }
 
 export interface AnnotationStyle {

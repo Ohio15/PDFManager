@@ -329,6 +329,7 @@ export function usePDFDocument() {
         pageCount: pdfDoc.numPages,
         pages,
         pdfData: binaryData,
+        password: password || undefined,
       };
 
       // Create new tab
@@ -377,7 +378,7 @@ export function usePDFDocument() {
   ) => {
     try {
       const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
-      const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs }).promise;
+      const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs, password: document?.password }).promise;
 
       const updatedPages = await Promise.all(
         (document?.pages || []).map(async (page, i) => {
@@ -496,6 +497,12 @@ export function usePDFDocument() {
   const saveFile = useCallback(async () => {
     if (!document) return;
 
+    if (document.password) {
+      const err: any = new Error('ENCRYPTED_SAVE_UNSUPPORTED');
+      err.code = 'ENCRYPTED_SAVE_UNSUPPORTED';
+      throw err;
+    }
+
     setLoading(true);
     try {
       const modifiedPdfBytes = await applyEditsAndAnnotations({
@@ -525,6 +532,12 @@ export function usePDFDocument() {
 
   const saveFileAs = useCallback(async () => {
     if (!document) return;
+
+    if (document.password) {
+      const err: any = new Error('ENCRYPTED_SAVE_UNSUPPORTED');
+      err.code = 'ENCRYPTED_SAVE_UNSUPPORTED';
+      throw err;
+    }
 
     setLoading(true);
     try {

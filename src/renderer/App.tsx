@@ -556,8 +556,12 @@ const App: React.FC = () => {
           toast.success('Document saved successfully');
         }
       }
-    } catch (error) {
-      toast.error('Failed to save document');
+    } catch (error: any) {
+      if (error?.code === 'ENCRYPTED_SAVE_UNSUPPORTED' || error?.message === 'ENCRYPTED_SAVE_UNSUPPORTED') {
+        toast.error('Saving password-protected PDFs is not yet supported in v2.11.4.');
+      } else {
+        toast.error('Failed to save document');
+      }
       console.error('Save error:', error);
     }
   }, [document, saveFile, saveFileAs, toast]);
@@ -836,7 +840,7 @@ const App: React.FC = () => {
       import.meta.url
     ).toString();
 
-    const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
+    const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData, password: document.password }).promise;
 
     for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
@@ -878,7 +882,7 @@ const App: React.FC = () => {
 
     const { generateDocx } = await import('./utils/docxGenerator/DocxGenerator');
 
-    const result = await generateDocx(document.pdfData, { conversionMode: mode });
+    const result = await generateDocx(document.pdfData, { conversionMode: mode, password: document.password });
 
     console.log(`[DOCX] Generated ${result.data.length} bytes, ${result.pageCount} pages`);
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
@@ -910,7 +914,7 @@ const App: React.FC = () => {
       ).toString();
 
       const dataCopy = new Uint8Array(document.pdfData);
-      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
+      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
       const totalPages = pdfDoc.numPages;
 
       for (let i = 0; i < totalPages; i++) {
@@ -1145,7 +1149,13 @@ const App: React.FC = () => {
         switch (e.key.toLowerCase()) {
           case 's':
             e.preventDefault();
-            saveFileAs();
+            saveFileAs().catch((error: any) => {
+              if (error?.code === 'ENCRYPTED_SAVE_UNSUPPORTED' || error?.message === 'ENCRYPTED_SAVE_UNSUPPORTED') {
+                toast.error('Saving password-protected PDFs is not yet supported in v2.11.4.');
+              } else {
+                toast.error('Failed to save document');
+              }
+            });
             break;
           case 'z':
             e.preventDefault();
@@ -1446,6 +1456,7 @@ const App: React.FC = () => {
           pageCount={document.pageCount}
           currentPage={currentPage}
           fileName={document.fileName}
+          password={document.password}
         />
       )}
 

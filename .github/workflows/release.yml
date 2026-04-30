@@ -1,0 +1,16 @@
+name: Release
+
+# Thin caller. Real logic lives in dev-standards.
+# Triggered by pushing a v* tag (e.g. `git tag v2.12.5 && git push origin v2.12.5`).
+# Schema: https://github.com/Ohio15/dev-standards/blob/main/release/SPEC.md
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    uses: Ohio15/dev-standards/.github/workflows/electron-release.yml@v1
+    permissions:
+      contents: write
+    secrets: inherit

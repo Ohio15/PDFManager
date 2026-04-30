@@ -1,0 +1,20 @@
+# dev-standards release contract — see https://github.com/Ohio15/dev-standards/blob/main/release/SPEC.md
+surface: electron
+project: pdf-manager
+
+gates:
+  # PDFManager has vitest tests but they're not yet wired for CI run-to-green.
+  # Flip to true once the test suite is stable on cloud runners.
+  tests: false
+  gitleaks: true
+  size_guard: true
+  # 13 high-severity audit findings on transitive deps (mostly electron-builder
+  # → tar). Cleanup tracked separately; pilot gates at critical until then.
+  npm_audit: critical
+  conventional_commits: false
+
+electron:
+  targets: [win]
+  installer_name_template: PDF-Manager-Setup-${version}.${ext}
+  # signing block omitted — unsigned NSIS, ships through SmartScreen unchanged.
+  # Add when EV cert is in hand.

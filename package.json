@@ -1,7 +1,8 @@
 {
   "name": "pdf-manager",
-  "version": "2.12.1",
+  "version": "2.12.2",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
+  "author": "Ron <ohio_15@hotmail.com>",
   "main": "dist/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",

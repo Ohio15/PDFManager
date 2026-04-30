@@ -11,6 +11,3 @@ on:
 jobs:
   release:
     uses: Ohio15/dev-standards/.github/workflows/electron-release.yml@v1
-    permissions:
-      contents: write
-    secrets: inherit

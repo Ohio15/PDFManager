@@ -21,8 +21,10 @@ npm-debug.log*
 .env
 .env.local
 
-# Update config with GitHub token (contains secrets)
-update-config.json
+# update-config.json: runtime config bundled by electron-builder
+# (extraResources in package.json). Currently empty `{}` — tracked so
+# CI builds find it. If it later carries a token, move that token into
+# a separate gitignored file and keep this one as `{}`.
 
 # Editor directories
 *.swp

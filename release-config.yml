@@ -8,8 +8,9 @@ gates:
   tests: false
   gitleaks: true
   size_guard: true
-  # 13 high-severity audit findings on transitive deps (mostly electron-builder
-  # → tar). Cleanup tracked separately; pilot gates at critical until then.
+  # electron-builder transitive chain cleared in v2.13.0 (24 → 26). One high
+  # remains: electron@28 itself (electron 39+ required to clear). Holding gate
+  # at critical until the electron major bump lands.
   npm_audit: critical
   conventional_commits: false
 

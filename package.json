@@ -1,6 +1,6 @@
 {
   "name": "pdf-manager",
-  "version": "2.12.5",
+  "version": "2.13.0",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "author": "Ron <ohio_15@hotmail.com>",
   "main": "dist/main/main.js",
@@ -40,7 +40,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "concurrently": "^8.2.2",
     "electron": "^28.1.0",
-    "electron-builder": "^24.9.1",
+    "electron-builder": "^26.8.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tsx": "^4.21.0",

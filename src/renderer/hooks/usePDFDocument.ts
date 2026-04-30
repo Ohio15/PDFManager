@@ -136,13 +136,19 @@ export function usePDFDocument() {
   const closeTab = useCallback((tabId: string) => {
     const { activeTabId: currentId, tabs: currentTabs } = stateRef.current;
 
-    // Zero password / pendingEncryption on the cached document before
-    // dropping the cache entry — minimizes the window during which the
-    // password sits reachable in memory.
+    // Zero plaintext-after-decrypt material on the cached document before
+    // dropping the cache. Passwords always; pdfData only for documents
+    // opened from an encrypted source (where pdfData is decrypted plaintext
+    // that should not survive the doc lifetime).
     const cached = tabStatesRef.current.get(tabId);
     if (cached?.document) {
+      const wasProtected = !!cached.document.password;
       cached.document.password = undefined;
       cached.document.pendingEncryption = undefined;
+      if (wasProtected) {
+        cached.document.pdfData = new Uint8Array(0);
+        cached.document.encryptionMeta = undefined;
+      }
     }
     tabStatesRef.current.delete(tabId);
 
@@ -175,13 +181,19 @@ export function usePDFDocument() {
     setTabs(newTabs);
   }, []);
 
-  // Clear all in-memory passwords on app/window unload
+  // Clear in-memory plaintext material on app/window unload — passwords
+  // always; pdfData only for protected docs (decrypted plaintext).
   useEffect(() => {
     const handler = () => {
       tabStatesRef.current.forEach((s) => {
         if (s.document) {
+          const wasProtected = !!s.document.password;
           s.document.password = undefined;
           s.document.pendingEncryption = undefined;
+          if (wasProtected) {
+            s.document.pdfData = new Uint8Array(0);
+            s.document.encryptionMeta = undefined;
+          }
         }
       });
     };

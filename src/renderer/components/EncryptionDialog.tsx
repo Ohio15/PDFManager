@@ -21,7 +21,7 @@ const DEFAULT_PERMISSIONS: PDFEncryptionPermissions = {
   annotate: true,
 };
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 3;
 
 function classifyStrength(pw: string): { score: 0 | 1 | 2 | 3 | 4; label: string } {
   if (pw.length === 0) return { score: 0, label: '' };

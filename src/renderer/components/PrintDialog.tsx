@@ -9,7 +9,6 @@ interface PrintDialogProps {
   pageCount: number;
   currentPage: number;
   fileName: string;
-  password?: string;
 }
 
 const PrintDialog: React.FC<PrintDialogProps> = ({
@@ -19,7 +18,6 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
   pageCount,
   currentPage,
   fileName,
-  password,
 }) => {
   const [pageRangeType, setPageRangeType] = useState<'all' | 'current' | 'custom'>('all');
   const [customRange, setCustomRange] = useState('');
@@ -95,14 +93,14 @@ const PrintDialog: React.FC<PrintDialogProps> = ({
         import.meta.url
       ).toString();
       const { PDFJS_DOCUMENT_OPTIONS } = await import('../utils/pdfjsConfig');
-      const doc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData, password }).promise;
+      const doc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
       if (!cancelled) {
         setPdfDoc(doc);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [isOpen, pdfData, password]);
+  }, [isOpen, pdfData]);
 
   // Render preview page
   useEffect(() => {

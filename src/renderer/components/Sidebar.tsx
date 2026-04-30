@@ -91,7 +91,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     const generateThumbnails = async () => {
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const newThumbnails: string[] = [];
 
         for (let i = 1; i <= pdfDoc.numPages; i++) {
@@ -130,7 +130,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     const extractOutline = async () => {
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const rawOutline = await pdfDoc.getOutline();
 
         if (!rawOutline || rawOutline.length === 0) {

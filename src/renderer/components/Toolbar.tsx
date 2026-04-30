@@ -25,6 +25,9 @@ import {
   FileX,
   MoreHorizontal,
   PenLine,
+  Lock,
+  Unlock,
+  LockKeyhole,
 } from 'lucide-react';
 
 export type ZoomMode = 'custom' | 'fit-width' | 'fit-page';
@@ -56,6 +59,9 @@ interface ToolbarProps {
   sidebarVisible?: boolean;
   disabled: boolean;
   pageCount?: number;
+  onOpenEncryptionDialog?: () => void;
+  isEncrypted?: boolean;
+  hasPendingEncryptionChange?: boolean;
 }
 
 // Tooltip wrapper component
@@ -108,6 +114,9 @@ const Toolbar: React.FC<ToolbarProps> = ({
   sidebarVisible = true,
   disabled,
   pageCount = 0,
+  onOpenEncryptionDialog,
+  isEncrypted = false,
+  hasPendingEncryptionChange = false,
 }) => {
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [overflowNeeded, setOverflowNeeded] = useState(false);
@@ -180,6 +189,27 @@ const Toolbar: React.FC<ToolbarProps> = ({
           <Printer />
         </TBtn>
       </div>
+
+      {/* Protect */}
+      {onOpenEncryptionDialog && (
+        <div className="toolbar-group">
+          <TBtn
+            tooltip={
+              hasPendingEncryptionChange
+                ? 'Password change pending — save to apply'
+                : isEncrypted
+                  ? 'Document is password-protected'
+                  : 'Document is not password-protected'
+            }
+            shortcut="Ctrl+Shift+L"
+            className={hasPendingEncryptionChange ? 'pending' : isEncrypted ? 'active' : ''}
+            onClick={onOpenEncryptionDialog}
+            disabled={disabled}
+          >
+            {hasPendingEncryptionChange ? <LockKeyhole /> : isEncrypted ? <Lock /> : <Unlock />}
+          </TBtn>
+        </div>
+      )}
 
       {/* Undo/Redo */}
       <div className="toolbar-group">

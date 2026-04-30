@@ -21,6 +21,7 @@ import AnnotationToolbar from './components/AnnotationToolbar';
 import TabBar from './components/TabBar';
 import DocumentPropertiesDialog from './components/DocumentPropertiesDialog';
 import PasswordDialog from './components/PasswordDialog';
+import EncryptionDialog from './components/EncryptionDialog';
 import ConversionActionBar from './components/ConversionActionBar';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
@@ -29,6 +30,7 @@ import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
+import { reEncryptIfProtected } from './utils/pdfEncryption';
 
 declare global {
   interface Window {
@@ -126,6 +128,8 @@ const App: React.FC = () => {
   const [propertiesDialogOpen, setPropertiesDialogOpen] = useState(false);
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [passwordIncorrect, setPasswordIncorrect] = useState(false);
+  const [encryptionDialogOpen, setEncryptionDialogOpen] = useState(false);
+  const [encryptionDialogTabId, setEncryptionDialogTabId] = useState<string | null>(null);
   const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
   const [showConversionBar, setShowConversionBar] = useState(false);
@@ -187,6 +191,8 @@ const App: React.FC = () => {
     // Form field support
     formFieldMappings,
     setAnnotationStorage,
+    // Encryption
+    setPendingEncryption,
   } = usePDFDocument();
 
   // Refresh the recent files list
@@ -294,9 +300,12 @@ const App: React.FC = () => {
     window.electronAPI.setStore('toolsPanelVisible', toolsPanelVisible);
   }, [toolsPanelVisible]);
 
-  // Auto-save recovery: save every 60 seconds when modified
+  // Auto-save recovery: save every 60 seconds when modified.
+  // Skipped for password-protected documents — pdfData is plaintext after
+  // decrypt-at-open, so writing it to disk would defeat the at-rest contract.
   useEffect(() => {
     if (!document || !modified) return;
+    if (document.password) return;
 
     const autoSaveTimer = setInterval(async () => {
       try {
@@ -309,6 +318,18 @@ const App: React.FC = () => {
 
     return () => clearInterval(autoSaveTimer);
   }, [document, modified]);
+
+  // Surface the auto-recovery pause once per document open
+  const recoveryPauseToastedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (document?.password && document.filePath !== recoveryPauseToastedRef.current) {
+      recoveryPauseToastedRef.current = document.filePath;
+      toast.info?.('Auto-recovery paused for password-protected PDFs');
+    }
+    if (!document?.password) {
+      recoveryPauseToastedRef.current = null;
+    }
+  }, [document?.password, document?.filePath, toast]);
 
   // Clear recovery data after successful save
   useEffect(() => {
@@ -470,7 +491,8 @@ const App: React.FC = () => {
       const form = pdfDoc.getForm();
       form.flatten();
 
-      const flattenedBytes = await pdfDoc.save();
+      const flattenedPlaintext = await pdfDoc.save();
+      const flattenedBytes = await reEncryptIfProtected(new Uint8Array(flattenedPlaintext), document);
       const base64 = uint8ArrayToBase64(flattenedBytes);
 
       const result = await window.electronAPI.saveFileDialog(
@@ -557,11 +579,7 @@ const App: React.FC = () => {
         }
       }
     } catch (error: any) {
-      if (error?.code === 'ENCRYPTED_SAVE_UNSUPPORTED' || error?.message === 'ENCRYPTED_SAVE_UNSUPPORTED') {
-        toast.error('Saving password-protected PDFs is not yet supported in v2.11.4.');
-      } else {
-        toast.error('Failed to save document');
-      }
+      toast.error('Failed to save document');
       console.error('Save error:', error);
     }
   }, [document, saveFile, saveFileAs, toast]);
@@ -755,7 +773,8 @@ const App: React.FC = () => {
         const [page] = await newPdf.copyPages(sourcePdf, [i]);
         newPdf.addPage(page);
 
-        const pdfBytes = await newPdf.save();
+        const plaintext = await newPdf.save();
+        const pdfBytes = await reEncryptIfProtected(new Uint8Array(plaintext), document);
         const base64 = uint8ArrayToBase64(pdfBytes);
         const filePath = `${outputDir}/${baseName}_page_${i + 1}.pdf`;
 
@@ -796,7 +815,8 @@ const App: React.FC = () => {
       const copiedPages = await newPdf.copyPages(sourcePdf, uniquePages);
       copiedPages.forEach(page => newPdf.addPage(page));
 
-      const pdfBytes = await newPdf.save();
+      const plaintext = await newPdf.save();
+      const pdfBytes = await reEncryptIfProtected(new Uint8Array(plaintext), document);
       const base64 = uint8ArrayToBase64(pdfBytes);
 
       const result = await window.electronAPI.saveFileDialog(base64, `${document.fileName.replace('.pdf', '')}_extracted.pdf`);
@@ -827,6 +847,12 @@ const App: React.FC = () => {
   ): Promise<{ count: number; folder: string }> => {
     if (!document) return { count: 0, folder: outputDir };
 
+    if (document.password && !window.confirm(
+      `This will produce unprotected ${format.toUpperCase()} image files from a password-protected PDF. Continue?`
+    )) {
+      return { count: 0, folder: outputDir };
+    }
+
     const baseName = document.fileName.replace('.pdf', '');
     let convertedCount = 0;
 
@@ -840,7 +866,7 @@ const App: React.FC = () => {
       import.meta.url
     ).toString();
 
-    const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData, password: document.password }).promise;
+    const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: pdfData }).promise;
 
     for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
@@ -880,9 +906,15 @@ const App: React.FC = () => {
     const folder = outputPath.substring(0, Math.max(outputPath.lastIndexOf('/'), outputPath.lastIndexOf('\\')));
     if (!document) return { count: 0, folder };
 
+    if (document.password && !window.confirm(
+      'This will produce an unprotected Word document from a password-protected PDF. Continue?'
+    )) {
+      return { count: 0, folder };
+    }
+
     const { generateDocx } = await import('./utils/docxGenerator/DocxGenerator');
 
-    const result = await generateDocx(document.pdfData, { conversionMode: mode, password: document.password });
+    const result = await generateDocx(document.pdfData, { conversionMode: mode });
 
     console.log(`[DOCX] Generated ${result.data.length} bytes, ${result.pageCount} pages`);
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
@@ -900,6 +932,11 @@ const App: React.FC = () => {
   // Export PDF pages as SVG vector graphics
   const handleExportSvg = useCallback(async () => {
     if (!document) return;
+    if (document.password && !window.confirm(
+      'This will produce unprotected SVG files from a password-protected PDF. Continue?'
+    )) {
+      return;
+    }
     try {
       const outputDir = await window.electronAPI.selectOutputDirectory();
       if (!outputDir) return;
@@ -914,7 +951,7 @@ const App: React.FC = () => {
       ).toString();
 
       const dataCopy = new Uint8Array(document.pdfData);
-      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
+      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
       const totalPages = pdfDoc.numPages;
 
       for (let i = 0; i < totalPages; i++) {
@@ -1149,13 +1186,11 @@ const App: React.FC = () => {
         switch (e.key.toLowerCase()) {
           case 's':
             e.preventDefault();
-            saveFileAs().catch((error: any) => {
-              if (error?.code === 'ENCRYPTED_SAVE_UNSUPPORTED' || error?.message === 'ENCRYPTED_SAVE_UNSUPPORTED') {
-                toast.error('Saving password-protected PDFs is not yet supported in v2.11.4.');
-              } else {
-                toast.error('Failed to save document');
-              }
-            });
+            saveFileAs().catch(() => toast.error('Failed to save document'));
+            break;
+          case 'l':
+            e.preventDefault();
+            if (document) setEncryptionDialogOpen(true);
             break;
           case 'z':
             e.preventDefault();
@@ -1246,6 +1281,12 @@ const App: React.FC = () => {
         sidebarVisible={sidebarVisible}
         pageCount={document?.pageCount}
         disabled={!document}
+        onOpenEncryptionDialog={() => {
+          setEncryptionDialogTabId(activeTabId);
+          setEncryptionDialogOpen(true);
+        }}
+        isEncrypted={!!document?.password}
+        hasPendingEncryptionChange={!!document?.pendingEncryption}
       />
 
       <AnnotationToolbar
@@ -1456,7 +1497,6 @@ const App: React.FC = () => {
           pageCount={document.pageCount}
           currentPage={currentPage}
           fileName={document.fileName}
-          password={document.password}
         />
       )}
 
@@ -1480,6 +1520,39 @@ const App: React.FC = () => {
         onSubmit={handlePasswordSubmit}
         incorrect={passwordIncorrect}
         fileName={pendingPasswordFile?.fileName}
+      />
+
+      <EncryptionDialog
+        isOpen={encryptionDialogOpen}
+        onClose={() => {
+          setEncryptionDialogOpen(false);
+          setEncryptionDialogTabId(null);
+        }}
+        document={document}
+        onApplyAdd={(userPw, ownerPw, perms) => {
+          if (encryptionDialogTabId !== activeTabId) {
+            toast.error('Tab changed — password change cancelled');
+            return;
+          }
+          setPendingEncryption({ password: userPw, ownerPassword: ownerPw, permissions: perms });
+          toast.success('Password will apply on save');
+        }}
+        onApplyChange={(userPw, ownerPw, perms) => {
+          if (encryptionDialogTabId !== activeTabId) {
+            toast.error('Tab changed — password change cancelled');
+            return;
+          }
+          setPendingEncryption({ password: userPw, ownerPassword: ownerPw, permissions: perms });
+          toast.success('Password change will apply on save');
+        }}
+        onApplyRemove={() => {
+          if (encryptionDialogTabId !== activeTabId) {
+            toast.error('Tab changed — password removal cancelled');
+            return;
+          }
+          setPendingEncryption({ remove: true });
+          toast.success('Password removal will apply on save');
+        }}
       />
 
       <DocumentPropertiesDialog

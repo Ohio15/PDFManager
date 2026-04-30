@@ -10,6 +10,7 @@ import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
+import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -135,7 +136,14 @@ export function usePDFDocument() {
   const closeTab = useCallback((tabId: string) => {
     const { activeTabId: currentId, tabs: currentTabs } = stateRef.current;
 
-    // Remove from cache
+    // Zero password / pendingEncryption on the cached document before
+    // dropping the cache entry — minimizes the window during which the
+    // password sits reachable in memory.
+    const cached = tabStatesRef.current.get(tabId);
+    if (cached?.document) {
+      cached.document.password = undefined;
+      cached.document.pendingEncryption = undefined;
+    }
     tabStatesRef.current.delete(tabId);
 
     const newTabs = currentTabs.filter(t => t.id !== tabId);
@@ -165,6 +173,20 @@ export function usePDFDocument() {
     }
 
     setTabs(newTabs);
+  }, []);
+
+  // Clear all in-memory passwords on app/window unload
+  useEffect(() => {
+    const handler = () => {
+      tabStatesRef.current.forEach((s) => {
+        if (s.document) {
+          s.document.password = undefined;
+          s.document.pendingEncryption = undefined;
+        }
+      });
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
   }, []);
 
   // Keep active tab metadata in sync
@@ -200,12 +222,43 @@ export function usePDFDocument() {
     }
     setLoading(true);
     try {
-      const binaryData = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
-      const dataCopyForPdfJs = new Uint8Array(binaryData);
+      const rawBytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+
+      // Detect encryption and, if so, decrypt to plaintext bytes via qpdf-wasm.
+      // Working with plaintext downstream means the pdf-lib save pipeline can
+      // edit content streams; we re-encrypt with the captured meta on save.
+      const isEncrypted = hasEncryptDictPrefix(rawBytes);
+      let workingBytes = rawBytes;
+      let capturedMeta: PDFDocument['encryptionMeta'] | undefined;
+
+      if (isEncrypted) {
+        if (!password) {
+          const passwordError = new Error('PASSWORD_REQUIRED');
+          (passwordError as any).reason = 'NEED_PASSWORD';
+          (passwordError as any).filePath = filePath;
+          (passwordError as any).base64Data = base64Data;
+          throw passwordError;
+        }
+        try {
+          const decrypted = await decryptPdf(rawBytes, password);
+          workingBytes = new Uint8Array(decrypted.plaintextBytes);
+          capturedMeta = decrypted.meta;
+        } catch (e: any) {
+          if (e?.code === 'DECRYPT_FAILED') {
+            const passwordError = new Error('PASSWORD_REQUIRED');
+            (passwordError as any).reason = 'INCORRECT_PASSWORD';
+            (passwordError as any).filePath = filePath;
+            (passwordError as any).base64Data = base64Data;
+            throw passwordError;
+          }
+          throw e;
+        }
+      }
+
+      const dataCopyForPdfJs = new Uint8Array(workingBytes);
       const loadingTask = pdfjsLib.getDocument({
         ...PDFJS_DOCUMENT_OPTIONS,
         data: dataCopyForPdfJs,
-        password: password || undefined,
       });
 
       let pdfDoc: pdfjsLib.PDFDocumentProxy;
@@ -213,7 +266,8 @@ export function usePDFDocument() {
         pdfDoc = await loadingTask.promise;
       } catch (error: any) {
         if (error?.name === 'PasswordException') {
-          // Re-throw with a special marker so the caller can show a password dialog
+          // Defense-in-depth: should not reach here since we already decrypted,
+          // but if pdf.js reports encryption, route through the password dialog.
           const passwordError = new Error('PASSWORD_REQUIRED');
           (passwordError as any).reason = error.code === 1 ? 'NEED_PASSWORD' : 'INCORRECT_PASSWORD';
           (passwordError as any).filePath = filePath;
@@ -328,8 +382,9 @@ export function usePDFDocument() {
         fileName,
         pageCount: pdfDoc.numPages,
         pages,
-        pdfData: binaryData,
-        password: password || undefined,
+        pdfData: workingBytes,
+        password: isEncrypted ? password : undefined,
+        encryptionMeta: capturedMeta,
       };
 
       // Create new tab
@@ -378,7 +433,7 @@ export function usePDFDocument() {
   ) => {
     try {
       const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
-      const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs, password: document?.password }).promise;
+      const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs }).promise;
 
       const updatedPages = await Promise.all(
         (document?.pages || []).map(async (page, i) => {
@@ -494,30 +549,70 @@ export function usePDFDocument() {
     }
   }, [document]);
 
+  /** Apply pending encryption changes (or retain current encryption) to plaintext output bytes. */
+  const applyOutputEncryption = useCallback(async (
+    plaintextBytes: Uint8Array,
+    doc: PDFDocument
+  ): Promise<{ outputBytes: Uint8Array; newPassword?: string; newMeta?: PDFDocument['encryptionMeta'] }> => {
+    const pending = doc.pendingEncryption;
+
+    // Pending: REMOVE encryption
+    if (pending && 'remove' in pending && pending.remove) {
+      return { outputBytes: plaintextBytes, newPassword: undefined, newMeta: undefined };
+    }
+
+    // Pending: SET / CHANGE encryption
+    if (pending && 'password' in pending) {
+      const cipher = await encryptPdf(plaintextBytes, pending.password, {
+        ownerPassword: pending.ownerPassword,
+        permissions: pending.permissions,
+      });
+      const newMeta: PDFDocument['encryptionMeta'] = {
+        R: 6,
+        keyLength: 256,
+        permissions: pending.permissions,
+        hasOwnerPassword: !!pending.ownerPassword && pending.ownerPassword !== pending.password,
+      };
+      return { outputBytes: cipher, newPassword: pending.password, newMeta };
+    }
+
+    // No pending change — retain current encryption if doc was encrypted at open
+    if (doc.password && doc.encryptionMeta) {
+      const cipher = await encryptPdf(plaintextBytes, doc.password, {
+        permissions: doc.encryptionMeta.permissions,
+      });
+      return { outputBytes: cipher, newPassword: doc.password, newMeta: doc.encryptionMeta };
+    }
+
+    return { outputBytes: plaintextBytes };
+  }, []);
+
   const saveFile = useCallback(async () => {
     if (!document) return;
 
-    if (document.password) {
-      const err: any = new Error('ENCRYPTED_SAVE_UNSUPPORTED');
-      err.code = 'ENCRYPTED_SAVE_UNSUPPORTED';
-      throw err;
-    }
-
     setLoading(true);
     try {
-      const modifiedPdfBytes = await applyEditsAndAnnotations({
+      const editedPlaintext = await applyEditsAndAnnotations({
         pdfData: document.pdfData,
         pages: document.pages,
         annotationStorage: annotationStorageRef.current,
         formFieldMappings,
       });
 
-      const base64 = uint8ArrayToBase64(modifiedPdfBytes);
+      const { outputBytes, newPassword, newMeta } = await applyOutputEncryption(editedPlaintext, document);
+      const base64 = uint8ArrayToBase64(outputBytes);
 
-      // Save directly to the existing file path
       const result = await window.electronAPI.saveFile(base64, document.filePath);
       if (result.success) {
-        await reExtractTextAfterSave(modifiedPdfBytes);
+        // Re-extract from the plaintext (not the encrypted output) so downstream
+        // tools continue to operate on plaintext bytes in memory.
+        await reExtractTextAfterSave(editedPlaintext);
+        setDocument((prev) => prev ? {
+          ...prev,
+          password: newPassword,
+          encryptionMeta: newMeta,
+          pendingEncryption: undefined,
+        } : null);
         setModified(false);
       } else {
         throw new Error(result.error || 'Failed to save file');
@@ -528,33 +623,33 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings]);
+  }, [document, formFieldMappings, applyOutputEncryption]);
 
   const saveFileAs = useCallback(async () => {
     if (!document) return;
 
-    if (document.password) {
-      const err: any = new Error('ENCRYPTED_SAVE_UNSUPPORTED');
-      err.code = 'ENCRYPTED_SAVE_UNSUPPORTED';
-      throw err;
-    }
-
     setLoading(true);
     try {
-      const modifiedPdfBytes = await applyEditsAndAnnotations({
+      const editedPlaintext = await applyEditsAndAnnotations({
         pdfData: document.pdfData,
         pages: document.pages,
         annotationStorage: annotationStorageRef.current,
         formFieldMappings,
       });
 
-      const base64 = uint8ArrayToBase64(modifiedPdfBytes);
+      const { outputBytes, newPassword, newMeta } = await applyOutputEncryption(editedPlaintext, document);
+      const base64 = uint8ArrayToBase64(outputBytes);
 
-      // Show Save As dialog
       const result = await window.electronAPI.saveFileDialog(base64, document.fileName);
       if (result.success && result.path) {
         const fileName = result.path.split(/[\\/]/).pop() || 'Untitled';
-        await reExtractTextAfterSave(modifiedPdfBytes, result.path, fileName);
+        await reExtractTextAfterSave(editedPlaintext, result.path, fileName);
+        setDocument((prev) => prev ? {
+          ...prev,
+          password: newPassword,
+          encryptionMeta: newMeta,
+          pendingEncryption: undefined,
+        } : null);
         setModified(false);
       }
     } catch (error) {
@@ -563,7 +658,13 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings]);
+  }, [document, formFieldMappings, applyOutputEncryption]);
+
+  /** Set, change, or remove the document password. Applied on next save. */
+  const setPendingEncryption = useCallback((pending: PDFDocument['pendingEncryption']) => {
+    setDocument((prev) => prev ? { ...prev, pendingEncryption: pending } : null);
+    setModified(true);
+  }, []);
 
   const addText = useCallback(
     (pageIndex: number, position: Position, content: string, color: string = '#000000', fontSize: number = 16): string | undefined => {
@@ -1448,6 +1549,8 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     // Form field support
     formFieldMappings,
     setAnnotationStorage,
+    // Encryption
+    setPendingEncryption,
   };
 }
 

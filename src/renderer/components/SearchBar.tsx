@@ -68,7 +68,7 @@ const SearchBar: React.FC<SearchBarProps> = ({
 
     try {
       const dataCopy = new Uint8Array(document.pdfData);
-      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
+      const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
         const page = await pdfDoc.getPage(i);

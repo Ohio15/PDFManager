@@ -159,13 +159,42 @@ export interface PDFPage {
   sourceAnnotations?: PDFSourceAnnotation[];
 }
 
+export interface PDFEncryptionPermissions {
+  print: boolean;
+  modify: boolean;
+  copy: boolean;
+  annotate: boolean;
+}
+
+export interface PDFEncryptionMeta {
+  R: number;
+  keyLength: number;
+  permissions: PDFEncryptionPermissions;
+  hasOwnerPassword: boolean;
+}
+
 export interface PDFDocument {
   filePath: string | null;
   fileName: string;
   pageCount: number;
   pages: PDFPage[];
   pdfData: Uint8Array;
+  /** User password the doc was opened with. Null if doc is not protected. */
   password?: string;
+  /** Encryption metadata captured at open; null if doc is not protected. */
+  encryptionMeta?: PDFEncryptionMeta;
+  /** Pending encryption change applied on next save. Distinguishes:
+   *   undefined  → keep current encryption (or stay unencrypted)
+   *   { remove: true }  → strip encryption on save
+   *   { password, ... } → set/change to this password+permissions on save
+   */
+  pendingEncryption?:
+    | { remove: true }
+    | {
+        password: string;
+        ownerPassword?: string;
+        permissions: PDFEncryptionPermissions;
+      };
 }
 
 export interface AnnotationStyle {

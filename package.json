@@ -1,6 +1,6 @@
 {
   "name": "pdf-manager",
-  "version": "2.11.4",
+  "version": "2.12.0",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "main": "dist/main/main.js",
   "scripts": {
@@ -22,6 +22,7 @@
     "test:e2e:debug": "npx playwright test --debug"
   },
   "dependencies": {
+    "@neslinesli93/qpdf-wasm": "^0.3.0",
     "@types/pako": "^2.0.4",
     "electron-store": "^8.1.0",
     "electron-updater": "^6.6.2",
@@ -98,9 +99,8 @@
     },
     "nsis": {
       "artifactName": "PDF-Manager-Setup-${version}.${ext}",
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
       "shortcutName": "PDF Manager",
       "uninstallDisplayName": "PDF Manager ${version}",
       "createDesktopShortcut": "always",

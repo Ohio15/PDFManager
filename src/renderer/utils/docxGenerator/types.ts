@@ -371,6 +371,4 @@ export interface ConvertOptions {
   imageScale?: number;
   /** Maximum image dimension in EMU before downscaling */
   maxImageDimEmu?: number;
-  /** Password for encrypted PDFs (passed to pdfjs.getDocument) */
-  password?: string;
 }

@@ -75,7 +75,7 @@ const DocumentPropertiesDialog: React.FC<DocumentPropertiesDialogProps> = ({
       setLoading(true);
       try {
         const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy, password: document.password }).promise;
+        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const meta = await pdfDoc.getMetadata();
 
         const info = (meta?.info as Record<string, any>) || {};

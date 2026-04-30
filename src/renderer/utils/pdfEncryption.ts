@@ -7,16 +7,43 @@ const OUT_PATH = '/out.pdf';
 
 let qpdfInstancePromise: Promise<any> | null = null;
 
+// qpdf-wasm's Emscripten build caches `console.log.bind(console)` at module-
+// init time and uses that cached reference for all stdout. The user-supplied
+// `print` option is ignored. The only reliable capture is to install a
+// console.log shim *before* createQpdfModule runs, so the bind() snapshot
+// captures *our* shim — and the shim delegates to a mutable sink we can swap
+// at runtime. Safe under withQpdfLock serialization.
+let printSink: (text: string) => void = () => {};
+
 function getQpdf(): Promise<any> {
   if (!qpdfInstancePromise) {
+    const origConsoleLog = console.log;
+    console.log = (...args: unknown[]) => {
+      printSink(args.map((a) => (typeof a === 'string' ? a : String(a))).join(' '));
+    };
     qpdfInstancePromise = createQpdfModule({
       locateFile: () => qpdfWasmUrl,
       noInitialRun: true,
       print: () => {},
       printErr: () => {},
-    } as any);
+    } as any).finally(() => {
+      // Restore console.log for the rest of the app — qpdf already captured
+      // our shim via bind() and will keep calling it for its own stdout.
+      console.log = origConsoleLog;
+    });
   }
   return qpdfInstancePromise;
+}
+
+function captureStdout<T>(fn: () => T): { value: T; lines: string[] } {
+  const lines: string[] = [];
+  const prev = printSink;
+  printSink = (text: string) => lines.push(text);
+  try {
+    return { value: fn(), lines };
+  } finally {
+    printSink = prev;
+  }
 }
 
 // Serialize all qpdf operations. The Emscripten module has a single VFS and
@@ -67,18 +94,11 @@ export async function decryptPdf(
   password: string
 ): Promise<{ plaintextBytes: Uint8Array; meta: PDFEncryptionMeta }> {
   return withQpdfLock(async (qpdf) => {
-    const encInfoLines: string[] = [];
-    const origPrint = qpdf.print;
-    qpdf.print = (text: string) => encInfoLines.push(text);
-
     qpdf.FS.writeFile(IN_PATH, pdfBytes);
 
-    let showRc: number;
-    try {
-      showRc = qpdf.callMain(['--show-encryption', `--password=${password}`, IN_PATH]);
-    } finally {
-      qpdf.print = origPrint;
-    }
+    const { value: showRc, lines: encInfoLines } = captureStdout(() =>
+      qpdf.callMain(['--show-encryption', `--password=${password}`, IN_PATH]) as number
+    );
 
     if (showRc !== 0) {
       const err: any = new Error('DECRYPT_FAILED');
@@ -109,9 +129,9 @@ export async function encryptPdf(
     permissions: PDFEncryptionPermissions;
   }
 ): Promise<Uint8Array> {
-  if (!userPassword) {
-    throw new Error('encryptPdf: userPassword is required');
-  }
+  // An empty userPassword is valid: owner-only / permissions-only encryption.
+  // qpdf accepts `--encrypt '' OWNER 256`; a distinct owner password gates
+  // permission changes while anyone can open the document.
   return withQpdfLock(async (qpdf) => {
     qpdf.FS.writeFile(IN_PATH, pdfBytes);
 
@@ -145,11 +165,12 @@ export async function reEncryptIfProtected(
   plaintextBytes: Uint8Array,
   source: { password?: string; encryptionMeta?: PDFEncryptionMeta }
 ): Promise<Uint8Array> {
-  if (!source.password) return plaintextBytes;
-  const perms = source.encryptionMeta?.permissions ?? {
-    print: true, modify: true, copy: true, annotate: true,
-  };
-  return encryptPdf(plaintextBytes, source.password, { permissions: perms });
+  // Gate on encryptionMeta presence, not password truthiness — owner-only
+  // encryption uses an empty user password but still requires re-encryption.
+  if (!source.encryptionMeta) return plaintextBytes;
+  return encryptPdf(plaintextBytes, source.password ?? '', {
+    permissions: source.encryptionMeta.permissions,
+  });
 }
 
 function parseEncryptionInfo(raw: string): PDFEncryptionMeta {
@@ -160,16 +181,39 @@ function parseEncryptionInfo(raw: string): PDFEncryptionMeta {
   // key. The semantically interesting flag is "owner pw differs from user".
   const distinctOwner = /owner password is different/i.test(raw);
 
+  // qpdf 12.x emits granular permission lines like "print high resolution:
+  // not allowed" — never a bare "print: not allowed". Match each granular
+  // bit; map to our 4 high-level booleans. Older qpdf wording is kept as a
+  // fallback so we degrade gracefully.
+  const notAllowed = (label: string) =>
+    new RegExp(`${label.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*:\\s*not allowed`, 'i').test(raw);
+
+  const printHighBlocked = notAllowed('print high resolution');
+  const printLowBlocked = notAllowed('print low resolution');
+  const printBareBlocked = notAllowed('print'); // pre-12 fallback
+
+  const modifyOtherBlocked = notAllowed('modify other');
+  const modifyBareBlocked = notAllowed('modify'); // pre-12 fallback (only matches bare "modify:")
+
+  const extractAnyBlocked = notAllowed('extract for any purpose');
+  const extractAccessBlocked = notAllowed('extract for accessibility');
+  const extractBareBlocked = notAllowed('extract'); // pre-12 fallback
+
+  const annotationsBlocked = notAllowed('modify annotations');
+  const annotateBareBlocked = notAllowed('annotate'); // pre-12 fallback
+
   return {
     R: rMatch ? parseInt(rMatch[1], 10) : 6,
     keyLength: lengthMatch ? parseInt(lengthMatch[1], 10) : 256,
     permissions: {
-      print: !/print:\s*not allowed/i.test(raw),
-      modify: !/modify:\s*not allowed/i.test(raw),
-      copy: !/extract for accessibility:\s*not allowed/i.test(raw)
-        && !/extract:\s*not allowed/i.test(raw),
-      annotate: !/modify annotations:\s*not allowed/i.test(raw)
-        && !/annotate:\s*not allowed/i.test(raw),
+      // Print is allowed if any quality level is allowed.
+      print: !printBareBlocked && !(printHighBlocked && printLowBlocked),
+      // Modify maps to PDF bit 4 (modify contents) ≈ qpdf "modify other".
+      modify: !modifyBareBlocked && !modifyOtherBlocked,
+      // Copy maps to PDF bit 5 (extract for any purpose).
+      copy: !extractBareBlocked && !extractAnyBlocked && !extractAccessBlocked,
+      // Annotate maps to PDF bit 6 (modify annotations).
+      annotate: !annotateBareBlocked && !annotationsBlocked,
     },
     hasOwnerPassword: distinctOwner,
   };

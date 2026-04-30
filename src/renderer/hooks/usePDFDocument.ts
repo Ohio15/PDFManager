@@ -142,7 +142,7 @@ export function usePDFDocument() {
     // that should not survive the doc lifetime).
     const cached = tabStatesRef.current.get(tabId);
     if (cached?.document) {
-      const wasProtected = !!cached.document.password;
+      const wasProtected = !!cached.document.encryptionMeta;
       cached.document.password = undefined;
       cached.document.pendingEncryption = undefined;
       if (wasProtected) {
@@ -187,7 +187,7 @@ export function usePDFDocument() {
     const handler = () => {
       tabStatesRef.current.forEach((s) => {
         if (s.document) {
-          const wasProtected = !!s.document.password;
+          const wasProtected = !!s.document.encryptionMeta;
           s.document.password = undefined;
           s.document.pendingEncryption = undefined;
           if (wasProtected) {
@@ -242,23 +242,23 @@ export function usePDFDocument() {
       const isEncrypted = hasEncryptDictPrefix(rawBytes);
       let workingBytes = rawBytes;
       let capturedMeta: PDFDocument['encryptionMeta'] | undefined;
+      let effectivePassword: string | undefined;
 
       if (isEncrypted) {
-        if (!password) {
-          const passwordError = new Error('PASSWORD_REQUIRED');
-          (passwordError as any).reason = 'NEED_PASSWORD';
-          (passwordError as any).filePath = filePath;
-          (passwordError as any).base64Data = base64Data;
-          throw passwordError;
-        }
+        // PDFs can be encrypted with an empty user password — owner-only /
+        // permissions-only protection (e.g. "no printing without owner pw").
+        // Standard viewers open these silently by trying the empty password
+        // first; only prompt the user if that fails.
+        const candidate = password ?? '';
         try {
-          const decrypted = await decryptPdf(rawBytes, password);
+          const decrypted = await decryptPdf(rawBytes, candidate);
           workingBytes = new Uint8Array(decrypted.plaintextBytes);
           capturedMeta = decrypted.meta;
+          effectivePassword = candidate;
         } catch (e: any) {
           if (e?.code === 'DECRYPT_FAILED') {
             const passwordError = new Error('PASSWORD_REQUIRED');
-            (passwordError as any).reason = 'INCORRECT_PASSWORD';
+            (passwordError as any).reason = password ? 'INCORRECT_PASSWORD' : 'NEED_PASSWORD';
             (passwordError as any).filePath = filePath;
             (passwordError as any).base64Data = base64Data;
             throw passwordError;
@@ -395,7 +395,7 @@ export function usePDFDocument() {
         pageCount: pdfDoc.numPages,
         pages,
         pdfData: workingBytes,
-        password: isEncrypted ? password : undefined,
+        password: isEncrypted ? effectivePassword : undefined,
         encryptionMeta: capturedMeta,
       };
 
@@ -588,12 +588,14 @@ export function usePDFDocument() {
       return { outputBytes: cipher, newPassword: pending.password, newMeta };
     }
 
-    // No pending change — retain current encryption if doc was encrypted at open
-    if (doc.password && doc.encryptionMeta) {
-      const cipher = await encryptPdf(plaintextBytes, doc.password, {
+    // No pending change — retain current encryption if doc was encrypted at open.
+    // Gate on encryptionMeta (not password truthiness) so owner-only docs with
+    // an empty user password still round-trip with encryption preserved.
+    if (doc.encryptionMeta) {
+      const cipher = await encryptPdf(plaintextBytes, doc.password ?? '', {
         permissions: doc.encryptionMeta.permissions,
       });
-      return { outputBytes: cipher, newPassword: doc.password, newMeta: doc.encryptionMeta };
+      return { outputBytes: cipher, newPassword: doc.password ?? '', newMeta: doc.encryptionMeta };
     }
 
     return { outputBytes: plaintextBytes };

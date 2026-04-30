@@ -38,7 +38,7 @@ function classifyStrength(pw: string): { score: 0 | 1 | 2 | 3 | 4; label: string
 const EncryptionDialog: React.FC<EncryptionDialogProps> = ({
   isOpen, onClose, document: doc, onApplyAdd, onApplyChange, onApplyRemove,
 }) => {
-  const isEncrypted = !!doc?.password;
+  const isEncrypted = !!doc?.encryptionMeta;
   const [mode, setMode] = useState<Mode>(isEncrypted ? 'change' : 'add');
 
   const [userPassword, setUserPassword] = useState('');

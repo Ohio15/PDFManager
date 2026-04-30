@@ -301,11 +301,11 @@ const App: React.FC = () => {
   }, [toolsPanelVisible]);
 
   // Auto-save recovery: save every 60 seconds when modified.
-  // Skipped for password-protected documents — pdfData is plaintext after
-  // decrypt-at-open, so writing it to disk would defeat the at-rest contract.
+  // Skipped for any document encrypted at open (pdfData is decrypted plaintext
+  // post-decrypt — including owner-only encryption with an empty user pw).
   useEffect(() => {
     if (!document || !modified) return;
-    if (document.password) return;
+    if (document.encryptionMeta) return;
 
     const autoSaveTimer = setInterval(async () => {
       try {
@@ -322,14 +322,14 @@ const App: React.FC = () => {
   // Surface the auto-recovery pause once per document open
   const recoveryPauseToastedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (document?.password && document.filePath !== recoveryPauseToastedRef.current) {
+    if (document?.encryptionMeta && document.filePath !== recoveryPauseToastedRef.current) {
       recoveryPauseToastedRef.current = document.filePath;
-      toast.info?.('Auto-recovery paused for password-protected PDFs');
+      toast.info?.('Auto-recovery paused for encrypted PDFs');
     }
-    if (!document?.password) {
+    if (!document?.encryptionMeta) {
       recoveryPauseToastedRef.current = null;
     }
-  }, [document?.password, document?.filePath, toast]);
+  }, [document?.encryptionMeta, document?.filePath, toast]);
 
   // Clear recovery data after successful save
   useEffect(() => {
@@ -847,8 +847,8 @@ const App: React.FC = () => {
   ): Promise<{ count: number; folder: string }> => {
     if (!document) return { count: 0, folder: outputDir };
 
-    if (document.password && !window.confirm(
-      `This will produce unprotected ${format.toUpperCase()} image files from a password-protected PDF. Continue?`
+    if (document.encryptionMeta && !window.confirm(
+      `This will produce unprotected ${format.toUpperCase()} image files from an encrypted PDF. Continue?`
     )) {
       return { count: 0, folder: outputDir };
     }
@@ -906,8 +906,8 @@ const App: React.FC = () => {
     const folder = outputPath.substring(0, Math.max(outputPath.lastIndexOf('/'), outputPath.lastIndexOf('\\')));
     if (!document) return { count: 0, folder };
 
-    if (document.password && !window.confirm(
-      'This will produce an unprotected Word document from a password-protected PDF. Continue?'
+    if (document.encryptionMeta && !window.confirm(
+      'This will produce an unprotected Word document from an encrypted PDF. Continue?'
     )) {
       return { count: 0, folder };
     }
@@ -932,8 +932,8 @@ const App: React.FC = () => {
   // Export PDF pages as SVG vector graphics
   const handleExportSvg = useCallback(async () => {
     if (!document) return;
-    if (document.password && !window.confirm(
-      'This will produce unprotected SVG files from a password-protected PDF. Continue?'
+    if (document.encryptionMeta && !window.confirm(
+      'This will produce unprotected SVG files from an encrypted PDF. Continue?'
     )) {
       return;
     }
@@ -1285,7 +1285,7 @@ const App: React.FC = () => {
           setEncryptionDialogTabId(activeTabId);
           setEncryptionDialogOpen(true);
         }}
-        isEncrypted={!!document?.password}
+        isEncrypted={!!document?.encryptionMeta}
         hasPendingEncryptionChange={!!document?.pendingEncryption}
       />
 

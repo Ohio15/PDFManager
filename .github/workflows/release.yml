@@ -8,6 +8,12 @@ on:
   push:
     tags: ['v*']
 
+# Repo default-workflow-permissions is `read`. The called workflow needs
+# contents: write to publish the GitHub Release; declare it explicitly here
+# so the caller-side cap doesn't override the called workflow's declaration.
+permissions:
+  contents: write
+
 jobs:
   release:
     uses: Ohio15/dev-standards/.github/workflows/electron-release.yml@v1

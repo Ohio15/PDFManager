@@ -8,6 +8,7 @@ import { buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver
 import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
+import { deletePdfPage, insertBlankPdfPage, reorderPdfPage, setPdfPageRotation } from '../utils/pageStructure';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
@@ -86,6 +87,26 @@ export function usePDFDocument() {
 
   // Lock set to prevent race conditions when opening the same file concurrently
   const openingFilesRef = useRef<Set<string>>(new Set());
+
+  // Serializes structural page ops (delete/insert/reorder/rotate). Each rebuilds
+  // document.pdfData via pdf-lib off the LATEST bytes (read from stateRef inside
+  // the op), so overlapping ops must run one at a time or a later op would load
+  // stale bytes and clobber the earlier rebuild.
+  const structuralOpRef = useRef<Promise<void>>(Promise.resolve());
+  const runStructural = useCallback((op: () => Promise<void>): Promise<void> => {
+    const next = structuralOpRef.current.then(op, op);
+    structuralOpRef.current = next.catch(() => {});
+    return next;
+  }, []);
+
+  // Commit a fully-formed document to both React state and stateRef synchronously.
+  // Structural ops run serialized as microtasks that can fire before React
+  // re-renders, so the next op (e.g. handleRotateAllPages looping rotatePage)
+  // must see the previous op's bytes immediately — not the last committed render.
+  const commitDocument = useCallback((nextDoc: PDFDocument) => {
+    stateRef.current.document = nextDoc;
+    setDocument(nextDoc);
+  }, []);
 
   const canUndo = historyIndex >= 0;
   const canRedo = historyIndex < history.length - 1;
@@ -1231,149 +1252,104 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
   );
 
   const deletePage = useCallback(
-    (pageIndex: number) => {
-      if (!document || document.pageCount <= 1) return;
+    (pageIndex: number): Promise<void> =>
+      runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc || doc.pageCount <= 1) return;
+        const zeroIndex = pageIndex - 1;
+        if (zeroIndex < 0 || zeroIndex >= doc.pages.length) return;
 
-      const deletedPage = document.pages[pageIndex - 1];
+        // Rebuild bytes so pdfData stays aligned with the page model (the save
+        // pipeline resolves getPage(page.index) against these bytes).
+        const newPdfData = await deletePdfPage(doc.pdfData, zeroIndex);
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        const newPages = prev.pages
-          .filter((_, i) => i !== pageIndex - 1)
+        const nextPages = doc.pages
+          .filter((_, i) => i !== zeroIndex)
           .map((p, i) => ({ ...p, index: i }));
-        return {
-          ...prev,
-          pageCount: prev.pageCount - 1,
-          pages: newPages,
-        };
-      });
+        const prevDoc = doc;
+        const nextDoc: PDFDocument = { ...doc, pageCount: nextPages.length, pages: nextPages, pdfData: newPdfData };
 
-      addToHistory({
-        type: 'deletePage',
-        undo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...prev.pages];
-            newPages.splice(pageIndex - 1, 0, deletedPage);
-            return {
-              ...prev,
-              pageCount: prev.pageCount + 1,
-              pages: newPages.map((p, i) => ({ ...p, index: i })),
-            };
-          });
-        },
-        redo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = prev.pages
-              .filter((_, i) => i !== pageIndex - 1)
-              .map((p, i) => ({ ...p, index: i }));
-            return {
-              ...prev,
-              pageCount: prev.pageCount - 1,
-              pages: newPages,
-            };
-          });
-        },
-      });
-    },
-    [document, addToHistory]
+        commitDocument(nextDoc);
+        addToHistory({
+          type: 'deletePage',
+          undo: () => commitDocument(prevDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+      }),
+    [runStructural, addToHistory, commitDocument]
   );
 
   const rotatePage = useCallback(
-    (pageIndex: number, angle: number) => {
-      if (!document) return;
+    (pageIndex: number, angle: number): Promise<void> =>
+      runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc) return;
+        const zeroIndex = pageIndex - 1;
+        if (zeroIndex < 0 || zeroIndex >= doc.pages.length) return;
 
-      const previousRotation = document.pages[pageIndex - 1].rotation;
+        const prevRotation = doc.pages[zeroIndex].rotation;
+        const nextRotation = (((prevRotation + angle) % 360) + 360) % 360;
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        const newPages = [...prev.pages];
-        newPages[pageIndex - 1] = {
-          ...newPages[pageIndex - 1],
-          rotation: (newPages[pageIndex - 1].rotation + angle) % 360,
-        };
-        return { ...prev, pages: newPages };
-      });
+        // Bake the absolute rotation into /Rotate so it round-trips on save and
+        // the viewer (which passes page.rotation to pdf.js as the absolute
+        // viewport rotation) stays in sync with the bytes.
+        const newPdfData = await setPdfPageRotation(doc.pdfData, zeroIndex, nextRotation);
 
-      addToHistory({
-        type: 'rotatePage',
-        undo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...prev.pages];
-            newPages[pageIndex - 1] = {
-              ...newPages[pageIndex - 1],
-              rotation: previousRotation,
-            };
-            return { ...prev, pages: newPages };
-          });
-        },
-        redo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...prev.pages];
-            newPages[pageIndex - 1] = {
-              ...newPages[pageIndex - 1],
-              rotation: (previousRotation + angle) % 360,
-            };
-            return { ...prev, pages: newPages };
-          });
-        },
-      });
-    },
-    [document, addToHistory]
+        const nextPages = [...doc.pages];
+        nextPages[zeroIndex] = { ...nextPages[zeroIndex], rotation: nextRotation };
+        const prevDoc = doc;
+        const nextDoc: PDFDocument = { ...doc, pages: nextPages, pdfData: newPdfData };
+
+        commitDocument(nextDoc);
+        addToHistory({
+          type: 'rotatePage',
+          undo: () => commitDocument(prevDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+      }),
+    [runStructural, addToHistory, commitDocument]
   );
 
   const insertBlankPage = useCallback(
-    (afterPageIndex: number) => {
-      if (!document) return;
+    (afterPageIndex: number): Promise<void> =>
+      runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc) return;
 
-      // Use first page dimensions as template, or default A4
-      const templatePage = document.pages[afterPageIndex - 1] || document.pages[0];
-      const width = templatePage?.width || 595;
-      const height = templatePage?.height || 842;
+        // Use the neighbouring page's dimensions as a template, or default A4.
+        const templatePage = doc.pages[afterPageIndex - 1] || doc.pages[0];
+        const width = templatePage?.width || 595;
+        const height = templatePage?.height || 842;
 
-      const newPage = {
-        index: afterPageIndex,
-        width,
-        height,
-        rotation: 0,
-        annotations: [],
-        textItems: [],
-        textEdits: [],
-      };
+        // afterPageIndex is 1-based ("insert after page N"); the new page lands
+        // at 0-based array position afterPageIndex. Bake a real blank page into
+        // the bytes so the document stays saveable.
+        const newPdfData = await insertBlankPdfPage(doc.pdfData, afterPageIndex - 1, width, height);
 
-      const previousPages = [...document.pages];
+        const newPage = {
+          index: afterPageIndex,
+          width,
+          height,
+          rotation: 0,
+          annotations: [],
+          textItems: [],
+          textEdits: [],
+        };
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        const newPages = [...prev.pages];
-        newPages.splice(afterPageIndex, 0, newPage);
-        const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-        return { ...prev, pageCount: prev.pageCount + 1, pages: reindexed };
-      });
+        const nextPagesRaw = [...doc.pages];
+        nextPagesRaw.splice(afterPageIndex, 0, newPage);
+        const nextPages = nextPagesRaw.map((p, i) => ({ ...p, index: i }));
+        const prevDoc = doc;
+        const nextDoc: PDFDocument = { ...doc, pageCount: nextPages.length, pages: nextPages, pdfData: newPdfData };
 
-      addToHistory({
-        type: 'insertBlankPage',
-        undo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            return { ...prev, pageCount: prev.pageCount - 1, pages: previousPages };
-          });
-        },
-        redo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...previousPages];
-            newPages.splice(afterPageIndex, 0, newPage);
-            const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-            return { ...prev, pageCount: prev.pageCount + 1, pages: reindexed };
-          });
-        },
-      });
-    },
-    [document, addToHistory]
+        commitDocument(nextDoc);
+        addToHistory({
+          type: 'insertBlankPage',
+          undo: () => commitDocument(prevDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+      }),
+    [runStructural, addToHistory, commitDocument]
   );
 
   const replacePage = useCallback(
@@ -1477,43 +1453,32 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
   );
 
   const reorderPages = useCallback(
-    (fromIndex: number, toIndex: number) => {
-      if (!document) return;
-      if (fromIndex === toIndex) return;
+    (fromIndex: number, toIndex: number): Promise<void> =>
+      runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc) return;
+        if (fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= doc.pages.length) return;
+        if (toIndex < 0 || toIndex >= doc.pages.length) return;
 
-      const previousPages = [...document.pages];
+        // Reorder the bytes with the same splice semantics as the model.
+        const newPdfData = await reorderPdfPage(doc.pdfData, fromIndex, toIndex);
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        const newPages = [...prev.pages];
-        const [movedPage] = newPages.splice(fromIndex, 1);
-        newPages.splice(toIndex, 0, movedPage);
-        // Re-index pages
-        const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-        return { ...prev, pages: reindexed };
-      });
+        const nextPagesRaw = [...doc.pages];
+        const [movedPage] = nextPagesRaw.splice(fromIndex, 1);
+        nextPagesRaw.splice(toIndex, 0, movedPage);
+        const nextPages = nextPagesRaw.map((p, i) => ({ ...p, index: i }));
+        const prevDoc = doc;
+        const nextDoc: PDFDocument = { ...doc, pages: nextPages, pdfData: newPdfData };
 
-      addToHistory({
-        type: 'reorderPages',
-        undo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            return { ...prev, pages: previousPages };
-          });
-        },
-        redo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...previousPages];
-            const [movedPage] = newPages.splice(fromIndex, 1);
-            newPages.splice(toIndex, 0, movedPage);
-            const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-            return { ...prev, pages: reindexed };
-          });
-        },
-      });
-    },
-    [document, addToHistory]
+        commitDocument(nextDoc);
+        addToHistory({
+          type: 'reorderPages',
+          undo: () => commitDocument(prevDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+      }),
+    [runStructural, addToHistory, commitDocument]
   );
 
   const undo = useCallback(() => {

@@ -22,7 +22,7 @@ import TabBar from './components/TabBar';
 import DocumentPropertiesDialog from './components/DocumentPropertiesDialog';
 import PasswordDialog from './components/PasswordDialog';
 import EncryptionDialog from './components/EncryptionDialog';
-import ConversionActionBar from './components/ConversionActionBar';
+import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
@@ -31,6 +31,7 @@ import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
 import { reEncryptIfProtected } from './utils/pdfEncryption';
+import { isPdf, isConvertibleToPdf } from './utils/supportedFormats';
 
 declare global {
   interface Window {
@@ -132,7 +133,10 @@ const App: React.FC = () => {
   const [encryptionDialogTabId, setEncryptionDialogTabId] = useState<string | null>(null);
   const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
-  const [showConversionBar, setShowConversionBar] = useState(false);
+  // A non-PDF document opened for conversion (staged, not rendered).
+  const [stagedDocument, setStagedDocument] = useState<StagedDocument | null>(null);
+  // When set, ConvertToPdfDialog opens pre-seeded with these files (staging flow).
+  const [convertToPdfInitialFiles, setConvertToPdfInitialFiles] = useState<string[] | undefined>(undefined);
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [onboardingActive, setOnboardingActive] = useState(false);
   // Form field state
@@ -366,20 +370,55 @@ const App: React.FC = () => {
     }
   }, [pendingPasswordFile, openFile, refreshRecentFiles, handlePasswordError, toast]);
 
+  // Stage a non-PDF document for conversion (it is not rendered).
+  const stageDocument = useCallback((filePath: string) => {
+    const name = filePath.split(/[\\/]/).pop() || 'Document';
+    setStagedDocument({ path: filePath, name });
+  }, []);
+
   const handleOpenFile = useCallback(async () => {
     const result = await window.electronAPI.openFileDialog();
-    if (result) {
+    if (!result) return;
+
+    if (isPdf(result.path)) {
+      setStagedDocument(null);
       try {
-        await openFile(result.path, result.data);
+        await openFile(result.path, result.data || '');
         await window.electronAPI.addRecentFile(result.path);
         await refreshRecentFiles();
       } catch (error: any) {
-        if (!handlePasswordError(error, result.path, result.data)) {
+        if (!handlePasswordError(error, result.path, result.data || '')) {
           toast.error('Failed to open file');
         }
       }
+    } else if (isConvertibleToPdf(result.path)) {
+      stageDocument(result.path);
+      await window.electronAPI.addRecentFile(result.path);
+      await refreshRecentFiles();
+    } else {
+      toast.error('Unsupported file type');
     }
-  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast, stageDocument]);
+
+  // Open ConvertToPdfDialog pre-seeded with the staged document.
+  const handleConvertStagedToPdf = useCallback(() => {
+    if (!stagedDocument) return;
+    setConvertToPdfInitialFiles([stagedDocument.path]);
+    setConvertDialogOpen(true);
+  }, [stagedDocument]);
+
+  // After a staged document is converted, load the resulting PDF into the viewer.
+  const handleStagedConverted = useCallback(async (pdfPath: string, pdfData: string) => {
+    try {
+      setStagedDocument(null);
+      await openFile(pdfPath, pdfData);
+      await window.electronAPI.addRecentFile(pdfPath);
+      await refreshRecentFiles();
+      toast.success('Converted to PDF');
+    } catch {
+      toast.error('Converted, but failed to open the PDF');
+    }
+  }, [openFile, refreshRecentFiles, toast]);
 
   // Also listen for LibreOffice status from main process
   useEffect(() => {
@@ -389,9 +428,20 @@ const App: React.FC = () => {
   }, []);
 
   const handleOpenRecentFile = useCallback(async (filePath: string) => {
+    if (!isPdf(filePath)) {
+      if (isConvertibleToPdf(filePath)) {
+        stageDocument(filePath);
+        await window.electronAPI.addRecentFile(filePath);
+        await refreshRecentFiles();
+      } else {
+        toast.error('Unsupported file type');
+      }
+      return;
+    }
     const result = await window.electronAPI.readFileByPath(filePath);
     if (result) {
       try {
+        setStagedDocument(null);
         await openFile(result.path, result.data);
         await window.electronAPI.addRecentFile(result.path);
         await refreshRecentFiles();
@@ -401,7 +451,7 @@ const App: React.FC = () => {
         }
       }
     }
-  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast, stageDocument]);
 
   const handleClearRecentFiles = useCallback(async () => {
     await window.electronAPI.clearRecentFiles();
@@ -558,14 +608,32 @@ const App: React.FC = () => {
   }, []);
 
   const handleFileDrop = useCallback(async (filePath: string) => {
-    const result = await window.electronAPI.readFileByPath(filePath);
-    if (result) {
-      await openFile(result.path, result.data);
-      await window.electronAPI.addRecentFile(result.path);
-      // Show conversion action bar when PDF is loaded
-      setShowConversionBar(true);
+    if (isPdf(filePath)) {
+      const result = await window.electronAPI.readFileByPath(filePath);
+      if (result) {
+        setStagedDocument(null);
+        await openFile(result.path, result.data);
+        await window.electronAPI.addRecentFile(result.path);
+        await refreshRecentFiles();
+      }
+    } else if (isConvertibleToPdf(filePath)) {
+      stageDocument(filePath);
+      await window.electronAPI.addRecentFile(filePath);
+      await refreshRecentFiles();
+    } else {
+      toast.error('Unsupported file type');
     }
-  }, [openFile]);
+  }, [openFile, refreshRecentFiles, stageDocument, toast]);
+
+  // What's currently open drives the contextual tools panel and main view.
+  // Staged (non-PDF) documents take priority over an open PDF.
+  const docType: 'pdf' | 'staged' | 'none' = stagedDocument ? 'staged' : document ? 'pdf' : 'none';
+
+  // Switching tabs returns to PDF viewing, so clear any staged document.
+  const handleSwitchTab = useCallback((tabId: string) => {
+    setStagedDocument(null);
+    switchTab(tabId);
+  }, [switchTab]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -1004,7 +1072,7 @@ const App: React.FC = () => {
       'split-pdf': () => document && setSplitDialogOpen(true),
       'extract-pages': () => document && setExtractPagesDialogOpen(true),
       'extract-images': () => document && setExtractImagesDialogOpen(true),
-      'convert-to-pdf': () => setConvertDialogOpen(true),
+      'convert-to-pdf': () => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); },
       'settings': () => setSettingsDialogOpen(true),
       'document-properties': () => document && setPropertiesDialogOpen(true),
     };
@@ -1305,7 +1373,7 @@ const App: React.FC = () => {
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}
-        onTabSelect={switchTab}
+        onTabSelect={handleSwitchTab}
         onTabClose={handleCloseTab}
         onNewTab={handleOpenFile}
       />
@@ -1324,7 +1392,15 @@ const App: React.FC = () => {
           onDeletePage={(pageIndex) => deletePage(pageIndex)}
         />
 
-        {document ? (
+        {stagedDocument ? (
+          <StagingScreen
+            doc={stagedDocument}
+            libreOfficeAvailable={libreOfficeAvailable}
+            onConvertToPdf={handleConvertStagedToPdf}
+            onOpenDifferent={handleOpenFile}
+            onBack={() => setStagedDocument(null)}
+          />
+        ) : document ? (
           <>
             <PDFViewer
               ref={pdfViewerRef}
@@ -1351,12 +1427,6 @@ const App: React.FC = () => {
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
-            />
-            <ConversionActionBar
-              visible={showConversionBar}
-              onClose={() => setShowConversionBar(false)}
-              onConvertToImages={() => setConvertFromDialogOpen(true)}
-              onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div
@@ -1391,13 +1461,15 @@ const App: React.FC = () => {
         <ToolsPanel
           visible={toolsPanelVisible}
           onToggle={() => setToolsPanelVisible(prev => !prev)}
-          disabled={!document}
+          docType={docType}
+          stagedName={stagedDocument?.name}
           onMergePdfs={() => setMergeDialogOpen(true)}
           onSplitPdf={() => setSplitDialogOpen(true)}
           onExtractPages={() => setExtractPagesDialogOpen(true)}
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
-          onConvertToPdf={() => setConvertDialogOpen(true)}
+          onConvertToPdf={() => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); }}
+          onConvertStagedToPdf={handleConvertStagedToPdf}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
@@ -1464,8 +1536,10 @@ const App: React.FC = () => {
 
       <ConvertToPdfDialog
         isOpen={convertDialogOpen}
-        onClose={() => setConvertDialogOpen(false)}
+        onClose={() => { setConvertDialogOpen(false); setConvertToPdfInitialFiles(undefined); }}
         libreOfficeAvailable={libreOfficeAvailable}
+        initialFiles={convertToPdfInitialFiles}
+        onConverted={convertToPdfInitialFiles ? handleStagedConverted : undefined}
       />
 
       {document && (

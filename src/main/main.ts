@@ -458,10 +458,17 @@ async function openFile(): Promise<void> {
 }
 
 // IPC Handlers
+const DOC_EXTENSIONS = ['doc', 'docx', 'odt', 'rtf', 'txt', 'ppt', 'pptx', 'odp', 'xls', 'xlsx', 'ods', 'html', 'htm'];
+
 ipcMain.handle('open-file-dialog', async () => {
   const result = await dialog.showOpenDialog(mainWindow!, {
     properties: ['openFile'],
-    filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+    filters: [
+      { name: 'All Supported Documents', extensions: ['pdf', ...DOC_EXTENSIONS] },
+      { name: 'PDF Files', extensions: ['pdf'] },
+      { name: 'Documents', extensions: DOC_EXTENSIONS },
+      { name: 'All Files', extensions: ['*'] },
+    ],
   });
 
   if (!result.canceled && result.filePaths.length > 0) {

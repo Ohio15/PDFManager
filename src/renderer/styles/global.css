@@ -1306,6 +1306,81 @@ body {
   color: var(--text-muted, #6c757d);
 }
 
+/* Staging Screen (non-PDF document awaiting conversion) */
+.staged-file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 480px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-color);
+  text-align: left;
+}
+
+.staged-file-icon {
+  flex-shrink: 0;
+  color: var(--primary-color);
+  opacity: 0.8;
+}
+
+.staged-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.staged-file-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staged-file-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staged-file-badge {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--primary-color);
+  background: var(--primary-light);
+  border-radius: var(--radius-xs);
+}
+
+.staging-back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: all var(--transition-base);
+}
+
+.staging-back-link:hover {
+  color: var(--text-primary);
+  background: var(--primary-light);
+}
+
 /* Recent Files on Welcome Screen */
 .recent-files-section {
   width: 100%;

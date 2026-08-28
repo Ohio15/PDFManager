@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { FileText, Upload, Clock, Trash2, FolderOpen } from 'lucide-react';
+import { isOpenable, SUPPORTED_FORMATS_LABEL } from '../utils/supportedFormats';
 
 interface WelcomeScreenProps {
   onOpenFile: () => void;
@@ -50,11 +51,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
           return;
         }
 
-        // Only accept PDF files
-        if (file.type === 'application/pdf' || fileName.endsWith('.pdf')) {
-          if (onFileDropped) {
-            onFileDropped(filePath);
-          }
+        // Accept any supported document (PDF opens in the viewer; other
+        // formats are staged for conversion). App decides based on extension.
+        if (isOpenable(fileName) || file.type === 'application/pdf') {
+          onFileDropped?.(filePath);
         }
       }
     },
@@ -83,12 +83,13 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <FileText className="welcome-icon" />
         <h1 className="welcome-title">PDF Manager</h1>
         <p className="welcome-text">
-          Open a PDF to edit, annotate, merge, split, and more.
+          Open a PDF to edit, annotate, merge, split, and convert — or open a
+          Word, Excel, or PowerPoint file to convert it to PDF.
         </p>
         <div className="welcome-buttons">
           <button className="welcome-btn" onClick={onOpenFile}>
             <Upload size={20} />
-            Open PDF File
+            Open File
           </button>
           {onBatchConvert && (
             <button className="welcome-btn welcome-btn-secondary" onClick={onBatchConvert}>
@@ -137,10 +138,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         )}
 
         <p className="welcome-text" style={{ fontSize: '14px', marginTop: recentFiles.length > 0 ? '8px' : '16px' }}>
-          Drag and drop a PDF here to open
+          Drag and drop a file here to open
         </p>
         <p className="welcome-text welcome-formats" style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
-          Supports: PDF
+          Supports: {SUPPORTED_FORMATS_LABEL}
         </p>
       </div>
     </div>

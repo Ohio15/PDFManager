@@ -4,6 +4,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import Store from 'electron-store';
+import {
+  isAllowedStoreWrite,
+  isSafeConvertInput,
+  isSafeOutputDir,
+  isAllowedExternalUrl,
+} from './security';
 
 // Define config schema for type safety
 interface StoreSchema {
@@ -18,6 +24,7 @@ interface StoreSchema {
   libreOfficePath: string | null;
   theme: 'light' | 'dark' | 'system';
   defaultZoom: number;
+  hasSeenOnboarding: boolean;
 }
 
 const store = new Store<StoreSchema>({
@@ -33,6 +40,7 @@ const store = new Store<StoreSchema>({
     libreOfficePath: null,
     theme: 'system',
     defaultZoom: 100,
+    hasSeenOnboarding: false,
   },
 });
 
@@ -154,6 +162,23 @@ function setupAutoUpdater(): void {
     });
   });
 }
+
+// Harden every web contents (main window + the transient print window): deny
+// popups and block top-level navigation. This app is a local SPA with no
+// legitimate top-level navigation — external links go through the scheme-checked
+// open-external handler. Without these guards a hostile origin reached via a
+// navigation bug would inherit the full preload/IPC surface.
+app.on('web-contents-created', (_event, contents) => {
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event, navigationUrl) => {
+    const current = contents.getURL();
+    // Allow only same-document / same-URL loads (e.g. the initial load and
+    // in-app hash changes); deny anything that would leave the app document.
+    if (current && navigationUrl !== current) {
+      event.preventDefault();
+    }
+  });
+});
 
 function createWindow(): void {
   const bounds = store.get('windowBounds');
@@ -536,7 +561,15 @@ ipcMain.handle('get-store', (_event, key) => {
 });
 
 ipcMain.handle('set-store', (_event, key, value) => {
-  store.set(key, value);
+  // Only a whitelist of UI-preference keys is renderer-writable. This blocks the
+  // store-poisoning path to code execution (libreOfficePath feeds execFile in
+  // convert-to-pdf) and any other main-owned key.
+  if (!isAllowedStoreWrite(key, value)) {
+    console.warn(`[security] rejected set-store for key: ${String(key)}`);
+    return { success: false, error: 'store key not writable' };
+  }
+  store.set(key as keyof StoreSchema, value as never);
+  return { success: true };
 });
 
 
@@ -817,6 +850,11 @@ ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
 
 ipcMain.handle('open-folder', async (_event, folderPath: string) => {
   try {
+    // shell.openPath EXECUTES a file if handed one; restrict to existing
+    // directories so this can only ever open a folder in the OS file manager.
+    if (typeof folderPath !== 'string' || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+      return { success: false, error: 'Not a directory' };
+    }
     await shell.openPath(folderPath);
     return { success: true };
   } catch (error) {
@@ -826,6 +864,10 @@ ipcMain.handle('open-folder', async (_event, folderPath: string) => {
 
 ipcMain.handle('open-external', async (_event, url: string) => {
   try {
+    // Only http(s)/mailto — never file:, javascript:, or custom protocol handlers.
+    if (!isAllowedExternalUrl(url)) {
+      return { success: false, error: 'URL scheme not allowed' };
+    }
     await shell.openExternal(url);
     return { success: true };
   } catch (error) {
@@ -968,6 +1010,18 @@ ipcMain.handle('detect-libreoffice', () => {
 });
 
 ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
+  // Validate renderer-supplied argv before handing them to execFile. inputPath
+  // must be an absolute path to a convertible document (an absolute path also
+  // can't be re-parsed as a LibreOffice option); outputDir must be absolute.
+  if (!isSafeConvertInput(inputPath)) {
+    return { success: false, error: 'Invalid input file for conversion' };
+  }
+  if (!isSafeOutputDir(outputDir)) {
+    return { success: false, error: 'Invalid output directory' };
+  }
+
+  // libreOfficePath is main-detected only (never renderer-writable), so this is
+  // a trusted binary path.
   const loPath = store.get('libreOfficePath') || detectLibreOffice();
   if (!loPath) {
     return { success: false, error: 'LibreOffice not found' };

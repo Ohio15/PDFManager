@@ -50,6 +50,12 @@ describe('isSafeConvertInput', () => {
     expect(isSafeConvertInput('-x.docx')).toBe(false);
     expect(isSafeConvertInput('relative/a.docx')).toBe(false);
   });
+  it('rejects UNC and device paths (SMB / device I/O)', () => {
+    expect(isSafeConvertInput('\\\\attacker\\share\\x.docx')).toBe(false);
+    expect(isSafeConvertInput('//attacker/share/x.docx')).toBe(false);
+    expect(isSafeConvertInput('\\\\?\\C:\\x.docx')).toBe(false);
+    expect(isSafeConvertInput('\\\\.\\C:\\x.docx')).toBe(false);
+  });
   it('rejects non-convertible or missing extensions', () => {
     expect(isSafeConvertInput('C:\\evil.exe')).toBe(false);
     expect(isSafeConvertInput('C:\\noext')).toBe(false);
@@ -59,12 +65,14 @@ describe('isSafeConvertInput', () => {
 });
 
 describe('isSafeOutputDir', () => {
-  it('accepts absolute dirs, rejects relative/empty/non-string', () => {
+  it('accepts absolute dirs, rejects relative/empty/non-string/UNC', () => {
     expect(isSafeOutputDir('C:\\out')).toBe(true);
     expect(isSafeOutputDir('/tmp/out')).toBe(true);
     expect(isSafeOutputDir('out')).toBe(false);
     expect(isSafeOutputDir('')).toBe(false);
     expect(isSafeOutputDir(null as unknown)).toBe(false);
+    expect(isSafeOutputDir('\\\\attacker\\share')).toBe(false);
+    expect(isSafeOutputDir('\\\\?\\C:\\out')).toBe(false);
   });
 });
 

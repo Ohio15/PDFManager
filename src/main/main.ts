@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, session } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -51,18 +51,41 @@ let fileToOpenOnReady: string | null = null;
 // --- Path confinement (security review follow-up) ---------------------------
 // Renderer-supplied read/write paths are confined to directories the user has
 // chosen through a native dialog. Every dialog handler blesses the directory it
-// returns; guardPath() checks membership. Shipping in 'warn' first (log-only,
-// still allowed) because the save/convert flows can only be exercised at
-// runtime; flip to 'enforce' after the adversarial review confirms the blessed
-// set covers every flow. Override via PDFMANAGER_PATH_CONFINEMENT=enforce.
+// returns; guardPath() checks membership. ENFORCE by default (the adversarial
+// re-review confirmed the store/scheme/execFile hardening and the blessed-set
+// coverage; H1/H3/M1/M3 fixed). PDFMANAGER_PATH_CONFINEMENT=warn is a temporary
+// escape hatch if a legitimate flow is found blocked at runtime.
 type ConfinementMode = 'warn' | 'enforce';
 const PATH_CONFINEMENT_MODE: ConfinementMode =
-  process.env.PDFMANAGER_PATH_CONFINEMENT === 'enforce' ? 'enforce' : 'warn';
+  process.env.PDFMANAGER_PATH_CONFINEMENT === 'warn' ? 'warn' : 'enforce';
 const blessedDirs = new Set<string>();
+
+/**
+ * Resolve symlinks/junctions/8.3-short-names to a canonical path so containment
+ * checks can't be escaped by a link inside a blessed dir. realpath only works on
+ * existing paths, so for a not-yet-created target we realpath its deepest
+ * existing ancestor and re-append the missing tail.
+ */
+function realResolve(p: string): string {
+  let resolved = path.resolve(p);
+  let tail = '';
+  for (let i = 0; i < 64; i++) {
+    try {
+      const real = fs.realpathSync.native(resolved);
+      return tail ? path.join(real, tail) : real;
+    } catch {
+      const parent = path.dirname(resolved);
+      if (parent === resolved) break; // reached the root
+      tail = tail ? path.join(path.basename(resolved), tail) : path.basename(resolved);
+      resolved = parent;
+    }
+  }
+  return path.resolve(p);
+}
 
 function blessDirectory(dir: string | null | undefined): void {
   if (dir && typeof dir === 'string') {
-    blessedDirs.add(path.resolve(dir));
+    blessedDirs.add(realResolve(dir));
   }
 }
 function blessParentOf(filePath: string | null | undefined): void {
@@ -71,13 +94,18 @@ function blessParentOf(filePath: string | null | undefined): void {
   }
 }
 
+/** Strict, mode-independent membership test on the canonicalized path. */
+function isPathBlessed(targetPath: unknown): boolean {
+  if (typeof targetPath !== 'string' || targetPath.length === 0) return false;
+  return isWithinAnyDir(realResolve(targetPath), blessedDirs);
+}
+
 /**
  * Returns true if the renderer-supplied path may be used. In 'warn' mode an
  * out-of-bounds path is logged but allowed; in 'enforce' mode it is denied.
  */
 function guardPath(targetPath: unknown, label: string): boolean {
-  const within = isWithinAnyDir(targetPath, blessedDirs);
-  if (within) return true;
+  if (isPathBlessed(targetPath)) return true;
   console.warn(
     `[security] ${label}: path outside blessed dirs (${PATH_CONFINEMENT_MODE}): ${String(targetPath)}`
   );
@@ -207,14 +235,17 @@ function setupAutoUpdater(): void {
 // navigation bug would inherit the full preload/IPC surface.
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  contents.on('will-navigate', (event, navigationUrl) => {
+  const denyForeignNavigation = (event: Electron.Event, navigationUrl: string) => {
     const current = contents.getURL();
     // Allow only same-document / same-URL loads (e.g. the initial load and
     // in-app hash changes); deny anything that would leave the app document.
     if (current && navigationUrl !== current) {
       event.preventDefault();
     }
-  });
+  };
+  contents.on('will-navigate', denyForeignNavigation);
+  // will-redirect covers server/JS redirects that bypass will-navigate.
+  contents.on('will-redirect', denyForeignNavigation);
 });
 
 function createWindow(): void {
@@ -686,6 +717,7 @@ ipcMain.handle('pick-pdf-file', async () => {
 // Check if a file exists at the given path
 ipcMain.handle('check-file-exists', async (_event, filePath: string) => {
   try {
+    if (!guardPath(filePath, 'check-file-exists')) return false;
     return fs.existsSync(filePath);
   } catch {
     return false;
@@ -750,52 +782,74 @@ ipcMain.handle('get-printers', async () => {
   }));
 });
 
-ipcMain.handle('print-pdf', async (_event, { html, printerName, copies, landscape, color, scaleFactor }) => {
-  const tempFile = path.join(app.getPath('temp'), `pdf-manager-print-${Date.now()}.html`);
-  fs.writeFileSync(tempFile, html, 'utf-8');
+ipcMain.handle('print-pdf', async (_event, { html, printerName, copies, landscape, color }) => {
+  if (typeof html !== 'string') {
+    return { success: false, error: 'Invalid print content' };
+  }
+
+  // Private temp dir + 0600 file (no predictable name / symlink-follow surface).
+  const tmpDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'pdf-manager-print-'));
+  const tempFile = path.join(tmpDir, 'print.html');
+  fs.writeFileSync(tempFile, html, { encoding: 'utf-8', mode: 0o600 });
+  const cleanup = () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ } };
+
+  // Isolated session that cancels every network subresource — the renderer-
+  // supplied HTML runs here, so block img/script/fetch egress (exfil + SSRF)
+  // while still allowing the local file/data content to render.
+  const partition = `print-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const printSession = session.fromPartition(partition);
+  printSession.webRequest.onBeforeRequest((details, cb) => {
+    cb({ cancel: !/^(file|data|about|blob):/i.test(details.url) });
+  });
 
   const printWindow = new BrowserWindow({
     show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      partition,
     },
   });
+  const closeWindow = () => { if (!printWindow.isDestroyed()) printWindow.close(); };
 
-  await printWindow.loadFile(tempFile);
+  try {
+    await printWindow.loadFile(tempFile);
 
-  // Wait for all images to finish loading
-  await printWindow.webContents.executeJavaScript(`
-    new Promise(resolve => {
-      const imgs = Array.from(document.images);
-      if (imgs.length === 0 || imgs.every(i => i.complete)) return resolve();
-      let loaded = 0;
-      imgs.forEach(img => {
-        if (img.complete) { loaded++; return; }
-        img.onload = img.onerror = () => { if (++loaded >= imgs.length) resolve(); };
+    // Wait for all images to finish loading
+    await printWindow.webContents.executeJavaScript(`
+      new Promise(resolve => {
+        const imgs = Array.from(document.images);
+        if (imgs.length === 0 || imgs.every(i => i.complete)) return resolve();
+        let loaded = 0;
+        imgs.forEach(img => {
+          if (img.complete) { loaded++; return; }
+          img.onload = img.onerror = () => { if (++loaded >= imgs.length) resolve(); };
+        });
+      })
+    `);
+
+    return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+      const printOptions: Electron.WebContentsPrintOptions = {
+        silent: false,
+        printBackground: true,
+        copies: copies || 1,
+        landscape: !!landscape,
+        color: color !== false,
+      };
+      if (printerName) {
+        printOptions.deviceName = printerName;
+      }
+      printWindow.webContents.print(printOptions, (success, failureReason) => {
+        closeWindow();
+        cleanup();
+        resolve({ success, error: failureReason || undefined });
       });
-    })
-  `);
-
-  return new Promise<{ success: boolean; error?: string }>((resolve) => {
-    const printOptions: Electron.WebContentsPrintOptions = {
-      silent: false,
-      printBackground: true,
-      copies: copies || 1,
-      landscape: !!landscape,
-      color: color !== false,
-    };
-
-    if (printerName) {
-      printOptions.deviceName = printerName;
-    }
-
-    printWindow.webContents.print(printOptions, (success, failureReason) => {
-      printWindow.close();
-      try { fs.unlinkSync(tempFile); } catch (_e) { /* ignore */ }
-      resolve({ success, error: failureReason || undefined });
     });
-  });
+  } catch (error) {
+    closeWindow();
+    cleanup();
+    return { success: false, error: (error as Error).message };
+  }
 });
 
 // Multi-file operations
@@ -950,6 +1004,13 @@ ipcMain.handle('get-recent-files', () => {
 
 ipcMain.handle('add-recent-file', (_event, filePath: string) => {
   const recentFiles = store.get('recentFiles');
+  // Only record paths the user actually opened this session (a blessed dir).
+  // recentFiles is blessed at startup, so an unvalidated write here would let a
+  // compromised renderer expand the blessed set across a restart (H3).
+  if (!isPathBlessed(filePath)) {
+    console.warn(`[security] add-recent-file: refused unblessed path: ${String(filePath)}`);
+    return recentFiles;
+  }
   // Remove if already exists
   const filtered = recentFiles.filter((f) => f !== filePath);
   // Add to front and limit to 10
@@ -1086,6 +1147,9 @@ ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
   }
   if (!isSafeOutputDir(outputDir)) {
     return { success: false, error: 'Invalid output directory' };
+  }
+  if (!guardPath(inputPath, 'convert-to-pdf inputPath')) {
+    return { success: false, error: 'Input file not permitted' };
   }
   if (!guardPath(outputDir, 'convert-to-pdf outputDir')) {
     return { success: false, error: 'Output directory not permitted' };

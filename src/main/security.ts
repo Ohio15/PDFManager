@@ -40,6 +40,15 @@ export function isAllowedStoreWrite(key: unknown, value: unknown): key is string
   return validator ? validator(value) : false;
 }
 
+/**
+ * UNC (`\\host\share`) and Win32 device paths (`\\?\`, `\\.\`) — reject these
+ * for conversion I/O: a UNC input/output makes LibreOffice reach out over SMB
+ * (forced NTLM auth / data egress / SSRF), and device paths dodge containment.
+ */
+export function isUncOrDevicePath(p: string): boolean {
+  return /^[\\/]{2}/.test(p);
+}
+
 /** Document extensions LibreOffice is invoked to convert to PDF. */
 export const CONVERTIBLE_DOC_EXTENSIONS = [
   'doc', 'docx', 'odt', 'rtf', 'txt', 'ppt', 'pptx', 'odp',
@@ -56,13 +65,19 @@ export function isSafeConvertInput(inputPath: unknown): inputPath is string {
   if (typeof inputPath !== 'string' || inputPath.length === 0) return false;
   if (!path.isAbsolute(inputPath)) return false;
   if (inputPath.startsWith('-')) return false; // defense in depth
+  if (isUncOrDevicePath(inputPath)) return false; // no SMB/device I/O
   const ext = path.extname(inputPath).toLowerCase().replace(/^\./, '');
   return CONVERTIBLE_DOC_EXTENSIONS.includes(ext);
 }
 
-/** Output directory for conversions must be an absolute path string. */
+/** Output directory for conversions must be a local absolute path (no UNC/device). */
 export function isSafeOutputDir(outputDir: unknown): outputDir is string {
-  return typeof outputDir === 'string' && outputDir.length > 0 && path.isAbsolute(outputDir);
+  return (
+    typeof outputDir === 'string' &&
+    outputDir.length > 0 &&
+    path.isAbsolute(outputDir) &&
+    !isUncOrDevicePath(outputDir)
+  );
 }
 
 /** Schemes `open-external` may hand to the OS. No file:, no custom protocols. */

@@ -256,17 +256,17 @@ describe('resolveRealPath / isPathWithinBlessed (round-3 H-1/M-1 — fail closed
     }
   });
 
-  it('rejects UNC and device paths before any syscall (round-4 H4-1)', () => {
+  // UNC/device paths are a Windows concept; on POSIX `path.resolve` collapses
+  // `//x` to a single-slash LOCAL path (no SMB), so this is a visible win32-only
+  // skip on the ubuntu CI leg — matching where the threat actually exists.
+  it.skipIf(!isWin)('rejects UNC and device paths before any syscall (round-4 H4-1)', () => {
     // A realpath on a UNC path triggers an outbound SMB/NTLM negotiation, so the
-    // canonicalization side effect must never fire — resolveRealPath denies it
-    // up front. The forward-slash form is caught on any platform.
+    // canonicalization side effect must never fire — resolveRealPath denies it up front.
     const spy = vi.spyOn(fs.realpathSync, 'native');
     expect(resolveRealPath('//attacker/share/x')).toBeNull();
-    if (isWin) {
-      expect(resolveRealPath('\\\\attacker\\share\\x')).toBeNull();
-      expect(resolveRealPath('\\\\?\\C:\\x')).toBeNull();
-      expect(resolveRealPath('\\\\.\\pipe\\x')).toBeNull();
-    }
+    expect(resolveRealPath('\\\\attacker\\share\\x')).toBeNull();
+    expect(resolveRealPath('\\\\?\\C:\\x')).toBeNull();
+    expect(resolveRealPath('\\\\.\\pipe\\x')).toBeNull();
     expect(spy).not.toHaveBeenCalled(); // denied without touching the filesystem
     spy.mockRestore();
   });

@@ -613,7 +613,12 @@ const App: React.FC = () => {
           // A document opened by drag-and-drop has a real but unblessed path, so
           // an in-place save is denied by path confinement. Fall back to Save As
           // (its dialog blesses the chosen directory) instead of just failing.
-          if (typeof error?.message === 'string' && error.message.includes('not permitted')) {
+          // Match the EXACT confinement sentinels — a loose 'not permitted'
+          // substring would also swallow Node's EPERM ("operation not permitted",
+          // e.g. a read-only/locked file), mis-routing a real error to Save As.
+          const msg = typeof error?.message === 'string' ? error.message : '';
+          const isConfinementDenial = msg === 'Path not permitted' || msg === 'File type not permitted';
+          if (isConfinementDenial) {
             // dropped file: no blessed path, save via dialog
             if (await saveFileAs()) toast.success('Document saved successfully');
           } else {
@@ -1035,7 +1040,11 @@ const App: React.FC = () => {
   useEffect(() => {
     const menuActions: Record<string, () => void> = {
       save: handleSave,
-      'save-as': saveFileAs,
+      'save-as': () => {
+        saveFileAs()
+          .then((ok) => { if (ok) toast.success('Document saved successfully'); })
+          .catch(() => toast.error('Failed to save document'));
+      },
       print: handlePrint,
       undo: undo,
       redo: redo,

@@ -143,11 +143,13 @@ describe('generateSettingsXml', () => {
     expect(xml).not.toContain('documentProtection');
   });
 
-  test('includes form protection when form fields present', () => {
+  test('omits enforcement protection even when form fields present', () => {
+    // Intentional: w:documentProtection w:enforcement="1" triggers Word's
+    // Protected View banner on every open, so it is never emitted. Form
+    // fields render and function without it (see generateSettingsXml note).
     const xml = generateSettingsXml(true);
-    expect(xml).toContain('w:documentProtection');
-    expect(xml).toContain('w:edit="forms"');
-    expect(xml).toContain('w:enforcement="1"');
+    expect(xml).not.toContain('w:documentProtection');
+    expect(xml).not.toContain('w:enforcement');
   });
 });
 

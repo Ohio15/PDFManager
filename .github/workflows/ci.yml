@@ -25,7 +25,15 @@ jobs:
       - run: npm run typecheck
 
   test:
-    runs-on: ubuntu-latest
+    # The path-confinement threat model (junctions, UNC, device paths, 8.3
+    # names, drive-letter casing, ADS) is Windows-specific, so the suite must
+    # run on windows-latest — a Linux-only run leaves those assertions unexercised
+    # (round-3 T-1/T-2). Ubuntu stays for fast cross-platform coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

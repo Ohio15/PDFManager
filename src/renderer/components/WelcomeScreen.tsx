@@ -5,7 +5,7 @@ import { isOpenable, SUPPORTED_FORMATS_LABEL } from '../utils/supportedFormats';
 interface WelcomeScreenProps {
   onOpenFile: () => void;
   onBatchConvert?: () => void;
-  onFileDropped?: (filePath: string) => void;
+  onFileDropped?: (file: File) => void;
   recentFiles?: string[];
   onOpenRecentFile?: (filePath: string) => void;
   onClearRecentFiles?: () => void;
@@ -42,23 +42,18 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       const files = e.dataTransfer.files;
       if (files.length > 0) {
         const file = files[0];
-        const filePath = (file as any).path;
         const fileName = file.name.toLowerCase();
 
-        if (!filePath) {
-          // Fallback to dialog if path not available
-          onOpenFile();
-          return;
-        }
-
-        // Accept any supported document (PDF opens in the viewer; other
-        // formats are staged for conversion). App decides based on extension.
+        // Pass the File itself, not its path: the drop already handed us the
+        // bytes, so the app reads them via FileReader and never relays an
+        // (unblessed, untrusted) path to a main-process read. App decides how
+        // to handle it from the extension.
         if (isOpenable(fileName) || file.type === 'application/pdf') {
-          onFileDropped?.(filePath);
+          onFileDropped?.(file);
         }
       }
     },
-    [onOpenFile, onFileDropped]
+    [onFileDropped]
   );
 
   const getFileName = (filePath: string) => {

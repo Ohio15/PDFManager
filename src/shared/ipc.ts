@@ -82,6 +82,7 @@ export interface ElectronAPI {
   onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
   openDocumentsDialog: () => Promise<string[] | null>;
   convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
+  stageDroppedDocument: (data: string, fileName: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
   getLaunchFile: () => Promise<FileData | null>;

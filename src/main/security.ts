@@ -5,9 +5,11 @@
  * malicious PDF hitting a Chromium/pdf.js bug) can call any ipcMain handler with
  * arbitrary arguments. These pure validators gate the handlers that would
  * otherwise hand the renderer code-execution or store-poisoning primitives.
- * They import only `path` so they can be unit-tested without electron.
+ * They import only `path`/`fs` (Node builtins, no electron) so they can be
+ * unit-tested without an Electron runtime.
  */
 import * as path from 'path';
+import * as fs from 'fs';
 
 export type StoreValidator = (value: unknown) => boolean;
 
@@ -41,6 +43,47 @@ export function isAllowedStoreWrite(key: unknown, value: unknown): key is string
 }
 
 /**
+ * Keys the renderer may READ through `get-store`. The renderer only needs its
+ * own UI preferences (the same set it may write). Main-owned keys —
+ * libreOfficePath, recentFiles (served by its own get-recent-files IPC),
+ * lastOpen/SaveDirectory, windowBounds — must NOT be readable, as together they
+ * enumerate the blessed-directory set and installed-software paths (round-3
+ * M-2 reconnaissance oracle).
+ */
+export function isAllowedStoreRead(key: unknown): key is string {
+  return (
+    typeof key === 'string' &&
+    Object.prototype.hasOwnProperty.call(RENDERER_WRITABLE_STORE_KEYS, key)
+  );
+}
+
+/**
+ * Renderer-supplied output filenames are confined to a directory by guardPath,
+ * but that is directory-granular only: within a blessed dir the renderer could
+ * otherwise write any extension (.exe/.dll/.lnk plant → DLL side-loading). Each
+ * path-based save handler additionally restricts the target extension to what
+ * that handler is designed to emit (round-3 M-3). Dialog-based saves are NOT
+ * gated here — the user chose the path and name explicitly.
+ */
+export const SAVE_TARGET_EXTENSIONS: Record<string, readonly string[]> = {
+  pdf: ['pdf'],
+  pdfOrSvg: ['pdf', 'svg'],
+  docx: ['docx'],
+  image: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'],
+};
+
+export function isAllowedSaveTarget(
+  filePath: unknown,
+  kind: keyof typeof SAVE_TARGET_EXTENSIONS
+): filePath is string {
+  if (typeof filePath !== 'string' || filePath.length === 0) return false;
+  const base = path.basename(filePath);
+  if (base.includes(':')) return false; // NTFS alternate-data-stream syntax
+  const ext = path.extname(filePath).toLowerCase().replace(/^\./, '');
+  return SAVE_TARGET_EXTENSIONS[kind].includes(ext);
+}
+
+/**
  * UNC (`\\host\share`) and Win32 device paths (`\\?\`, `\\.\`) — reject these
  * for conversion I/O: a UNC input/output makes LibreOffice reach out over SMB
  * (forced NTLM auth / data egress / SSRF), and device paths dodge containment.
@@ -66,6 +109,9 @@ export function isSafeConvertInput(inputPath: unknown): inputPath is string {
   if (!path.isAbsolute(inputPath)) return false;
   if (inputPath.startsWith('-')) return false; // defense in depth
   if (isUncOrDevicePath(inputPath)) return false; // no SMB/device I/O
+  // Reject NTFS alternate-data-stream syntax (file.docx:stream) — the extension
+  // check is a string op and would otherwise pass `id_rsa:x.docx` (round-3 L-2).
+  if (path.basename(inputPath).includes(':')) return false;
   const ext = path.extname(inputPath).toLowerCase().replace(/^\./, '');
   return CONVERTIBLE_DOC_EXTENSIONS.includes(ext);
 }
@@ -117,4 +163,54 @@ export function isWithinAnyDir(targetPath: unknown, dirs: Iterable<string>): boo
     if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
   }
   return false;
+}
+
+/**
+ * Canonicalize a path (resolving symlinks/junctions/8.3-short-names) so a
+ * containment check can't be escaped by a link inside a blessed dir. realpath
+ * only resolves existing paths, so for a not-yet-created target we realpath its
+ * deepest EXISTING ancestor and re-append the missing tail.
+ *
+ * Returns null (FAIL CLOSED) when the path cannot be safely canonicalized:
+ *  - any realpath error other than "missing" (EACCES/EPERM/ELOOP/ENAMETOOLONG),
+ *    which would otherwise downgrade to a lexical, link-preserving path;
+ *  - the filesystem root itself failing to resolve.
+ *
+ * The ancestor walk needs NO iteration cap — it strips exactly one component
+ * per step and always terminates at the root. A cap that fell through to the
+ * lexical path (the previous implementation's 64-iteration limit) failed OPEN:
+ * a tail of >=64 non-existent components skipped canonicalization entirely,
+ * letting a junction in the tail escape confinement (round-3 H-1). Callers MUST
+ * treat null as "deny", never as "allow".
+ */
+export function resolveRealPath(p: unknown): string | null {
+  if (typeof p !== 'string' || p.length === 0) return null;
+  let resolved = path.resolve(p);
+  let tail = '';
+  for (;;) {
+    try {
+      const real = fs.realpathSync.native(resolved);
+      return tail ? path.join(real, tail) : real;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // Only "does not exist" justifies walking up. Any other error (permission,
+      // symlink loop, name-too-long) means we cannot trust the canonical form.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return null; // fail closed
+      const parent = path.dirname(resolved);
+      if (parent === resolved) return null; // reached root and even it failed
+      tail = tail ? path.join(path.basename(resolved), tail) : path.basename(resolved);
+      resolved = parent;
+    }
+  }
+}
+
+/**
+ * True iff `targetPath` canonicalizes (fail-closed) to a location inside one of
+ * `blessedDirs` (which are themselves stored canonicalized). This is the single
+ * membership test behind guardPath — see main.ts.
+ */
+export function isPathWithinBlessed(targetPath: unknown, blessedDirs: Iterable<string>): boolean {
+  const real = resolveRealPath(targetPath);
+  if (real === null) return false; // unresolvable → deny
+  return isWithinAnyDir(real, blessedDirs);
 }

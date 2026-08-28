@@ -550,23 +550,50 @@ const App: React.FC = () => {
     pdfViewerRef.current?.scrollToField(pageIndex, rect);
   }, []);
 
-  const handleFileDrop = useCallback(async (filePath: string) => {
-    if (isPdf(filePath)) {
-      const result = await window.electronAPI.readFileByPath(filePath);
-      if (result) {
+  // A drop hands us the File (bytes), not a trusted path. Read the bytes in the
+  // renderer via FileReader — this works under path confinement (ENFORCE) with
+  // no main-process path read, and can't be abused: the renderer can only read
+  // Files the OS actually dropped. The path (if present) is display metadata
+  // only; a dropped file saves via Save As (its dir isn't blessed).
+  const handleFileDrop = useCallback(async (file: File) => {
+    const fileName = file.name;
+    const displayPath = (file as unknown as { path?: string }).path || fileName;
+    const readAsBase64 = (f: File) =>
+      new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(uint8ArrayToBase64(new Uint8Array(reader.result as ArrayBuffer)));
+        reader.onerror = () => reject(reader.error ?? new Error('Failed to read dropped file'));
+        reader.readAsArrayBuffer(f);
+      });
+
+    try {
+      if (isPdf(fileName)) {
+        const base64 = await readAsBase64(file);
         setStagedDocument(null);
-        await openFile(result.path, result.data);
-        await window.electronAPI.addRecentFile(result.path);
-        await refreshRecentFiles();
+        try {
+          await openFile(displayPath, base64);
+        } catch (error: any) {
+          if (!handlePasswordError(error, displayPath, base64)) {
+            toast.error('Failed to open file');
+          }
+        }
+      } else if (isConvertibleToPdf(fileName)) {
+        // LibreOffice needs a real file: hand the bytes to main, which writes
+        // them into an app-owned (blessed) temp dir and returns that path.
+        const base64 = await readAsBase64(file);
+        const staged = await window.electronAPI.stageDroppedDocument(base64, fileName);
+        if (staged?.success && staged.path) {
+          stageDocument(staged.path);
+        } else {
+          toast.error(staged?.error || 'Could not open dropped document');
+        }
+      } else {
+        toast.error('Unsupported file type');
       }
-    } else if (isConvertibleToPdf(filePath)) {
-      stageDocument(filePath);
-      await window.electronAPI.addRecentFile(filePath);
-      await refreshRecentFiles();
-    } else {
-      toast.error('Unsupported file type');
+    } catch {
+      toast.error('Failed to read dropped file');
     }
-  }, [openFile, refreshRecentFiles, stageDocument, toast]);
+  }, [openFile, stageDocument, toast, handlePasswordError]);
 
   // What's currently open drives the contextual tools panel and main view.
   // Staged (non-PDF) documents take priority over an open PDF.

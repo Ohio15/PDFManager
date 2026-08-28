@@ -6,10 +6,14 @@ import { execFile } from 'child_process';
 import Store from 'electron-store';
 import {
   isAllowedStoreWrite,
+  isAllowedStoreRead,
   isSafeConvertInput,
   isSafeOutputDir,
   isAllowedExternalUrl,
-  isWithinAnyDir,
+  isAllowedSaveTarget,
+  resolveRealPath,
+  isPathWithinBlessed,
+  CONVERTIBLE_DOC_EXTENSIONS,
 } from './security';
 
 // Define config schema for type safety
@@ -51,41 +55,22 @@ let fileToOpenOnReady: string | null = null;
 // --- Path confinement (security review follow-up) ---------------------------
 // Renderer-supplied read/write paths are confined to directories the user has
 // chosen through a native dialog. Every dialog handler blesses the directory it
-// returns; guardPath() checks membership. ENFORCE by default (the adversarial
-// re-review confirmed the store/scheme/execFile hardening and the blessed-set
-// coverage; H1/H3/M1/M3 fixed). PDFMANAGER_PATH_CONFINEMENT=warn is a temporary
-// escape hatch if a legitimate flow is found blocked at runtime.
+// returns; guardPath() checks membership. ENFORCE by default.
+// PDFMANAGER_PATH_CONFINEMENT=warn is a temporary escape hatch if a legitimate
+// flow is found blocked at runtime. The canonicalization + membership logic
+// lives in security.ts (resolveRealPath / isPathWithinBlessed) so it can be
+// unit-tested; both fail CLOSED — a path that cannot be canonicalized is denied.
 type ConfinementMode = 'warn' | 'enforce';
 const PATH_CONFINEMENT_MODE: ConfinementMode =
   process.env.PDFMANAGER_PATH_CONFINEMENT === 'warn' ? 'warn' : 'enforce';
 const blessedDirs = new Set<string>();
 
-/**
- * Resolve symlinks/junctions/8.3-short-names to a canonical path so containment
- * checks can't be escaped by a link inside a blessed dir. realpath only works on
- * existing paths, so for a not-yet-created target we realpath its deepest
- * existing ancestor and re-append the missing tail.
- */
-function realResolve(p: string): string {
-  let resolved = path.resolve(p);
-  let tail = '';
-  for (let i = 0; i < 64; i++) {
-    try {
-      const real = fs.realpathSync.native(resolved);
-      return tail ? path.join(real, tail) : real;
-    } catch {
-      const parent = path.dirname(resolved);
-      if (parent === resolved) break; // reached the root
-      tail = tail ? path.join(path.basename(resolved), tail) : path.basename(resolved);
-      resolved = parent;
-    }
-  }
-  return path.resolve(p);
-}
-
 function blessDirectory(dir: string | null | undefined): void {
   if (dir && typeof dir === 'string') {
-    blessedDirs.add(realResolve(dir));
+    const real = resolveRealPath(dir);
+    // Only bless a directory we could actually canonicalize — never store a
+    // lexical fallback (that would admit a link-preserving path to the set).
+    if (real !== null) blessedDirs.add(real);
   }
 }
 function blessParentOf(filePath: string | null | undefined): void {
@@ -96,8 +81,7 @@ function blessParentOf(filePath: string | null | undefined): void {
 
 /** Strict, mode-independent membership test on the canonicalized path. */
 function isPathBlessed(targetPath: unknown): boolean {
-  if (typeof targetPath !== 'string' || targetPath.length === 0) return false;
-  return isWithinAnyDir(realResolve(targetPath), blessedDirs);
+  return isPathWithinBlessed(targetPath, blessedDirs);
 }
 
 /**
@@ -582,6 +566,9 @@ ipcMain.handle('save-file', async (_event, { data, filePath }) => {
     if (!guardPath(filePath, 'save-file')) {
       return { success: false, error: 'Path not permitted' };
     }
+    if (!isAllowedSaveTarget(filePath, 'pdf')) {
+      return { success: false, error: 'File type not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     fs.writeFileSync(filePath, buffer);
     return { success: true, path: filePath };
@@ -632,7 +619,14 @@ ipcMain.handle('open-image-dialog', async () => {
 });
 
 ipcMain.handle('get-store', (_event, key) => {
-  return store.get(key);
+  // Only UI-preference keys are renderer-readable. Main-owned keys (recentFiles,
+  // lastOpen/SaveDirectory, libreOfficePath, windowBounds) would enumerate the
+  // blessed-dir set / installed-software paths for a compromised renderer.
+  if (!isAllowedStoreRead(key)) {
+    console.warn(`[security] rejected get-store for key: ${String(key)}`);
+    return undefined;
+  }
+  return store.get(key as keyof StoreSchema);
 });
 
 ipcMain.handle('set-store', (_event, key, value) => {
@@ -660,6 +654,49 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   } catch (error) {
     return null;
   }
+});
+
+// A dropped document arrives as bytes (the renderer read them via FileReader
+// from the OS drop), never as a trusted path. Materialize those bytes into an
+// app-owned temp directory that we bless, so the existing convert-to-pdf flow
+// can run against a confined input without the renderer ever handing main an
+// arbitrary filesystem path. Blessing an untrusted renderer-supplied path here
+// would defeat confinement entirely (round-3 H-2).
+const droppedTempDirs = new Set<string>();
+ipcMain.handle('stage-dropped-document', async (_event, payload: { data?: string; fileName?: string }) => {
+  try {
+    const fileName = typeof payload?.fileName === 'string' ? payload.fileName : '';
+    const data = typeof payload?.data === 'string' ? payload.data : '';
+    // Require a bare basename (no directory parts, no ADS colon, no traversal)
+    // with a known convertible extension.
+    const base = path.basename(fileName);
+    if (!base || base !== fileName || base.includes(':') || base === '.' || base === '..') {
+      return { success: false, error: 'Invalid file name' };
+    }
+    const ext = path.extname(base).toLowerCase().replace(/^\./, '');
+    if (!CONVERTIBLE_DOC_EXTENSIONS.includes(ext)) {
+      return { success: false, error: 'Unsupported document type' };
+    }
+    const dir = fs.mkdtempSync(path.join(app.getPath('temp'), 'pdfmanager-drop-'));
+    droppedTempDirs.add(dir);
+    blessDirectory(dir);
+    const staged = path.join(dir, base);
+    fs.writeFileSync(staged, Buffer.from(data, 'base64'));
+    return { success: true, path: staged };
+  } catch (error) {
+    return { success: false, error: (error as Error).message };
+  }
+});
+
+app.on('will-quit', () => {
+  for (const dir of droppedTempDirs) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup; OS temp reaping is the backstop
+    }
+  }
+  droppedTempDirs.clear();
 });
 
 // Scan a directory recursively for PDF files
@@ -918,6 +955,10 @@ ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
     if (!guardPath(filePath, 'save-file-to-path')) {
       return { success: false, error: 'Path not permitted' };
     }
+    // Emits split PDF pages and per-page SVG exports only.
+    if (!isAllowedSaveTarget(filePath, 'pdfOrSvg')) {
+      return { success: false, error: 'File type not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     // Ensure directory exists
     const dir = path.dirname(filePath);
@@ -937,6 +978,9 @@ ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
     if (!guardPath(filePath, 'save-raw-bytes-to-path')) {
       return { success: false, error: 'Path not permitted' };
     }
+    if (!isAllowedSaveTarget(filePath, 'docx')) {
+      return { success: false, error: 'File type not permitted' };
+    }
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -955,6 +999,9 @@ ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
     if (!guardPath(filePath, 'save-image-to-path')) {
       return { success: false, error: 'Path not permitted' };
     }
+    if (!isAllowedSaveTarget(filePath, 'image')) {
+      return { success: false, error: 'File type not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
@@ -969,13 +1016,15 @@ ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
 
 ipcMain.handle('open-folder', async (_event, folderPath: string) => {
   try {
-    // shell.openPath EXECUTES a file if handed one; restrict to existing
-    // directories so this can only ever open a folder in the OS file manager.
-    if (typeof folderPath !== 'string' || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
-      return { success: false, error: 'Not a directory' };
-    }
-    if (!guardPath(folderPath, 'open-folder')) {
+    // Confinement first: running the fs.existsSync/statSync probe before the
+    // guard would leak a path existence/type oracle for arbitrary absolute
+    // paths (round-3 L-1). shell.openPath EXECUTES a file if handed one, so we
+    // also restrict to existing directories.
+    if (typeof folderPath !== 'string' || !guardPath(folderPath, 'open-folder')) {
       return { success: false, error: 'Folder not permitted' };
+    }
+    if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+      return { success: false, error: 'Not a directory' };
     }
     await shell.openPath(folderPath);
     return { success: true };

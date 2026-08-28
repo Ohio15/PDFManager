@@ -9,6 +9,7 @@ import {
   isSafeConvertInput,
   isSafeOutputDir,
   isAllowedExternalUrl,
+  isWithinAnyDir,
 } from './security';
 
 // Define config schema for type safety
@@ -46,6 +47,42 @@ const store = new Store<StoreSchema>({
 
 let mainWindow: BrowserWindow | null = null;
 let fileToOpenOnReady: string | null = null;
+
+// --- Path confinement (security review follow-up) ---------------------------
+// Renderer-supplied read/write paths are confined to directories the user has
+// chosen through a native dialog. Every dialog handler blesses the directory it
+// returns; guardPath() checks membership. Shipping in 'warn' first (log-only,
+// still allowed) because the save/convert flows can only be exercised at
+// runtime; flip to 'enforce' after the adversarial review confirms the blessed
+// set covers every flow. Override via PDFMANAGER_PATH_CONFINEMENT=enforce.
+type ConfinementMode = 'warn' | 'enforce';
+const PATH_CONFINEMENT_MODE: ConfinementMode =
+  process.env.PDFMANAGER_PATH_CONFINEMENT === 'enforce' ? 'enforce' : 'warn';
+const blessedDirs = new Set<string>();
+
+function blessDirectory(dir: string | null | undefined): void {
+  if (dir && typeof dir === 'string') {
+    blessedDirs.add(path.resolve(dir));
+  }
+}
+function blessParentOf(filePath: string | null | undefined): void {
+  if (filePath && typeof filePath === 'string') {
+    blessDirectory(path.dirname(filePath));
+  }
+}
+
+/**
+ * Returns true if the renderer-supplied path may be used. In 'warn' mode an
+ * out-of-bounds path is logged but allowed; in 'enforce' mode it is denied.
+ */
+function guardPath(targetPath: unknown, label: string): boolean {
+  const within = isWithinAnyDir(targetPath, blessedDirs);
+  if (within) return true;
+  console.warn(
+    `[security] ${label}: path outside blessed dirs (${PATH_CONFINEMENT_MODE}): ${String(targetPath)}`
+  );
+  return PATH_CONFINEMENT_MODE === 'warn';
+}
 
 // Extract PDF file path from command-line arguments
 function getFileFromArgs(args: string[]): string | null {
@@ -474,6 +511,7 @@ async function openFile(): Promise<void> {
 
   if (!result.canceled && result.filePaths.length > 0) {
     const filePath = result.filePaths[0];
+    blessParentOf(filePath);
     const fileData = fs.readFileSync(filePath);
     mainWindow?.webContents.send('file-opened', {
       path: filePath,
@@ -498,6 +536,7 @@ ipcMain.handle('open-file-dialog', async () => {
 
   if (!result.canceled && result.filePaths.length > 0) {
     const filePath = result.filePaths[0];
+    blessParentOf(filePath);
     const fileData = fs.readFileSync(filePath);
     return {
       path: filePath,
@@ -509,6 +548,9 @@ ipcMain.handle('open-file-dialog', async () => {
 
 ipcMain.handle('save-file', async (_event, { data, filePath }) => {
   try {
+    if (!guardPath(filePath, 'save-file')) {
+      return { success: false, error: 'Path not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     fs.writeFileSync(filePath, buffer);
     return { success: true, path: filePath };
@@ -525,6 +567,7 @@ ipcMain.handle('save-file-dialog', async (_event, { data, defaultPath }) => {
 
   if (!result.canceled && result.filePath) {
     try {
+      blessParentOf(result.filePath);
       const buffer = Buffer.from(data, 'base64');
       fs.writeFileSync(result.filePath, buffer);
       return { success: true, path: result.filePath };
@@ -545,6 +588,7 @@ ipcMain.handle('open-image-dialog', async () => {
 
   if (!result.canceled && result.filePaths.length > 0) {
     const filePath = result.filePaths[0];
+    blessParentOf(filePath);
     const fileData = fs.readFileSync(filePath);
     const ext = path.extname(filePath).toLowerCase().slice(1);
     return {
@@ -575,7 +619,9 @@ ipcMain.handle('set-store', (_event, key, value) => {
 
 ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   try {
+    if (!guardPath(filePath, 'read-file-by-path')) return null;
     const fileData = fs.readFileSync(filePath);
+    blessParentOf(filePath);
     return {
       path: filePath,
       data: fileData.toString('base64'),
@@ -586,15 +632,20 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
 });
 
 // Scan a directory recursively for PDF files
+const SCAN_MAX_DEPTH = 12;
+const SCAN_MAX_RESULTS = 5000;
 ipcMain.handle('scan-directory-for-pdfs', async (_event, dirPath: string) => {
+  if (!guardPath(dirPath, 'scan-directory-for-pdfs')) return [];
   const pdfs: string[] = [];
-  function walkDir(dir: string): void {
+  function walkDir(dir: string, depth: number): void {
+    if (depth > SCAN_MAX_DEPTH || pdfs.length >= SCAN_MAX_RESULTS) return;
     try {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
+        if (pdfs.length >= SCAN_MAX_RESULTS) return;
         const fullPath = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          walkDir(fullPath);
+          walkDir(fullPath, depth + 1);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) {
           pdfs.push(fullPath);
         }
@@ -603,13 +654,14 @@ ipcMain.handle('scan-directory-for-pdfs', async (_event, dirPath: string) => {
       // Skip inaccessible directories
     }
   }
-  walkDir(dirPath);
+  walkDir(dirPath, 0);
   return pdfs;
 });
 
 // Read a file as raw bytes (ArrayBuffer) for batch processing
 ipcMain.handle('read-file-raw', async (_event, filePath: string) => {
   try {
+    if (!guardPath(filePath, 'read-file-raw')) return null;
     const data = fs.readFileSync(filePath);
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   } catch {
@@ -625,6 +677,7 @@ ipcMain.handle('pick-pdf-file', async () => {
     filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
   });
   if (!result.canceled && result.filePaths.length > 0) {
+    blessParentOf(result.filePaths[0]);
     return result.filePaths[0];
   }
   return null;
@@ -758,6 +811,7 @@ ipcMain.handle('open-multiple-files-dialog', async () => {
     store.set('lastOpenDirectory', path.dirname(result.filePaths[0]));
     const files = await Promise.all(
       result.filePaths.map(async (filePath) => {
+        blessParentOf(filePath);
         const fileData = fs.readFileSync(filePath);
         return {
           path: filePath,
@@ -780,6 +834,7 @@ ipcMain.handle('select-output-directory', async () => {
 
   if (!result.canceled && result.filePaths.length > 0) {
     store.set('lastSaveDirectory', result.filePaths[0]);
+    blessDirectory(result.filePaths[0]);
     return result.filePaths[0];
   }
   return null;
@@ -798,6 +853,7 @@ ipcMain.handle('show-save-docx-dialog', async (_event, { defaultName, defaultDir
 
   if (!result.canceled && result.filePath) {
     store.set('lastSaveDirectory', path.dirname(result.filePath));
+    blessParentOf(result.filePath);
     return result.filePath;
   }
   return null;
@@ -805,6 +861,9 @@ ipcMain.handle('show-save-docx-dialog', async (_event, { defaultName, defaultDir
 
 ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
   try {
+    if (!guardPath(filePath, 'save-file-to-path')) {
+      return { success: false, error: 'Path not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     // Ensure directory exists
     const dir = path.dirname(filePath);
@@ -821,6 +880,9 @@ ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
 // Save raw binary bytes directly (bypasses base64 encoding for DOCX)
 ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
   try {
+    if (!guardPath(filePath, 'save-raw-bytes-to-path')) {
+      return { success: false, error: 'Path not permitted' };
+    }
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -836,6 +898,9 @@ ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
 
 ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
   try {
+    if (!guardPath(filePath, 'save-image-to-path')) {
+      return { success: false, error: 'Path not permitted' };
+    }
     const buffer = Buffer.from(data, 'base64');
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
@@ -854,6 +919,9 @@ ipcMain.handle('open-folder', async (_event, folderPath: string) => {
     // directories so this can only ever open a folder in the OS file manager.
     if (typeof folderPath !== 'string' || !fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
       return { success: false, error: 'Not a directory' };
+    }
+    if (!guardPath(folderPath, 'open-folder')) {
+      return { success: false, error: 'Folder not permitted' };
     }
     await shell.openPath(folderPath);
     return { success: true };
@@ -1019,6 +1087,9 @@ ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
   if (!isSafeOutputDir(outputDir)) {
     return { success: false, error: 'Invalid output directory' };
   }
+  if (!guardPath(outputDir, 'convert-to-pdf outputDir')) {
+    return { success: false, error: 'Output directory not permitted' };
+  }
 
   // libreOfficePath is main-detected only (never renderer-writable), so this is
   // a trusted binary path.
@@ -1071,6 +1142,7 @@ ipcMain.handle('open-documents-dialog', async () => {
 
   if (!result.canceled && result.filePaths.length > 0) {
     store.set('lastOpenDirectory', path.dirname(result.filePaths[0]));
+    result.filePaths.forEach(blessParentOf);
     return result.filePaths;
   }
   return null;
@@ -1080,6 +1152,7 @@ ipcMain.handle('open-documents-dialog', async () => {
 app.on('second-instance', (_event, commandLine) => {
   const filePath = getFileFromArgs(commandLine);
   if (filePath && mainWindow) {
+    blessParentOf(filePath);
     const fileData = fs.readFileSync(filePath);
     mainWindow.webContents.send('file-opened', {
       path: filePath,
@@ -1096,6 +1169,7 @@ app.on('second-instance', (_event, commandLine) => {
 // macOS: handle open-file event (file association / drag to dock)
 app.on('open-file', (event, filePath) => {
   event.preventDefault();
+  blessParentOf(filePath);
   if (mainWindow) {
     const fileData = fs.readFileSync(filePath);
     mainWindow.webContents.send('file-opened', {
@@ -1111,7 +1185,19 @@ app.on('open-file', (event, filePath) => {
 // Check for file argument passed on launch
 const launchFile = getFileFromArgs(process.argv);
 if (launchFile) {
+  blessParentOf(launchFile);
   fileToOpenOnReady = launchFile;
+}
+
+// Bless directories the user has chosen in past sessions (recent files + last
+// open/save dirs) so "open recent" and same-directory saves work under
+// enforcement without a fresh dialog.
+try {
+  (store.get('recentFiles') || []).forEach(blessParentOf);
+  blessDirectory(store.get('lastOpenDirectory'));
+  blessDirectory(store.get('lastSaveDirectory'));
+} catch {
+  // ignore store read issues at startup
 }
 
 // Auto-recovery handlers

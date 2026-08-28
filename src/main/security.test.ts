@@ -4,7 +4,9 @@ import {
   isSafeConvertInput,
   isSafeOutputDir,
   isAllowedExternalUrl,
+  isWithinAnyDir,
 } from './security';
+import * as path from 'path';
 
 describe('isAllowedStoreWrite', () => {
   it('accepts whitelisted keys with correct types', () => {
@@ -78,5 +80,36 @@ describe('isAllowedExternalUrl', () => {
     expect(isAllowedExternalUrl('vscode://x')).toBe(false);
     expect(isAllowedExternalUrl('not a url')).toBe(false);
     expect(isAllowedExternalUrl(42 as unknown)).toBe(false);
+  });
+});
+
+describe('isWithinAnyDir', () => {
+  const A = path.resolve('/blessed/out');
+  const B = path.resolve('/home/user/docs');
+  const dirs = [A, B];
+  it('accepts the dir itself and its subtree', () => {
+    expect(isWithinAnyDir(A, dirs)).toBe(true);
+    expect(isWithinAnyDir(path.join(A, 'file.pdf'), dirs)).toBe(true);
+    expect(isWithinAnyDir(path.join(A, 'sub', 'deep', 'x.docx'), dirs)).toBe(true);
+    expect(isWithinAnyDir(path.join(B, 'a.png'), dirs)).toBe(true);
+  });
+  it('rejects paths outside every blessed dir', () => {
+    expect(isWithinAnyDir(path.resolve('/etc/passwd'), dirs)).toBe(false);
+    expect(isWithinAnyDir(path.resolve('/blessed/other/x'), dirs)).toBe(false);
+  });
+  it('rejects .. escapes and sibling-prefix confusion', () => {
+    expect(isWithinAnyDir(path.join(A, '..', 'evil.exe'), dirs)).toBe(false);
+    // /blessed/out-side must NOT match /blessed/out
+    expect(isWithinAnyDir(path.resolve('/blessed/out-side/x'), dirs)).toBe(false);
+  });
+  it('rejects relative, empty, and non-string targets', () => {
+    expect(isWithinAnyDir('relative/x', dirs)).toBe(false);
+    expect(isWithinAnyDir('', dirs)).toBe(false);
+    expect(isWithinAnyDir(null as unknown, dirs)).toBe(false);
+  });
+  it('is case-insensitive on win32/darwin', () => {
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      expect(isWithinAnyDir(path.join(A.toUpperCase(), 'x.pdf'), dirs)).toBe(true);
+    }
   });
 });

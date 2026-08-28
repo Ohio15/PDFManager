@@ -78,3 +78,28 @@ export function isAllowedExternalUrl(url: unknown): url is string {
   }
   return ALLOWED_EXTERNAL_SCHEMES.includes(parsed.protocol);
 }
+
+/** Case-fold a resolved path for comparison (Windows/macOS paths are case-insensitive). */
+function foldCase(p: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? p.toLowerCase() : p;
+}
+
+/**
+ * True if `targetPath` is inside (or equal to) any directory in `dirs`.
+ * Used to confine renderer-supplied write/read paths to directories the user
+ * has chosen through a native dialog. Comparison is done on resolved,
+ * case-folded paths and rejects `..` escapes.
+ */
+export function isWithinAnyDir(targetPath: unknown, dirs: Iterable<string>): boolean {
+  if (typeof targetPath !== 'string' || targetPath.length === 0) return false;
+  if (!path.isAbsolute(targetPath)) return false;
+  const target = foldCase(path.resolve(targetPath));
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const base = foldCase(path.resolve(dir));
+    if (target === base) return true;
+    const rel = path.relative(base, target);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+  }
+  return false;
+}

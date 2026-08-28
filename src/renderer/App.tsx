@@ -578,22 +578,20 @@ const App: React.FC = () => {
           }
         }
       } else if (isConvertibleToPdf(fileName)) {
-        // LibreOffice needs a real file: hand the bytes to main, which writes
-        // them into an app-owned (blessed) temp dir and returns that path.
-        const base64 = await readAsBase64(file);
-        const staged = await window.electronAPI.stageDroppedDocument(base64, fileName);
-        if (staged?.success && staged.path) {
-          stageDocument(staged.path);
-        } else {
-          toast.error(staged?.error || 'Could not open dropped document');
-        }
+        // Converting a document runs LibreOffice against a real on-disk path.
+        // A drop gives us only bytes (its filesystem location is untrusted and
+        // unblessed), so direct the user through File -> Open, which blesses the
+        // chosen directory and then converts. (Materializing dropped bytes into
+        // a temp dir was removed — it caused converted edits to be reaped on
+        // quit and handed the renderer an arbitrary-format LibreOffice input.)
+        toast.info(`Use File → Open to convert "${fileName}" to PDF`);
       } else {
         toast.error('Unsupported file type');
       }
     } catch {
       toast.error('Failed to read dropped file');
     }
-  }, [openFile, stageDocument, toast, handlePasswordError]);
+  }, [openFile, toast, handlePasswordError]);
 
   // What's currently open drives the contextual tools panel and main view.
   // Staged (non-PDF) documents take priority over an open PDF.
@@ -608,8 +606,20 @@ const App: React.FC = () => {
   const handleSave = useCallback(async () => {
     try {
       if (document?.filePath) {
-        await saveFile();
-        toast.success('Document saved successfully');
+        try {
+          await saveFile();
+          toast.success('Document saved successfully');
+        } catch (error: any) {
+          // A document opened by drag-and-drop has a real but unblessed path, so
+          // an in-place save is denied by path confinement. Fall back to Save As
+          // (its dialog blesses the chosen directory) instead of just failing.
+          if (typeof error?.message === 'string' && error.message.includes('not permitted')) {
+            // dropped file: no blessed path, save via dialog
+            if (await saveFileAs()) toast.success('Document saved successfully');
+          } else {
+            throw error;
+          }
+        }
       } else {
         const result = await saveFileAs();
         if (result) {
@@ -816,7 +826,8 @@ const App: React.FC = () => {
         const base64 = uint8ArrayToBase64(pdfBytes);
         const filePath = `${outputDir}/${baseName}_page_${i + 1}.pdf`;
 
-        await window.electronAPI.saveFileToPath(base64, filePath);
+        const saved = await window.electronAPI.saveFileToPath(base64, filePath);
+        if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
       }
 
       toast.success(`Split into ${sourcePdf.getPageCount()} files`);
@@ -927,7 +938,8 @@ const App: React.FC = () => {
       const base64Data = dataUrl.split(',')[1];
 
       const filePath = `${outputDir}/${baseName}_page_${pageNum}.${format}`;
-      await window.electronAPI.saveImageToPath(base64Data, filePath);
+      const saved = await window.electronAPI.saveImageToPath(base64Data, filePath);
+      if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
       convertedCount++;
     }
 
@@ -958,10 +970,11 @@ const App: React.FC = () => {
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
 
     // Send raw bytes directly via IPC (no base64 encoding/decoding)
-    await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
+    const saved = await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
       result.data.byteOffset,
       result.data.byteOffset + result.data.byteLength
     ), outputPath);
+    if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
 
     toast.success(`Converted ${result.pageCount} pages to Word document`);
     return { count: result.pageCount, folder };
@@ -1000,10 +1013,11 @@ const App: React.FC = () => {
         const baseName = document.fileName.replace(/\.pdf$/i, '');
         const svgPath = `${outputDir}/${baseName}_page_${i + 1}.svg`;
 
-        await window.electronAPI.saveFileToPath(
+        const saved = await window.electronAPI.saveFileToPath(
           btoa(new TextEncoder().encode(svgContent).reduce((data, byte) => data + String.fromCharCode(byte), '')),
           svgPath
         );
+        if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
 
         page.cleanup();
       }

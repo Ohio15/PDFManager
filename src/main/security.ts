@@ -186,6 +186,13 @@ export function isWithinAnyDir(targetPath: unknown, dirs: Iterable<string>): boo
 export function resolveRealPath(p: unknown): string | null {
   if (typeof p !== 'string' || p.length === 0) return null;
   let resolved = path.resolve(p);
+  // Reject UNC (\\host\share) and device paths BEFORE any syscall: realpath on a
+  // UNC path makes the SMB redirector connect out and negotiate NTLM with the
+  // logged-on user's credentials (hash exfil / relay) and, being synchronous,
+  // can stall the whole main process on an unresponsive host. Confinement itself
+  // would deny the path anyway, but the canonicalization side effect must never
+  // fire (round-4 H4-1).
+  if (isUncOrDevicePath(resolved)) return null;
   let tail = '';
   for (;;) {
     try {

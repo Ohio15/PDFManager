@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   isAllowedStoreWrite,
   isAllowedStoreRead,
@@ -228,13 +228,47 @@ describe('resolveRealPath / isPathWithinBlessed (round-3 H-1/M-1 — fail closed
   });
 
   it('denies escape through a junction/symlink in the tail (H-1)', () => {
-    if (!linkSupported) return; // environment without reparse-point support
+    // Fail LOUD, never silently green: if the runner cannot create a reparse
+    // point the H-1 guarantee is UNexamined, not clean (round-4 H4-9). Both CI
+    // legs (ubuntu symlink, windows junction) support this unelevated.
+    expect(linkSupported).toBe(true);
     // Real target of `blessed/link` is `outside` — must be denied even though it
     // is lexically under `blessed`.
     expect(isPathWithinBlessed(path.join(linkInside, 'x.pdf'), [blessedReal])).toBe(false);
     // And denies it no matter how deep the non-existent tail is (no cap fallthrough).
     const deepEscape = path.join(linkInside, ...Array.from({ length: 80 }, (_, i) => `z${i}`), 'x.pdf');
     expect(isPathWithinBlessed(deepEscape, [blessedReal])).toBe(false);
+  });
+
+  it('fails closed on a non-ENOENT realpath error (EACCES/ELOOP/ENAMETOOLONG — round-4 H4-10)', () => {
+    // The other half of the H-1 fix: any realpath error that is not "missing"
+    // must return null (deny), never fall back to the lexical path.
+    const spy = vi.spyOn(fs.realpathSync, 'native').mockImplementation(() => {
+      const err = new Error('permission denied') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
+    });
+    try {
+      expect(resolveRealPath(path.join(blessed, 'x.pdf'))).toBeNull();
+      expect(isPathWithinBlessed(path.join(blessed, 'x.pdf'), [blessedReal])).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rejects UNC and device paths before any syscall (round-4 H4-1)', () => {
+    // A realpath on a UNC path triggers an outbound SMB/NTLM negotiation, so the
+    // canonicalization side effect must never fire — resolveRealPath denies it
+    // up front. The forward-slash form is caught on any platform.
+    const spy = vi.spyOn(fs.realpathSync, 'native');
+    expect(resolveRealPath('//attacker/share/x')).toBeNull();
+    if (isWin) {
+      expect(resolveRealPath('\\\\attacker\\share\\x')).toBeNull();
+      expect(resolveRealPath('\\\\?\\C:\\x')).toBeNull();
+      expect(resolveRealPath('\\\\.\\pipe\\x')).toBeNull();
+    }
+    expect(spy).not.toHaveBeenCalled(); // denied without touching the filesystem
+    spy.mockRestore();
   });
 
   it('fails closed on an empty blessed set', () => {

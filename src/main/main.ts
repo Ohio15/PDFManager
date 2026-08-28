@@ -13,7 +13,6 @@ import {
   isAllowedSaveTarget,
   resolveRealPath,
   isPathWithinBlessed,
-  CONVERTIBLE_DOC_EXTENSIONS,
 } from './security';
 
 // Define config schema for type safety
@@ -656,49 +655,6 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   }
 });
 
-// A dropped document arrives as bytes (the renderer read them via FileReader
-// from the OS drop), never as a trusted path. Materialize those bytes into an
-// app-owned temp directory that we bless, so the existing convert-to-pdf flow
-// can run against a confined input without the renderer ever handing main an
-// arbitrary filesystem path. Blessing an untrusted renderer-supplied path here
-// would defeat confinement entirely (round-3 H-2).
-const droppedTempDirs = new Set<string>();
-ipcMain.handle('stage-dropped-document', async (_event, payload: { data?: string; fileName?: string }) => {
-  try {
-    const fileName = typeof payload?.fileName === 'string' ? payload.fileName : '';
-    const data = typeof payload?.data === 'string' ? payload.data : '';
-    // Require a bare basename (no directory parts, no ADS colon, no traversal)
-    // with a known convertible extension.
-    const base = path.basename(fileName);
-    if (!base || base !== fileName || base.includes(':') || base === '.' || base === '..') {
-      return { success: false, error: 'Invalid file name' };
-    }
-    const ext = path.extname(base).toLowerCase().replace(/^\./, '');
-    if (!CONVERTIBLE_DOC_EXTENSIONS.includes(ext)) {
-      return { success: false, error: 'Unsupported document type' };
-    }
-    const dir = fs.mkdtempSync(path.join(app.getPath('temp'), 'pdfmanager-drop-'));
-    droppedTempDirs.add(dir);
-    blessDirectory(dir);
-    const staged = path.join(dir, base);
-    fs.writeFileSync(staged, Buffer.from(data, 'base64'));
-    return { success: true, path: staged };
-  } catch (error) {
-    return { success: false, error: (error as Error).message };
-  }
-});
-
-app.on('will-quit', () => {
-  for (const dir of droppedTempDirs) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup; OS temp reaping is the backstop
-    }
-  }
-  droppedTempDirs.clear();
-});
-
 // Scan a directory recursively for PDF files
 const SCAN_MAX_DEPTH = 12;
 const SCAN_MAX_RESULTS = 5000;
@@ -936,16 +892,22 @@ ipcMain.handle('show-save-docx-dialog', async (_event, { defaultName, defaultDir
   const result = await dialog.showSaveDialog(mainWindow!, {
     defaultPath: lastDir ? path.join(lastDir, defaultName) : defaultName,
     title: 'Save Word Document',
-    filters: [
-      { name: 'Word Document', extensions: ['docx'] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
+    // Only .docx — an "All Files" option would let the user pick an
+    // extensionless/other name that the save-raw-bytes-to-path extension guard
+    // then rejects, surfacing as a confusing failure (round-4 H4-7).
+    filters: [{ name: 'Word Document', extensions: ['docx'] }],
   });
 
   if (!result.canceled && result.filePath) {
-    store.set('lastSaveDirectory', path.dirname(result.filePath));
-    blessParentOf(result.filePath);
-    return result.filePath;
+    // The save dialog appends .docx from the filter, but a user can still type a
+    // different extension; normalize so the downstream extension guard passes.
+    let filePath = result.filePath;
+    if (path.extname(filePath).toLowerCase() !== '.docx') {
+      filePath = `${filePath}.docx`;
+    }
+    store.set('lastSaveDirectory', path.dirname(filePath));
+    blessParentOf(filePath);
+    return filePath;
   }
   return null;
 });

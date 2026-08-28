@@ -660,8 +660,10 @@ export function usePDFDocument() {
     }
   }, [document, formFieldMappings, applyOutputEncryption]);
 
-  const saveFileAs = useCallback(async () => {
-    if (!document) return;
+  // Returns true only when the file was actually written (false on dialog
+  // cancel), so callers can toast accurately instead of testing a void return.
+  const saveFileAs = useCallback(async (): Promise<boolean> => {
+    if (!document) return false;
 
     setLoading(true);
     try {
@@ -686,7 +688,9 @@ export function usePDFDocument() {
           pendingEncryption: undefined,
         } : null);
         setModified(false);
+        return true;
       }
+      return false;
     } catch (error) {
       console.error('Failed to save PDF:', error);
       throw error;

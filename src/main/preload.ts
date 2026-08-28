@@ -80,8 +80,6 @@ const electronAPI: ElectronAPI = {
   openDocumentsDialog: () => ipcRenderer.invoke('open-documents-dialog'),
   convertToPdf: (inputPath: string, outputDir: string) =>
     ipcRenderer.invoke('convert-to-pdf', { inputPath, outputDir }),
-  stageDroppedDocument: (data: string, fileName: string) =>
-    ipcRenderer.invoke('stage-dropped-document', { data, fileName }),
   getPrinters: () => ipcRenderer.invoke('get-printers'),
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) =>
     ipcRenderer.invoke('print-pdf', options),

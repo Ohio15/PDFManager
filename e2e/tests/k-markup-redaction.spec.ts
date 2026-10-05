@@ -1,23 +1,30 @@
 import { test, expect } from '../fixtures/electron-app';
 import { openPDFViaIPC, selectTool, drawRect } from '../fixtures/helpers';
-import type { Page } from '@playwright/test';
+import type { ElectronApplication, Page } from '@playwright/test';
 import { PDFArray, PDFDict, PDFDocument as PDFLib, PDFName, PDFNumber, PDFRawStream, PDFStream, decodePDFRawStream } from 'pdf-lib';
 
-/** Intercept saving and return the bytes the app writes. */
-async function saveAndCapture(page: Page): Promise<Uint8Array> {
-  await page.evaluate(() => {
-    const api = (window as any).electronAPI;
-    (window as any).__saved = null;
-    const interceptor = (data: string) => {
-      (window as any).__saved = data;
-      return Promise.resolve({ success: true, path: '/fake/saved.pdf' });
+/**
+ * Capture the bytes the app saves. window.electronAPI is frozen by
+ * contextBridge, so interception happens in the MAIN process: the save IPC
+ * handlers are swapped for ones that record the payload and touch no file.
+ */
+async function saveAndCapture(app: ElectronApplication, page: Page): Promise<Uint8Array> {
+  await app.evaluate(({ ipcMain }) => {
+    (globalThis as any).__savedPdf = null;
+    const capture = async (_e: unknown, args: { data: string }) => {
+      (globalThis as any).__savedPdf = args.data;
+      return { success: true, path: 'C:/fake/saved.pdf' };
     };
-    api.saveFile = interceptor;
-    api.saveFileDialog = interceptor;
+    ipcMain.removeHandler('save-file');
+    ipcMain.removeHandler('save-file-dialog');
+    ipcMain.handle('save-file', capture);
+    ipcMain.handle('save-file-dialog', capture);
   });
   await page.keyboard.press('Control+s');
-  await page.waitForFunction(() => (window as any).__saved !== null, undefined, { timeout: 30_000 });
-  const b64: string = await page.evaluate(() => (window as any).__saved);
+  await expect
+    .poll(async () => app.evaluate(() => (globalThis as any).__savedPdf !== null), { timeout: 60_000 })
+    .toBe(true);
+  const b64: string = await app.evaluate(() => (globalThis as any).__savedPdf);
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
 
@@ -66,17 +73,27 @@ test.describe('Text markup and true redaction', () => {
 
     await expect(appPage.locator('[data-testid="text-markup"][data-markup-type="strikeout"]')).toHaveCount(1);
 
-    const bytes = await saveAndCapture(appPage);
+    const bytes = await saveAndCapture(electronApp, appPage);
     const lib = await PDFLib.load(bytes);
     const annots = lib.getPage(0).node.lookup(PDFName.of('Annots'), PDFArray);
     const strike = annots.asArray().map((r) => lib.context.lookup(r) as PDFDict).find((d) => (d.get(PDFName.of('Subtype')) as PDFName).decodeText() === 'StrikeOut');
     expect(strike).toBeTruthy();
     const qp = (strike!.get(PDFName.of('QuadPoints')) as PDFArray).asArray().map((n) => (n as PDFNumber).asNumber());
     expect(qp.length % 8).toBe(0);
-    // The quad sits on the "Board of Trustees" line (pdf.js: baseline y ≈ 726 on page 1).
+    // The quads must cover the selected text as an independent reader places it.
+    const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false }).promise;
+    const items = (await (await doc.getPage(1)).getTextContent()).items as Array<{ str: string; transform: number[]; width: number; height: number }>;
+    await doc.destroy();
+    const item = items.find((i) => i.str.includes('Board of Trustees'))!;
+    expect(item).toBeTruthy();
     const ys = qp.filter((_, i) => i % 2 === 1);
-    expect(Math.min(...ys)).toBeLessThan(735);
-    expect(Math.max(...ys)).toBeGreaterThan(715);
+    const xs = qp.filter((_, i) => i % 2 === 0);
+    const baseline = item.transform[5];
+    expect(Math.min(...ys)).toBeLessThanOrEqual(baseline + 1);
+    expect(Math.max(...ys)).toBeGreaterThanOrEqual(baseline + item.height * 0.5);
+    expect(Math.min(...xs)).toBeLessThan(item.transform[4] + item.width);
+    expect(Math.max(...xs)).toBeGreaterThan(item.transform[4]);
     expect(strike!.lookup(PDFName.of('AP'), PDFDict).lookup(PDFName.of('N'))).toBeInstanceOf(PDFStream);
   });
 
@@ -96,7 +113,7 @@ test.describe('Text markup and true redaction', () => {
     await appPage.click('.redaction-dialog-actions >> text=Done');
     await expect(appPage.locator('[data-testid="redaction-mark"]')).toHaveCount(0);
 
-    const bytes = await saveAndCapture(appPage);
+    const bytes = await saveAndCapture(electronApp, appPage);
     const text = squash(await extractText(bytes));
     expect(text).not.toContain('testpage');
     expect(text).toContain('images'); // the part of the line right of the mark survives
@@ -115,7 +132,7 @@ test.describe('Text markup and true redaction', () => {
     await expect(appPage.locator('[data-testid="redaction-report"]')).toBeVisible({ timeout: 60_000 });
     await appPage.click('.redaction-dialog-actions >> text=Done');
 
-    const bytes = await saveAndCapture(appPage);
+    const bytes = await saveAndCapture(electronApp, appPage);
     const text = squash(await extractText(bytes));
     expect(text).not.toContain('softball');
     expect(text).toContain(squash('Valley Youth League'));

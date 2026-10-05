@@ -48,6 +48,7 @@ import {
 } from './annotationContentStreamWriter';
 import { ResourceAllocator } from './pdfResourceManager';
 import { appendContentStream } from './contentStreamInjector';
+import { visiblePageBox, PdfBox } from './pageStructure';
 import {
   mapToStandardFontName,
   measureTextWidth,
@@ -82,15 +83,20 @@ export async function applyEditsAndAnnotations(
   for (const page of pages) {
     const pdfPage = pdfDoc.getPage(page.index);
     const { height, width } = pdfPage.getSize();
+    // Model coordinates (annotations, text-item x/y) are measured from the
+    // top-left of the VISIBLE box (CropBox ∩ MediaBox) that pdf.js renders,
+    // not from the MediaBox origin. For an uncropped page at the origin the
+    // two coincide; for a cropped page every write must be offset by it.
+    const visible = visiblePageBox(pdfPage);
 
     // --- (a) Blank deleted text items ---
-    await processDeletedTextItems(pdfDoc, resources, page, height);
+    await processDeletedTextItems(pdfDoc, resources, page, visible);
 
     // --- (b) Apply text edits (Issue #10: two-pass) ---
-    await processTextEdits(pdfDoc, resources, page, height, width);
+    await processTextEdits(pdfDoc, resources, page, height, width, visible);
 
     // --- (c) Convert all annotations to content stream (batched) ---
-    await processAnnotations(pdfDoc, resources, page, height, helvetica, helveticaRef);
+    await processAnnotations(pdfDoc, resources, page, visible.height, helvetica, helveticaRef, visible);
   }
 
   // --- (d) Validate required fields and save form field values ---
@@ -132,9 +138,10 @@ async function processDeletedTextItems(
   pdfDoc: PDFLib,
   resources: ResourceAllocator,
   page: PDFPage,
-  pageHeight: number
+  visible: PdfBox
 ): Promise<void> {
   const deletedItems = page.textItems?.filter(t => t.isDeleted) || [];
+  const visibleTop = visible.y + visible.height;
   if (deletedItems.length === 0) return;
 
   const builder = new ContentStreamBuilder();
@@ -147,7 +154,7 @@ async function processDeletedTextItems(
     const descentBelow = getDescentBelow(stdFont, deletedItem.fontSize);
     const baselineY = deletedItem.transform
       ? deletedItem.transform[5]
-      : (pageHeight - deletedItem.y - textHeight);
+      : (visibleTop - deletedItem.y - textHeight);
     const bgColor = deletedItem.backgroundColor || { r: 1, g: 1, b: 1 };
 
     builder.saveState();
@@ -156,7 +163,7 @@ async function processDeletedTextItems(
       values: [bgColor.r, bgColor.g, bgColor.b],
     });
     builder.rectangle(
-      deletedItem.x - 1,
+      visible.x + deletedItem.x - 1,
       baselineY - descentBelow,
       deletedItem.width + 2,
       textHeight
@@ -182,9 +189,11 @@ async function processTextEdits(
   resources: ResourceAllocator,
   page: PDFPage,
   pageHeight: number,
-  pageWidth: number
+  pageWidth: number,
+  visible: PdfBox
 ): Promise<void> {
   if (!page.textEdits || page.textEdits.length === 0) return;
+  const visibleTop = visible.y + visible.height;
 
   // Pass 1: Try content stream replacement for ALL edits first
   const failedEdits: typeof page.textEdits = [];
@@ -237,7 +246,9 @@ async function processTextEdits(
     const descentBelow = getDescentBelow(stdFontEnum, textItem.fontSize);
     const baselineY = textItem.transform
       ? textItem.transform[5]
-      : (pageHeight - textItem.y - textHeight);
+      : (visibleTop - textItem.y - textHeight);
+    // textItem.x is relative to the visible box; content-stream x is absolute.
+    const absX = visible.x + textItem.x;
 
     // Cover rectangle with correct metrics
     const bgColor = textItem.backgroundColor || { r: 1, g: 1, b: 1 };
@@ -268,7 +279,7 @@ async function processTextEdits(
       );
     } else {
       builder.rectangle(
-        textItem.x - 1,
+        absX - 1,
         baselineY - descentBelow,
         textItem.width + 2,
         textHeight
@@ -313,11 +324,11 @@ async function processTextEdits(
         b: t[1] / textItem.fontSize,
         c: t[2] / textItem.fontSize,
         d: t[3] / textItem.fontSize,
-        e: textItem.x,
+        e: absX,
         f: t[5],
       });
     } else {
-      builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: textItem.x, f: baselineY });
+      builder.setTextMatrix({ a: 1, b: 0, c: 0, d: 1, e: absX, f: baselineY });
     }
 
     // Issue #6: Calculate character spacing to match original width
@@ -415,7 +426,8 @@ async function processAnnotations(
   page: PDFPage,
   pageHeight: number,
   helvetica: PDFFont,
-  helveticaRef: PDFRef
+  helveticaRef: PDFRef,
+  visible: PdfBox
 ): Promise<void> {
   if (page.annotations.length === 0) return;
 
@@ -453,6 +465,13 @@ async function processAnnotations(
     }
   }
 
+  // The writers emit coordinates relative to the visible box's bottom-left
+  // (pageHeight is the visible height); translate them into user space.
+  if (batchedChunks.length > 0 && (visible.x !== 0 || visible.y !== 0)) {
+    const fmt = (n: number) => String(Number(n.toFixed(4)));
+    batchedChunks.unshift(new TextEncoder().encode(`1 0 0 1 ${fmt(visible.x)} ${fmt(visible.y)} cm`));
+  }
+
   if (batchedChunks.length > 0) {
     const totalLength = batchedChunks.reduce((sum, chunk) => sum + chunk.length + 1, 0);
     const merged = new Uint8Array(totalLength);
@@ -467,7 +486,10 @@ async function processAnnotations(
   }
 
   for (const note of pendingStickyNotes) {
-    addPdfTextAnnotation(pdfDoc, page.index, note);
+    addPdfTextAnnotation(pdfDoc, page.index, {
+      ...note,
+      rect: { ...note.rect, x: note.rect.x + visible.x, y: note.rect.y + visible.y },
+    });
   }
 }
 

@@ -26,6 +26,10 @@ import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
+import CropPagesDialog from './components/CropPagesDialog';
+import { usePageSelection } from './hooks/usePageSelection';
+import { formatPageRange } from './utils/pageSelectionModel';
+import type { CropMargins } from './utils/pageStructure';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
@@ -121,7 +125,6 @@ const App: React.FC = () => {
     replacePage,
     deletePage,
     reorderPages,
-    rotatePage,
     undo,
     redo,
     canUndo,
@@ -140,7 +143,18 @@ const App: React.FC = () => {
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Page tools
+    deletePages,
+    duplicatePages,
+    movePages,
+    rotatePages,
+    cropPages,
+    insertPdfPagesAt,
   } = usePDFDocument();
+
+  // Thumbnail multi-selection (0-based); page tools act on pageSelection.effective.
+  const pageSelection = usePageSelection(document, activeTabId, currentPage, setCurrentPage);
+  const [cropDialogPages, setCropDialogPages] = useState<number[] | null>(null);
 
   // Refresh the recent files list
   const refreshRecentFiles = useCallback(async () => {
@@ -717,22 +731,33 @@ const App: React.FC = () => {
     }
   }, [document, currentPage, addImage]);
 
+  /** Run a page tool, surfacing failures (encrypted source, concurrent edit, ...) as a toast. */
+  const runPageTool = useCallback(async <T,>(label: string, op: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await op();
+    } catch (error) {
+      console.error(`${label} failed:`, error);
+      toast.error(`${label} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return undefined;
+    }
+  }, [toast]);
+
+  // Toolbar/menu rotate acts on the thumbnail selection (or the current page).
   const handleRotatePage = useCallback(
     (clockwise: boolean) => {
-      if (document) {
-        rotatePage(currentPage, clockwise ? 90 : -90);
-      }
+      if (!document) return;
+      void runPageTool('Rotate', () => rotatePages(pageSelection.effective, clockwise ? 90 : -90));
     },
-    [document, currentPage, rotatePage]
+    [document, runPageTool, rotatePages, pageSelection.effective]
   );
 
-  const handleRotateAllPages = useCallback(() => {
+  // One structural op and one undo step (looping rotatePage queued N ops and N history entries).
+  const handleRotateAllPages = useCallback(async () => {
     if (!document) return;
-    for (let i = 1; i <= document.pageCount; i++) {
-      rotatePage(i, 90);
-    }
-    toast.success('All pages rotated');
-  }, [document, rotatePage, toast]);
+    const all = document.pages.map((_, i) => i);
+    const done = await runPageTool('Rotate all pages', () => rotatePages(all, 90));
+    if (done) toast.success('All pages rotated');
+  }, [document, runPageTool, rotatePages, toast]);
 
   const handleReplacePage = useCallback(async (pageIndex: number) => {
     if (!document) return;
@@ -881,6 +906,62 @@ const App: React.FC = () => {
       throw new Error(`Failed to extract pages: ${(error as Error).message}`);
     }
   }, [document, toast]);
+
+  // ---- Page tools (sidebar selection, context menu, tools panel) ----
+  const handleDeletePages = useCallback(async (indices: number[]) => {
+    if (!document) return;
+    if (indices.length >= document.pages.length) {
+      toast.error('A document must keep at least one page');
+      return;
+    }
+    const focus = await runPageTool('Delete pages', () => deletePages(indices));
+    if (focus) pageSelection.select(focus);
+  }, [document, runPageTool, deletePages, pageSelection, toast]);
+
+  const handleDuplicatePages = useCallback(async (indices: number[]) => {
+    const copies = await runPageTool('Duplicate pages', () => duplicatePages(indices));
+    if (copies && copies.length > 0) {
+      pageSelection.select(copies);
+      toast.success(`Duplicated ${copies.length} page${copies.length === 1 ? '' : 's'}`);
+    }
+  }, [runPageTool, duplicatePages, pageSelection, toast]);
+
+  const handleMovePages = useCallback(async (indices: number[], beforeIndex: number) => {
+    const moved = await runPageTool('Move pages', () => movePages(indices, beforeIndex));
+    if (moved && moved.length > 0) pageSelection.select(moved);
+  }, [runPageTool, movePages, pageSelection]);
+
+  const handleRotatePages = useCallback((indices: number[], delta: number) => {
+    void runPageTool('Rotate', () => rotatePages(indices, delta));
+  }, [runPageTool, rotatePages]);
+
+  // Reuses the Extract Pages flow (same copy, re-encryption and save dialog).
+  const handleExtractSelectedPages = useCallback((indices: number[]) => {
+    if (indices.length === 0) return;
+    void runPageTool('Extract pages', () => handleExtractPages(formatPageRange(indices)));
+  }, [runPageTool, handleExtractPages]);
+
+  const handleCropPages = useCallback(async (indices: number[], margins: CropMargins | null) => {
+    // Errors propagate to the dialog, which shows them inline.
+    await cropPages(indices, margins);
+    toast.success(margins ? `Cropped ${indices.length} page${indices.length === 1 ? '' : 's'}` : 'Crop removed');
+  }, [cropPages, toast]);
+
+  /** Pick a PDF and insert all of its pages into gap `beforeIndex` (0..pageCount). */
+  const handleInsertPdfAt = useCallback(async (beforeIndex: number) => {
+    if (!document) return;
+    await runPageTool('Insert pages', async () => {
+      const picked = await window.electronAPI.pickPdfFile();
+      if (!picked) return;
+      const raw = await window.electronAPI.readFileRaw(picked);
+      if (!raw) throw new Error('Could not read the selected file');
+      const inserted = await insertPdfPagesAt(beforeIndex, new Uint8Array(raw));
+      if (inserted.length > 0) {
+        pageSelection.select(inserted);
+        toast.success(`Inserted ${inserted.length} page${inserted.length === 1 ? '' : 's'}`);
+      }
+    });
+  }, [document, runPageTool, insertPdfPagesAt, pageSelection, toast]);
 
   // Extract images handler
   const handleExtractImages = useCallback(async (outputDir: string): Promise<{ count: number; folder: string }> => {
@@ -1337,7 +1418,7 @@ const App: React.FC = () => {
         onRotateCW={() => handleRotatePage(true)}
         onRotateCCW={() => handleRotatePage(false)}
         onDeleteSelected={handleDeleteSelected}
-        onDeletePage={() => document && deletePage(currentPage)}
+        onDeletePage={() => document && handleDeletePages(pageSelection.effective)}
         onToggleSidebar={() => setSidebarVisible(prev => !prev)}
         sidebarVisible={sidebarVisible}
         pageCount={document?.pageCount}
@@ -1378,6 +1459,16 @@ const App: React.FC = () => {
           currentPage={currentPage}
           onPageSelect={setCurrentPage}
           onReorderPages={reorderPages}
+          selectedPages={pageSelection.selected}
+          onPageClick={pageSelection.click}
+          onSelectAll={pageSelection.selectAll}
+          onMovePages={handleMovePages}
+          onRotatePages={handleRotatePages}
+          onDuplicatePages={handleDuplicatePages}
+          onDeletePages={handleDeletePages}
+          onExtractPages={handleExtractSelectedPages}
+          onCropPages={(indices) => setCropDialogPages(indices)}
+          onInsertPdfAt={handleInsertPdfAt}
           onDeleteAnnotation={deleteAnnotation}
           onSelectAnnotation={(id) => setSelectedAnnotationId(id)}
           onInsertBlankPage={insertBlankPage}
@@ -1461,6 +1552,9 @@ const App: React.FC = () => {
           onExtractPages={() => setExtractPagesDialogOpen(true)}
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
+          onDuplicatePages={() => handleDuplicatePages(pageSelection.effective)}
+          onCropPages={() => setCropDialogPages(pageSelection.effective)}
+          onInsertPdfPages={() => handleInsertPdfAt((pageSelection.effective[pageSelection.effective.length - 1] ?? -1) + 1)}
           onConvertToPdf={() => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); }}
           onConvertStagedToPdf={handleConvertStagedToPdf}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
@@ -1493,6 +1587,15 @@ const App: React.FC = () => {
       <ToastContainer toasts={toast.toasts} onDismiss={toast.dismissToast} />
 
       {/* Dialogs */}
+      {document && cropDialogPages && (
+        <CropPagesDialog
+          isOpen
+          onClose={() => setCropDialogPages(null)}
+          document={document}
+          initialPages={cropDialogPages}
+          onApply={handleCropPages}
+        />
+      )}
       <MergePdfsDialog
         isOpen={mergeDialogOpen}
         onClose={() => setMergeDialogOpen(false)}

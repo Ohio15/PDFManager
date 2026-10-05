@@ -13,6 +13,9 @@ import {
   ExternalLink,
   AlertCircle,
   FileType2,
+  Copy,
+  Crop,
+  FileInput,
 } from 'lucide-react';
 
 export type ToolsDocType = 'pdf' | 'staged' | 'none';
@@ -29,6 +32,10 @@ interface ToolsPanelProps {
   onExtractPages: () => void;
   onExtractImages: () => void;
   onRotateAll: () => void;
+  /** Page tools; act on the sidebar selection (or current page). Optional so older callers compile. */
+  onDuplicatePages?: () => void;
+  onCropPages?: () => void;
+  onInsertPdfPages?: () => void;
   onConvertToPdf: () => void;
   onConvertStagedToPdf: () => void;
   onConvertFromPdf: () => void;
@@ -56,6 +63,9 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onExtractPages,
   onExtractImages,
   onRotateAll,
+  onDuplicatePages,
+  onCropPages,
+  onInsertPdfPages,
   onConvertToPdf,
   onConvertStagedToPdf,
   onConvertFromPdf,
@@ -90,6 +100,11 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'rotate', label: 'Rotate All Pages', icon: <RotateCw size={18} />, onClick: onRotateAll, description: 'Rotate all pages 90°' },
       ],
     });
+    const pageTools: ToolDef[] = [];
+    if (onDuplicatePages) pageTools.push({ id: 'duplicate-pages', label: 'Duplicate Pages', icon: <Copy size={18} />, onClick: onDuplicatePages, description: 'Duplicate the selected pages' });
+    if (onCropPages) pageTools.push({ id: 'crop-pages', label: 'Crop Pages', icon: <Crop size={18} />, onClick: onCropPages, description: 'Crop the selected pages (sets the CropBox)' });
+    if (onInsertPdfPages) pageTools.push({ id: 'insert-pdf-pages', label: 'Insert Pages from PDF', icon: <FileInput size={18} />, onClick: onInsertPdfPages, description: 'Insert another PDF after the selected pages' });
+    if (pageTools.length > 0) sections.push({ title: 'Page Tools', tools: pageTools });
     sections.push({
       title: 'Convert From PDF',
       tools: [

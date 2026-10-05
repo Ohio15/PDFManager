@@ -32,6 +32,7 @@ import {
   positionsOf,
 } from '../utils/pageModelOps';
 import { preparePageSource } from '../utils/pageInsertSource';
+import { snapshotDocument, assertSnapshotCurrent, isSnapshotCurrent, assertRequestedTabActive } from '../utils/documentGuard';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
@@ -166,9 +167,34 @@ export function usePDFDocument() {
     const next = [...stateRef.current.history.slice(0, idx + 1), entry];
     stateRef.current.history = next;
     stateRef.current.historyIndex = idx + 1;
+    stateRef.current.modified = true;
     setHistory(next);
     setHistoryIndex(idx + 1);
     setModified(true);
+  }, []);
+
+  /**
+   * Make a tab (or nothing) active. stateRef is updated SYNCHRONOUSLY, like
+   * commitDocument: in-flight async ops check stateRef before committing
+   * (utils/documentGuard), and a switch that only reached React state would be
+   * invisible to them until the next render — long enough for an op started on
+   * tab A to commit its result into tab B. Every tab activation goes through here.
+   */
+  const activateTab = useCallback((tabId: string | null, state: TabState | null) => {
+    const doc = state?.document ?? null;
+    const mod = state?.modified ?? false;
+    const hist = state?.history ?? [];
+    const hIdx = state?.historyIndex ?? -1;
+    stateRef.current.document = doc;
+    stateRef.current.modified = mod;
+    stateRef.current.history = hist;
+    stateRef.current.historyIndex = hIdx;
+    stateRef.current.activeTabId = tabId;
+    setDocument(doc);
+    setModified(mod);
+    setHistory(hist);
+    setHistoryIndex(hIdx);
+    setActiveTabId(tabId);
   }, []);
 
   // Save current active tab state to the cache
@@ -194,14 +220,8 @@ export function usePDFDocument() {
 
     // Load target tab state
     const tabState = tabStatesRef.current.get(tabId);
-    if (tabState) {
-      setDocument(tabState.document);
-      setModified(tabState.modified);
-      setHistory(tabState.history);
-      setHistoryIndex(tabState.historyIndex);
-      setActiveTabId(tabId);
-    }
-  }, [saveCurrentTabState]);
+    if (tabState) activateTab(tabId, tabState);
+  }, [saveCurrentTabState, activateTab]);
 
   // Close a tab
   const closeTab = useCallback((tabId: string) => {
@@ -232,25 +252,15 @@ export function usePDFDocument() {
 
       if (nextTab) {
         const nextState = tabStatesRef.current.get(nextTab.id);
-        if (nextState) {
-          setDocument(nextState.document);
-          setModified(nextState.modified);
-          setHistory(nextState.history);
-          setHistoryIndex(nextState.historyIndex);
-          setActiveTabId(nextTab.id);
-        }
+        if (nextState) activateTab(nextTab.id, nextState);
       } else {
         // No more tabs - back to welcome screen
-        setDocument(null);
-        setModified(false);
-        setHistory([]);
-        setHistoryIndex(-1);
-        setActiveTabId(null);
+        activateTab(null, null);
       }
     }
 
     setTabs(newTabs);
-  }, []);
+  }, [activateTab]);
 
   // Clear in-memory plaintext material on app/window unload — passwords
   // always; pdfData only for protected docs (decrypted plaintext).
@@ -477,20 +487,12 @@ export function usePDFDocument() {
       const tabId = generateTabId();
       const newTab: TabInfo = { id: tabId, fileName, filePath, modified: false };
 
-      setDocument(newDoc);
-      setModified(false);
-      setHistory([]);
-      setHistoryIndex(-1);
+      const newTabState: TabState = { document: newDoc, modified: false, history: [], historyIndex: -1 };
+      activateTab(tabId, newTabState);
       setTabs(prev => [...prev, newTab]);
-      setActiveTabId(tabId);
 
       // Cache the new tab state
-      tabStatesRef.current.set(tabId, {
-        document: newDoc,
-        modified: false,
-        history: [],
-        historyIndex: -1,
-      });
+      tabStatesRef.current.set(tabId, newTabState);
 
       // Form field mappings are rebuilt from pdfData by the effect below.
       await pdfDoc.destroy();
@@ -503,7 +505,7 @@ export function usePDFDocument() {
         openingFilesRef.current.delete(filePath);
       }
     }
-  }, [saveCurrentTabState, switchTab]);
+  }, [saveCurrentTabState, switchTab, activateTab]);
 
   // Rebuild the pdf.js field mappings whenever the bytes change: open, tab
   // switch, structural ops, form authoring, flatten, compress, undo/redo. The
@@ -535,13 +537,15 @@ export function usePDFDocument() {
   // setDocument(prev => ...) silently overwrote such a change.
   const reExtractTextAfterSave = useCallback(async (
     savedFrom: PDFDocument,
+    savedFromTab: string | null,
     modifiedPdfBytes: Uint8Array,
     extra: Partial<PDFDocument>,
     newFilePath?: string | null,
     newFileName?: string
   ): Promise<boolean> => {
+    const snap = { doc: savedFrom, tabId: savedFromTab };
     const commitIfUnchanged = (pages: PDFDocument['pages']): boolean => {
-      if (stateRef.current.document !== savedFrom) return false;
+      if (!isSnapshotCurrent(stateRef, snap)) return false;
       commitDocument({
         ...savedFrom,
         ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
@@ -697,6 +701,7 @@ export function usePDFDocument() {
 
   const saveFile = useCallback(async () => {
     if (!document) return;
+    const savedFromTab = stateRef.current.activeTabId;
 
     setLoading(true);
     try {
@@ -714,7 +719,7 @@ export function usePDFDocument() {
       if (result.success) {
         // Re-extract from the plaintext (not the encrypted output) so downstream
         // tools continue to operate on plaintext bytes in memory.
-        const applied = await reExtractTextAfterSave(document, editedPlaintext, {
+        const applied = await reExtractTextAfterSave(document, savedFromTab, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
@@ -735,6 +740,7 @@ export function usePDFDocument() {
   // cancel), so callers can toast accurately instead of testing a void return.
   const saveFileAs = useCallback(async (): Promise<boolean> => {
     if (!document) return false;
+    const savedFromTab = stateRef.current.activeTabId;
 
     setLoading(true);
     try {
@@ -751,7 +757,7 @@ export function usePDFDocument() {
       const result = await window.electronAPI.saveFileDialog(base64, document.fileName);
       if (result.success && result.path) {
         const fileName = result.path.split(/[\\/]/).pop() || 'Untitled';
-        const applied = await reExtractTextAfterSave(document, editedPlaintext, {
+        const applied = await reExtractTextAfterSave(document, savedFromTab, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
@@ -1339,15 +1345,15 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
       build: (doc: PDFDocument) => Promise<{ next: PDFDocument; result: T } | null>
     ): Promise<T | undefined> => {
       let result: T | undefined;
+      const requestedTab = stateRef.current.activeTabId;
       return runStructural(async () => {
-        const doc = stateRef.current.document;
-        const tabId = stateRef.current.activeTabId;
-        if (!doc) return;
+        assertRequestedTabActive(stateRef, requestedTab);
+        const snap = snapshotDocument(stateRef);
+        if (!snap) return;
+        const doc = snap.doc;
         const built = await build(doc);
         if (!built) return;
-        if (stateRef.current.document !== doc || stateRef.current.activeTabId !== tabId) {
-          throw new Error('The document changed while the page operation was running, so nothing was applied. Please try again.');
-        }
+        assertSnapshotCurrent(stateRef, snap);
         const nextDoc = built.next;
         commitDocument(nextDoc);
         addToHistory({
@@ -1579,12 +1585,16 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
       transform: (input: DocumentTransformInput) => Promise<T | null>
     ): Promise<T | null> => {
       let result: T | null = null;
+      const requestedTab = stateRef.current.activeTabId;
       await runStructural(async () => {
-        const doc = stateRef.current.document;
-        if (!doc) return;
+        assertRequestedTabActive(stateRef, requestedTab);
+        const snap = snapshotDocument(stateRef);
+        if (!snap) return;
+        const doc = snap.doc;
         const bakedBytes = await bakeFormValues(doc.pdfData, annotationStorageRef.current, formFieldMappingsRef.current);
         const output = await transform({ doc, bakedBytes });
         if (!output) return;
+        assertSnapshotCurrent(stateRef, snap);
         const pages = output.pages ?? doc.pages;
         const nextDoc: PDFDocument = { ...doc, pdfData: output.pdfData, pages, pageCount: pages.length };
         const undoDoc: PDFDocument = bakedBytes === doc.pdfData ? doc : { ...doc, pdfData: bakedBytes };

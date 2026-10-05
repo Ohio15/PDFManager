@@ -194,6 +194,41 @@ test.describe('Page tools', () => {
     expect(pageErrors).toEqual([]);
   });
 
+  test('a page op in flight when the tab switches is not applied to the other tab', async ({ electronApp, appPage }) => {
+    await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
+    await expectPageCount(appPage, 3);
+    await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
+    await expectPageCount(appPage, 1);
+    const tabs = appPage.locator('.tab-bar-tab');
+    await expect(tabs).toHaveCount(2);
+
+    // Start "Rotate page right" on invoice.pdf and switch to announcement.pdf in
+    // the SAME task: the op is still awaiting pdf-lib when the switch happens,
+    // so this hits the race deterministically.
+    await thumbs(appPage).nth(0).click({ button: 'right' });
+    await appPage.evaluate(() => {
+      const item = Array.from(document.querySelectorAll('.page-context-menu [role="menuitem"]'))
+        .find((el) => el.textContent?.trim() === 'Rotate page right') as HTMLElement;
+      const firstTab = document.querySelectorAll('.tab-bar-tab')[0] as HTMLElement;
+      item.click();
+      firstTab.click();
+    });
+    await expect(appPage.getByText(/document changed/i)).toBeVisible({ timeout: 15_000 });
+
+    // announcement.pdf is untouched: still 3 unrotated pages, still unmodified.
+    await expectPageCount(appPage, 3);
+    await expect(appPage.locator('.tab-bar-tab').nth(0).locator('.tab-modified-dot')).toHaveCount(0);
+    const announcement = await saveAndCapture(electronApp, appPage);
+    expect(announcement.getPageCount()).toBe(3);
+    expect(announcement.getPages().map((p) => p.getRotation().angle)).toEqual([0, 0, 0]);
+
+    // invoice.pdf did not get the rotation either (it was dropped, not misapplied).
+    await tabs.nth(1).click();
+    await expectPageCount(appPage, 1);
+    const invoice = await saveAndCapture(electronApp, appPage);
+    expect(invoice.getPages().map((p) => p.getRotation().angle)).toEqual([0]);
+  });
+
   test('duplicating a form page keeps every field (linked widgets)', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'repair-calibration-form.pdf');
     await expectPageCount(appPage, 1);

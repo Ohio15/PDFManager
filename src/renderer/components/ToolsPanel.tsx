@@ -16,6 +16,7 @@ import {
   Copy,
   Crop,
   FileInput,
+  Stamp,
   Layers,
   Minimize2,
 } from 'lucide-react';
@@ -43,6 +44,7 @@ interface ToolsPanelProps {
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
   onExportSvg: () => void;
+  onStampPages: () => void;
   /** Finalize tools (shown for PDFs when provided). */
   onFlatten?: () => void;
   onCompress?: () => void;
@@ -76,6 +78,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onConvertFromPdf,
   onConvertToDocx,
   onExportSvg,
+  onStampPages,
   onFlatten,
   onCompress,
   libreOfficeAvailable,
@@ -105,6 +108,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'extract', label: 'Extract Pages', icon: <FileOutput size={18} />, onClick: onExtractPages, description: 'Extract specific pages' },
         { id: 'images', label: 'Extract Images', icon: <ImageDown size={18} />, onClick: onExtractImages, description: 'Export embedded images' },
         { id: 'rotate', label: 'Rotate All Pages', icon: <RotateCw size={18} />, onClick: onRotateAll, description: 'Rotate all pages 90°' },
+        { id: 'stamp', label: 'Stamp Pages', icon: <Stamp size={18} />, onClick: onStampPages, description: 'Watermark, header/footer, page numbers, Bates numbering' },
       ],
     });
     const pageTools: ToolDef[] = [];

@@ -26,6 +26,7 @@ import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
+import StampingDialog from './components/StampingDialog';
 import RedactionToolbar from './components/RedactionToolbar';
 import FormDesignerPanel from './components/FormDesignerPanel';
 import FormFieldOverlay from './components/FormFieldOverlay';
@@ -89,6 +90,7 @@ const App: React.FC = () => {
   const [passwordIncorrect, setPasswordIncorrect] = useState(false);
   const [encryptionDialogOpen, setEncryptionDialogOpen] = useState(false);
   const [encryptionDialogTabId, setEncryptionDialogTabId] = useState<string | null>(null);
+  const [stampingDialogOpen, setStampingDialogOpen] = useState(false);
   const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
   // A non-PDF document opened for conversion (staged, not rendered).
@@ -1610,6 +1612,7 @@ const App: React.FC = () => {
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
+          onStampPages={() => setStampingDialogOpen(true)}
           onFlatten={() => setFlattenDialog({ open: true, scope: 'both' })}
           onCompress={() => setCompressDialogOpen(true)}
           libreOfficeAvailable={libreOfficeAvailable}
@@ -1696,6 +1699,18 @@ const App: React.FC = () => {
             onExtract={handleExtractImages}
             fileName={document.fileName}
             filePath={document.filePath || ''}
+          />
+
+          <StampingDialog
+            isOpen={stampingDialogOpen}
+            onClose={() => setStampingDialogOpen(false)}
+            pdfData={document.pdfData}
+            pageCount={document.pageCount}
+            fileName={document.fileName}
+            currentPage={currentPage}
+            applyDocumentTransform={applyDocumentTransform}
+            pickImage={() => window.electronAPI.openImageDialog()}
+            onDone={(message) => toast.success(message)}
           />
         </>
       )}

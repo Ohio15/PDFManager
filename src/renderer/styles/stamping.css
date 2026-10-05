@@ -1,0 +1,243 @@
+/* Stamp Pages dialog. Colours come only from the theme variables in
+   global.css, so :root.dark (the primary theme) applies automatically. */
+
+.stamp-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--text-primary);
+}
+
+.stamp-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.stamp-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color var(--transition-base), border-color var(--transition-base);
+}
+
+.stamp-tab:hover {
+  color: var(--text-primary);
+}
+
+.stamp-tab.active {
+  color: var(--primary-color);
+  border-bottom-color: var(--primary-color);
+}
+
+.stamp-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  min-height: 420px;
+}
+
+.stamp-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.stamp-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.stamp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.stamp-field-narrow {
+  flex: 0 0 96px;
+}
+
+.stamp-field label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+}
+
+.stamp-field input[type='text'],
+.stamp-field input[type='number'],
+.stamp-field select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--surface-color);
+  color: var(--text-primary);
+}
+
+.stamp-field input[type='color'] {
+  width: 100%;
+  height: 33px;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--surface-color);
+}
+
+.stamp-field input:focus,
+.stamp-field select:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.stamp-field select:disabled {
+  opacity: 0.5;
+}
+
+.stamp-slot-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stamp-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.stamp-checks label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.stamp-segment {
+  display: inline-flex;
+  align-self: flex-start;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.stamp-segment button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: none;
+  background: var(--surface-color);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.stamp-segment button.active {
+  background: var(--primary-light);
+  color: var(--primary-color);
+}
+
+.stamp-notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--primary-light);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.stamp-notice svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--primary-color);
+}
+
+.stamp-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stamp-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.stamp-preview-header label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+
+.stamp-preview-header input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-xs);
+  background: var(--surface-color);
+  color: var(--text-primary);
+}
+
+.stamp-preview-canvas-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 380px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--background-color);
+  padding: 8px;
+}
+
+.stamp-preview-canvas {
+  box-shadow: var(--shadow-page);
+  background: #ffffff; /* the page itself is paper-white in both themes */
+}
+
+.stamp-preview-error {
+  color: var(--danger-color);
+  font-size: 13px;
+  text-align: center;
+  padding: 0 12px;
+}
+
+.stamp-preview-spinner {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--text-muted);
+}
+
+.stamp-remove {
+  color: var(--danger-color);
+}

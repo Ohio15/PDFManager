@@ -28,6 +28,7 @@ import { applyRedactions, RedactionReport } from '../utils/redaction/redactionEn
 import { PdfjsEnv, openPdfjs } from '../utils/redaction/pdfjsEnv';
 import { findOccurrences, SearchOptions } from '../utils/redaction/textSearch';
 import { intersects } from '../utils/redaction/geometry';
+import { snapshotDocument, isSameSourceBytes, StaleDocumentError } from '../utils/documentGuard';
 
 interface HistoryEntry {
   type: string;
@@ -36,7 +37,7 @@ interface HistoryEntry {
 }
 
 interface Deps {
-  stateRef: MutableRefObject<{ document: PDFDocument | null }>;
+  stateRef: MutableRefObject<{ document: PDFDocument | null; activeTabId?: string | null }>;
   commitDocument: (doc: PDFDocument) => void;
   addToHistory: (entry: HistoryEntry) => void;
   applyDocumentTransform: <T extends DocumentTransformOutput>(
@@ -203,8 +204,9 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
   /** Find every occurrence of `term` and mark them all (one undo step). Returns the count. */
   const markSearchResults = useCallback(
     async (term: string, options: SearchOptions): Promise<number> => {
-      const doc = stateRef.current.document;
-      if (!doc || !term.trim()) return 0;
+      const snap = snapshotDocument(stateRef);
+      if (!snap || !term.trim()) return 0;
+      const doc = snap.doc;
       const proxy = await openPdfjs(pdfjsEnv, doc.pdfData);
       let found;
       try {
@@ -213,8 +215,11 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
         await proxy.destroy();
       }
       if (!found.length) return 0;
-      const latest = stateRef.current.document;
-      if (!latest) return 0;
+      // Hits are positions in THESE bytes on THIS tab. Annotations added while
+      // searching are fine; a tab switch or byte change is not (the marks
+      // would land on another document).
+      if (!isSameSourceBytes(stateRef, snap)) throw new StaleDocumentError();
+      const latest = stateRef.current.document!;
       const group = { id: newId('search'), term, size: found.length };
       const pages = latest.pages.map((p) => ({ ...p }));
       for (const occ of found) {

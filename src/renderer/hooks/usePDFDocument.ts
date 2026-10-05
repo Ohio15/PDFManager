@@ -12,6 +12,7 @@ import { deletePdfPage, insertBlankPdfPage, reorderPdfPage, setPdfPageRotation }
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
+import { useMarkupRedaction } from './useMarkupRedaction';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -1485,6 +1486,8 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [runStructural, addToHistory, commitDocument]
   );
 
+  const markupRedaction = useMarkupRedaction({ stateRef, runStructural, commitDocument, addToHistory, setFormFieldMappings });
+
   const undo = useCallback(() => {
     if (!canUndo) return;
     history[historyIndex].undo();
@@ -1534,6 +1537,8 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Text markup + redaction
+    ...markupRedaction,
   };
 }
 

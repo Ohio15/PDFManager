@@ -26,6 +26,7 @@ import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
+import RedactionToolbar from './components/RedactionToolbar';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
@@ -34,7 +35,7 @@ import { reEncryptIfProtected } from './utils/pdfEncryption';
 import { isPdf, isConvertibleToPdf } from './utils/supportedFormats';
 import '../shared/ipc';
 
-export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature' | 'markup' | 'redact';
 
 // Helper to convert Uint8Array to base64
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -117,6 +118,10 @@ const App: React.FC = () => {
     addShape,
     addStickyNote,
     addStamp,
+    addTextMarkup,
+    addRedactionMark,
+    markSearchResults,
+    applyRedactionMarks,
     insertBlankPage,
     replacePage,
     deletePage,
@@ -603,7 +608,16 @@ const App: React.FC = () => {
     switchTab(tabId);
   }, [switchTab]);
 
+  const pendingRedactionMarks = useMemo(
+    () => document?.pages.reduce((n, p) => n + p.annotations.filter((a) => a.type === 'redaction').length, 0) ?? 0,
+    [document]
+  );
+
   const handleSave = useCallback(async () => {
+    if (pendingRedactionMarks > 0) {
+      // Unapplied marks are saved as /Redact annotations; nothing is removed yet.
+      toast.warning(`${pendingRedactionMarks} redaction mark${pendingRedactionMarks === 1 ? ' is' : 's are'} not applied: the content under them is still in the file. Use Redact > Apply redactions to remove it.`);
+    }
     try {
       if (document?.filePath) {
         try {
@@ -635,7 +649,7 @@ const App: React.FC = () => {
       toast.error('Failed to save document');
       console.error('Save error:', error);
     }
-  }, [document, saveFile, saveFileAs, toast]);
+  }, [document, saveFile, saveFileAs, toast, pendingRedactionMarks]);
 
   const handlePrint = useCallback(() => {
     if (document) {
@@ -1356,6 +1370,17 @@ const App: React.FC = () => {
         onStyleChange={handleStyleChange}
       />
 
+      {currentTool === 'redact' && document && (
+        <RedactionToolbar
+          style={annotationStyle}
+          onStyleChange={handleStyleChange}
+          markCount={pendingRedactionMarks}
+          onMarkSearch={markSearchResults}
+          onApply={applyRedactionMarks}
+          notify={toast}
+        />
+      )}
+
       <SearchBar
         isOpen={searchBarOpen}
         onClose={() => setSearchBarOpen(false)}
@@ -1420,6 +1445,8 @@ const App: React.FC = () => {
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
+              onAddTextMarkup={addTextMarkup}
+              onAddRedactionMark={addRedactionMark}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div

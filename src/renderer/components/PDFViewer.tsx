@@ -7,6 +7,8 @@ import { Tool } from '../App';
 import { FormFieldMapping } from '../utils/formFieldSaver';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import SignaturePad from './SignaturePad';
+import MarkupRedactionLayer, { isSelectionTool } from './MarkupRedactionLayer';
+import type { PdfRect, TextMarkupType } from '../types';
 
 interface TextEditDialogState {
   isOpen: boolean;
@@ -204,6 +206,8 @@ interface PDFViewerProps {
   onFormFieldsDetected?: (count: number) => void;
   onAnnotationStorageReady?: (storage: any) => void;
   formFieldMappings?: FormFieldMapping[];
+  onAddTextMarkup?: (pageIndex: number, type: TextMarkupType, quads: number[][], color: string, opacity: number, text: string) => void;
+  onAddRedactionMark?: (pageIndex: number, rects: PdfRect[], source: 'area' | 'text', text?: string) => void;
 }
 
 export interface PDFViewerHandle {
@@ -236,6 +240,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   onFormFieldsDetected,
   onAnnotationStorageReady,
   formFieldMappings,
+  onAddTextMarkup,
+  onAddRedactionMark,
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
@@ -298,6 +304,11 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   const scale = zoom / 100;
   scaleRef.current = scale;
+
+  const getPdfPage = useCallback(
+    (pageNum: number) => (pdfDocRef.current && pageNum <= pdfDocRef.current.numPages ? pdfDocRef.current.getPage(pageNum) : Promise.resolve(null)),
+    []
+  );
 
   // Notify parent when selection changes
   useEffect(() => {
@@ -796,7 +807,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
         }
         onToolChange?.('select');
       }
-    } else if (currentTool === 'highlight') {
+    } else if (currentTool === 'highlight' && annotationStyle?.highlightMode !== 'text') {
+      // Select-to-highlight (highlightMode 'text') is handled by MarkupRedactionLayer.
       setHighlightStart({ pageNum, x, y });
       setHighlightPreview(null);
     } else if (currentTool === 'erase') {
@@ -1617,6 +1629,12 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       );
     }
 
+    if (annotation.type === 'textMarkup' || annotation.type === 'redaction') {
+      // PDF-user-space geometry; drawn by MarkupRedactionLayer, which owns the
+      // viewport conversion for rotation and zoom.
+      return null;
+    }
+
     if (annotation.type === 'stamp') {
       const stampAnnotation = annotation as StampAnnotation;
       return (
@@ -1663,7 +1681,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
           <div
             key={pageNum}
             data-page={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''} ${currentTool === 'signature' ? 'signature-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''} ${currentTool === 'signature' ? 'signature-mode' : ''} ${currentTool === 'markup' ? 'markup-mode' : ''} ${currentTool === 'redact' ? 'redact-mode' : ''} ${isSelectionTool(currentTool, annotationStyle) ? 'text-select-mode' : ''}`}
             style={{
               width: pageWidth,
               height: pageHeight,
@@ -1717,6 +1735,22 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
             <div className="text-layer">
               {page?.textItems?.map((textItem) => renderTextItem(pageNum, textItem))}
             </div>
+            <MarkupRedactionLayer
+              pageNum={pageNum}
+              scale={scale}
+              rotation={page.rotation || 0}
+              tool={currentTool}
+              style={annotationStyle}
+              annotations={page.annotations}
+              docKey={pdfReadyCounter}
+              getPdfPage={getPdfPage}
+              selectedId={selectedAnnotation}
+              onSelect={setSelectedAnnotation}
+              onContextMenu={handleContextMenu}
+              onAddTextMarkup={onAddTextMarkup}
+              onAddRedactionMark={onAddRedactionMark}
+              onUpdateAnnotation={onUpdateAnnotation}
+            />
             {/* Highlight preview while drawing */}
             {highlightStart && highlightStart.pageNum === pageNum && highlightPreview && (
               <div

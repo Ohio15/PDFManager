@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import Modal from './Modal';
 import { Plus, Trash2, Loader2, FolderOpen, CheckCircle, AlertCircle, FileText } from 'lucide-react';
 
@@ -14,17 +14,37 @@ interface ConvertToPdfDialogProps {
   isOpen: boolean;
   onClose: () => void;
   libreOfficeAvailable: boolean;
+  /** Pre-seed the file list (e.g. the currently staged document). */
+  initialFiles?: string[];
+  /** Called once with the first successfully converted PDF (path + base64 data). */
+  onConverted?: (pdfPath: string, pdfData: string) => void;
 }
 
 const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
   isOpen,
   onClose,
   libreOfficeAvailable,
+  initialFiles,
+  onConverted,
 }) => {
   const [files, setFiles] = useState<ConversionItem[]>([]);
   const [outputDir, setOutputDir] = useState<string>('');
   const [converting, setConverting] = useState(false);
   const [completed, setCompleted] = useState(false);
+
+  // Seed the dialog from a staged document when it opens.
+  useEffect(() => {
+    if (!isOpen || !initialFiles || initialFiles.length === 0) return;
+    const items: ConversionItem[] = initialFiles.map((p) => ({
+      path: p,
+      name: p.split(/[\\/]/).pop() || 'Unknown',
+      status: 'pending',
+    }));
+    setFiles(items);
+    const first = initialFiles[0];
+    const lastSlash = Math.max(first.lastIndexOf('/'), first.lastIndexOf('\\'));
+    if (lastSlash > 0) setOutputDir(first.substring(0, lastSlash));
+  }, [isOpen, initialFiles]);
 
   const handleAddFiles = useCallback(async () => {
     const paths = await window.electronAPI.openDocumentsDialog();
@@ -68,6 +88,7 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
 
     setConverting(true);
     setCompleted(false);
+    let firstConverted = false;
 
     for (let i = 0; i < files.length; i++) {
       setFiles((prev) =>
@@ -90,6 +111,11 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
               : f
           )
         );
+        // Surface the first successful conversion so the caller can open it.
+        if (result.success && result.path && result.data && !firstConverted) {
+          firstConverted = true;
+          onConverted?.(result.path, result.data);
+        }
       } catch (e) {
         setFiles((prev) =>
           prev.map((f, idx) =>
@@ -101,7 +127,7 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
 
     setConverting(false);
     setCompleted(true);
-  }, [files, outputDir]);
+  }, [files, outputDir, onConverted]);
 
   const handleOpenFolder = useCallback(async () => {
     if (outputDir) {

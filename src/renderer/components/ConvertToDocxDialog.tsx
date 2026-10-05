@@ -280,13 +280,14 @@ const ConvertToDocxDialog: React.FC<ConvertToDocxDialogProps> = ({
         if (!rawData) throw new Error('Failed to read PDF file');
         const pdfData = new Uint8Array(rawData);
         const docxResult = await generateDocx(pdfData, { conversionMode });
-        await window.electronAPI.saveRawBytesToPath(
+        const saved = await window.electronAPI.saveRawBytesToPath(
           docxResult.data.buffer.slice(
             docxResult.data.byteOffset,
             docxResult.data.byteOffset + docxResult.data.byteLength,
           ),
           savePath,
         );
+        if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
         folder = extractDir(savePath);
       }
 
@@ -357,13 +358,14 @@ const ConvertToDocxDialog: React.FC<ConvertToDocxDialogProps> = ({
           const pdfData = new Uint8Array(rawData);
           const docxResult = await generateDocx(pdfData, { conversionMode });
 
-          await window.electronAPI.saveRawBytesToPath(
+          const saved = await window.electronAPI.saveRawBytesToPath(
             docxResult.data.buffer.slice(
               docxResult.data.byteOffset,
               docxResult.data.byteOffset + docxResult.data.byteLength,
             ),
             outPath,
           );
+          if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
           converted++;
         } catch (e) {
           console.warn(`[Batch] Failed to convert ${pdfName}:`, e);

@@ -1,10 +1,11 @@
 import React, { useState, useCallback } from 'react';
 import { FileText, Upload, Clock, Trash2, FolderOpen } from 'lucide-react';
+import { isOpenable, SUPPORTED_FORMATS_LABEL } from '../utils/supportedFormats';
 
 interface WelcomeScreenProps {
   onOpenFile: () => void;
   onBatchConvert?: () => void;
-  onFileDropped?: (filePath: string) => void;
+  onFileDropped?: (file: File) => void;
   recentFiles?: string[];
   onOpenRecentFile?: (filePath: string) => void;
   onClearRecentFiles?: () => void;
@@ -41,24 +42,18 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
       const files = e.dataTransfer.files;
       if (files.length > 0) {
         const file = files[0];
-        const filePath = (file as any).path;
         const fileName = file.name.toLowerCase();
 
-        if (!filePath) {
-          // Fallback to dialog if path not available
-          onOpenFile();
-          return;
-        }
-
-        // Only accept PDF files
-        if (file.type === 'application/pdf' || fileName.endsWith('.pdf')) {
-          if (onFileDropped) {
-            onFileDropped(filePath);
-          }
+        // Pass the File itself, not its path: the drop already handed us the
+        // bytes, so the app reads them via FileReader and never relays an
+        // (unblessed, untrusted) path to a main-process read. App decides how
+        // to handle it from the extension.
+        if (isOpenable(fileName) || file.type === 'application/pdf') {
+          onFileDropped?.(file);
         }
       }
     },
-    [onOpenFile, onFileDropped]
+    [onFileDropped]
   );
 
   const getFileName = (filePath: string) => {
@@ -83,12 +78,13 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <FileText className="welcome-icon" />
         <h1 className="welcome-title">PDF Manager</h1>
         <p className="welcome-text">
-          Open a PDF to edit, annotate, merge, split, and more.
+          Open a PDF to edit, annotate, merge, split, and convert — or open a
+          Word, Excel, or PowerPoint file to convert it to PDF.
         </p>
         <div className="welcome-buttons">
           <button className="welcome-btn" onClick={onOpenFile}>
             <Upload size={20} />
-            Open PDF File
+            Open File
           </button>
           {onBatchConvert && (
             <button className="welcome-btn welcome-btn-secondary" onClick={onBatchConvert}>
@@ -137,10 +133,10 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         )}
 
         <p className="welcome-text" style={{ fontSize: '14px', marginTop: recentFiles.length > 0 ? '8px' : '16px' }}>
-          Drag and drop a PDF here to open
+          Drag and drop a file here to open
         </p>
         <p className="welcome-text welcome-formats" style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
-          Supports: PDF
+          Supports: {SUPPORTED_FORMATS_LABEL}
         </p>
       </div>
     </div>

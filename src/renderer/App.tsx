@@ -22,7 +22,7 @@ import TabBar from './components/TabBar';
 import DocumentPropertiesDialog from './components/DocumentPropertiesDialog';
 import PasswordDialog from './components/PasswordDialog';
 import EncryptionDialog from './components/EncryptionDialog';
-import ConversionActionBar from './components/ConversionActionBar';
+import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
@@ -31,64 +31,8 @@ import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
 import { reEncryptIfProtected } from './utils/pdfEncryption';
-
-declare global {
-  interface Window {
-    electronAPI: {
-      openFileDialog: () => Promise<{ path: string; data: string } | null>;
-      readFileByPath: (filePath: string) => Promise<{ path: string; data: string } | null>;
-      saveFile: (data: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
-      saveFileDialog: (data: string, defaultPath?: string) => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
-      openImageDialog: () => Promise<{ path: string; data: string; type: string } | null>;
-      getStore: (key: string) => Promise<unknown>;
-      setStore: (key: string, value: unknown) => Promise<void>;
-      onFileOpened: (callback: (data: { path: string; data: string }) => void) => void;
-      onMenuAction: (action: string, callback: () => void) => void;
-      removeMenuListener: (action: string) => void;
-      // Auto-update methods
-      checkForUpdates: () => Promise<{ success: boolean; updateInfo?: unknown; error?: string }>;
-      downloadUpdate: () => Promise<{ success: boolean; error?: string }>;
-      installUpdate: () => void;
-      getAppVersion: () => Promise<string>;
-      onUpdateAvailable: (callback: (info: { version: string; releaseNotes?: string }) => void) => void;
-      onUpdateNotAvailable: (callback: (info: { version: string }) => void) => void;
-      onUpdateDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => void;
-      onUpdateDownloaded: (callback: (info: { version: string; releaseNotes?: string }) => void) => void;
-      onUpdateError: (callback: (error: { message: string }) => void) => void;
-      removeUpdateListeners: () => void;
-      // Multi-file operations
-      openMultipleFilesDialog: () => Promise<Array<{ path: string; data: string }> | null>;
-      selectOutputDirectory: () => Promise<string | null>;
-      showSaveDocxDialog: (defaultName: string, defaultDir?: string) => Promise<string | null>;
-      scanDirectoryForPdfs: (dirPath: string) => Promise<string[]>;
-      readFileRaw: (filePath: string) => Promise<ArrayBuffer | null>;
-      pickPdfFile: () => Promise<string | null>;
-      checkFileExists: (filePath: string) => Promise<boolean>;
-      saveFileToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
-      saveRawBytesToPath: (data: ArrayBuffer, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
-      saveImageToPath: (data: string, filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
-      openFolder: (folderPath: string) => Promise<{ success: boolean; error?: string }>;
-      openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
-      // Recent files
-      getRecentFiles: () => Promise<string[]>;
-      addRecentFile: (filePath: string) => Promise<string[]>;
-      clearRecentFiles: () => Promise<string[]>;
-      // Document conversion
-      detectLibreOffice: () => Promise<string | null>;
-      onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
-      openDocumentsDialog: () => Promise<string[] | null>;
-      convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
-      getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
-      printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
-      getLaunchFile: () => Promise<{ path: string; data: string } | null>;
-      // Auto-recovery
-      saveAutoRecovery: (data: string, filePath: string | null, fileName: string) => Promise<{ success: boolean; error?: string }>;
-      checkAutoRecovery: () => Promise<{ originalPath: string | null; fileName: string; timestamp: number } | null>;
-      loadAutoRecovery: () => Promise<{ data: string; filePath: string | null; fileName: string } | null>;
-      clearAutoRecovery: () => Promise<{ success: boolean }>;
-    };
-  }
-}
+import { isPdf, isConvertibleToPdf } from './utils/supportedFormats';
+import '../shared/ipc';
 
 export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature';
 
@@ -132,7 +76,10 @@ const App: React.FC = () => {
   const [encryptionDialogTabId, setEncryptionDialogTabId] = useState<string | null>(null);
   const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
-  const [showConversionBar, setShowConversionBar] = useState(false);
+  // A non-PDF document opened for conversion (staged, not rendered).
+  const [stagedDocument, setStagedDocument] = useState<StagedDocument | null>(null);
+  // When set, ConvertToPdfDialog opens pre-seeded with these files (staging flow).
+  const [convertToPdfInitialFiles, setConvertToPdfInitialFiles] = useState<string[] | undefined>(undefined);
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [onboardingActive, setOnboardingActive] = useState(false);
   // Form field state
@@ -366,20 +313,55 @@ const App: React.FC = () => {
     }
   }, [pendingPasswordFile, openFile, refreshRecentFiles, handlePasswordError, toast]);
 
+  // Stage a non-PDF document for conversion (it is not rendered).
+  const stageDocument = useCallback((filePath: string) => {
+    const name = filePath.split(/[\\/]/).pop() || 'Document';
+    setStagedDocument({ path: filePath, name });
+  }, []);
+
   const handleOpenFile = useCallback(async () => {
     const result = await window.electronAPI.openFileDialog();
-    if (result) {
+    if (!result) return;
+
+    if (isPdf(result.path)) {
+      setStagedDocument(null);
       try {
-        await openFile(result.path, result.data);
+        await openFile(result.path, result.data || '');
         await window.electronAPI.addRecentFile(result.path);
         await refreshRecentFiles();
       } catch (error: any) {
-        if (!handlePasswordError(error, result.path, result.data)) {
+        if (!handlePasswordError(error, result.path, result.data || '')) {
           toast.error('Failed to open file');
         }
       }
+    } else if (isConvertibleToPdf(result.path)) {
+      stageDocument(result.path);
+      await window.electronAPI.addRecentFile(result.path);
+      await refreshRecentFiles();
+    } else {
+      toast.error('Unsupported file type');
     }
-  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast, stageDocument]);
+
+  // Open ConvertToPdfDialog pre-seeded with the staged document.
+  const handleConvertStagedToPdf = useCallback(() => {
+    if (!stagedDocument) return;
+    setConvertToPdfInitialFiles([stagedDocument.path]);
+    setConvertDialogOpen(true);
+  }, [stagedDocument]);
+
+  // After a staged document is converted, load the resulting PDF into the viewer.
+  const handleStagedConverted = useCallback(async (pdfPath: string, pdfData: string) => {
+    try {
+      setStagedDocument(null);
+      await openFile(pdfPath, pdfData);
+      await window.electronAPI.addRecentFile(pdfPath);
+      await refreshRecentFiles();
+      toast.success('Converted to PDF');
+    } catch {
+      toast.error('Converted, but failed to open the PDF');
+    }
+  }, [openFile, refreshRecentFiles, toast]);
 
   // Also listen for LibreOffice status from main process
   useEffect(() => {
@@ -389,9 +371,20 @@ const App: React.FC = () => {
   }, []);
 
   const handleOpenRecentFile = useCallback(async (filePath: string) => {
+    if (!isPdf(filePath)) {
+      if (isConvertibleToPdf(filePath)) {
+        stageDocument(filePath);
+        await window.electronAPI.addRecentFile(filePath);
+        await refreshRecentFiles();
+      } else {
+        toast.error('Unsupported file type');
+      }
+      return;
+    }
     const result = await window.electronAPI.readFileByPath(filePath);
     if (result) {
       try {
+        setStagedDocument(null);
         await openFile(result.path, result.data);
         await window.electronAPI.addRecentFile(result.path);
         await refreshRecentFiles();
@@ -401,7 +394,7 @@ const App: React.FC = () => {
         }
       }
     }
-  }, [openFile, refreshRecentFiles, handlePasswordError, toast]);
+  }, [openFile, refreshRecentFiles, handlePasswordError, toast, stageDocument]);
 
   const handleClearRecentFiles = useCallback(async () => {
     await window.electronAPI.clearRecentFiles();
@@ -557,21 +550,81 @@ const App: React.FC = () => {
     pdfViewerRef.current?.scrollToField(pageIndex, rect);
   }, []);
 
-  const handleFileDrop = useCallback(async (filePath: string) => {
-    const result = await window.electronAPI.readFileByPath(filePath);
-    if (result) {
-      await openFile(result.path, result.data);
-      await window.electronAPI.addRecentFile(result.path);
-      // Show conversion action bar when PDF is loaded
-      setShowConversionBar(true);
+  // A drop hands us the File (bytes), not a trusted path. Read the bytes in the
+  // renderer via FileReader — this works under path confinement (ENFORCE) with
+  // no main-process path read, and can't be abused: the renderer can only read
+  // Files the OS actually dropped. The path (if present) is display metadata
+  // only; a dropped file saves via Save As (its dir isn't blessed).
+  const handleFileDrop = useCallback(async (file: File) => {
+    const fileName = file.name;
+    const displayPath = (file as unknown as { path?: string }).path || fileName;
+    const readAsBase64 = (f: File) =>
+      new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(uint8ArrayToBase64(new Uint8Array(reader.result as ArrayBuffer)));
+        reader.onerror = () => reject(reader.error ?? new Error('Failed to read dropped file'));
+        reader.readAsArrayBuffer(f);
+      });
+
+    try {
+      if (isPdf(fileName)) {
+        const base64 = await readAsBase64(file);
+        setStagedDocument(null);
+        try {
+          await openFile(displayPath, base64);
+        } catch (error: any) {
+          if (!handlePasswordError(error, displayPath, base64)) {
+            toast.error('Failed to open file');
+          }
+        }
+      } else if (isConvertibleToPdf(fileName)) {
+        // Converting a document runs LibreOffice against a real on-disk path.
+        // A drop gives us only bytes (its filesystem location is untrusted and
+        // unblessed), so direct the user through File -> Open, which blesses the
+        // chosen directory and then converts. (Materializing dropped bytes into
+        // a temp dir was removed — it caused converted edits to be reaped on
+        // quit and handed the renderer an arbitrary-format LibreOffice input.)
+        toast.info(`Use File → Open to convert "${fileName}" to PDF`);
+      } else {
+        toast.error('Unsupported file type');
+      }
+    } catch {
+      toast.error('Failed to read dropped file');
     }
-  }, [openFile]);
+  }, [openFile, toast, handlePasswordError]);
+
+  // What's currently open drives the contextual tools panel and main view.
+  // Staged (non-PDF) documents take priority over an open PDF.
+  const docType: 'pdf' | 'staged' | 'none' = stagedDocument ? 'staged' : document ? 'pdf' : 'none';
+
+  // Switching tabs returns to PDF viewing, so clear any staged document.
+  const handleSwitchTab = useCallback((tabId: string) => {
+    setStagedDocument(null);
+    switchTab(tabId);
+  }, [switchTab]);
 
   const handleSave = useCallback(async () => {
     try {
       if (document?.filePath) {
-        await saveFile();
-        toast.success('Document saved successfully');
+        try {
+          await saveFile();
+          toast.success('Document saved successfully');
+        } catch (error: any) {
+          // A document opened by drag-and-drop has a real but unblessed path, so
+          // an in-place save is denied by path confinement. Fall back to Save As
+          // (its dialog blesses the chosen directory) instead of just failing.
+          // Match the EXACT confinement sentinels — a loose 'not permitted'
+          // substring would also swallow Node's EPERM ("operation not permitted",
+          // e.g. a read-only/locked file), mis-routing a real error to Save As.
+          const msg = typeof error?.message === 'string' ? error.message : '';
+          const isConfinementDenial = msg === 'Path not permitted' || msg === 'File type not permitted';
+          if (isConfinementDenial) {
+            // dropped file: no blessed path, save via dialog
+            if (await saveFileAs()) toast.success('Document saved successfully');
+          } else {
+            throw error;
+          }
+        }
       } else {
         const result = await saveFileAs();
         if (result) {
@@ -778,7 +831,8 @@ const App: React.FC = () => {
         const base64 = uint8ArrayToBase64(pdfBytes);
         const filePath = `${outputDir}/${baseName}_page_${i + 1}.pdf`;
 
-        await window.electronAPI.saveFileToPath(base64, filePath);
+        const saved = await window.electronAPI.saveFileToPath(base64, filePath);
+        if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
       }
 
       toast.success(`Split into ${sourcePdf.getPageCount()} files`);
@@ -889,7 +943,8 @@ const App: React.FC = () => {
       const base64Data = dataUrl.split(',')[1];
 
       const filePath = `${outputDir}/${baseName}_page_${pageNum}.${format}`;
-      await window.electronAPI.saveImageToPath(base64Data, filePath);
+      const saved = await window.electronAPI.saveImageToPath(base64Data, filePath);
+      if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
       convertedCount++;
     }
 
@@ -920,10 +975,11 @@ const App: React.FC = () => {
     console.log(`[DOCX] ZIP signature: 0x${result.data[0]?.toString(16)}${result.data[1]?.toString(16)}${result.data[2]?.toString(16)}${result.data[3]?.toString(16)}`);
 
     // Send raw bytes directly via IPC (no base64 encoding/decoding)
-    await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
+    const saved = await window.electronAPI.saveRawBytesToPath(result.data.buffer.slice(
       result.data.byteOffset,
       result.data.byteOffset + result.data.byteLength
     ), outputPath);
+    if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
 
     toast.success(`Converted ${result.pageCount} pages to Word document`);
     return { count: result.pageCount, folder };
@@ -962,10 +1018,11 @@ const App: React.FC = () => {
         const baseName = document.fileName.replace(/\.pdf$/i, '');
         const svgPath = `${outputDir}/${baseName}_page_${i + 1}.svg`;
 
-        await window.electronAPI.saveFileToPath(
+        const saved = await window.electronAPI.saveFileToPath(
           btoa(new TextEncoder().encode(svgContent).reduce((data, byte) => data + String.fromCharCode(byte), '')),
           svgPath
         );
+        if (!saved.success) throw new Error(saved.error || 'Save was not permitted');
 
         page.cleanup();
       }
@@ -983,7 +1040,11 @@ const App: React.FC = () => {
   useEffect(() => {
     const menuActions: Record<string, () => void> = {
       save: handleSave,
-      'save-as': saveFileAs,
+      'save-as': () => {
+        saveFileAs()
+          .then((ok) => { if (ok) toast.success('Document saved successfully'); })
+          .catch(() => toast.error('Failed to save document'));
+      },
       print: handlePrint,
       undo: undo,
       redo: redo,
@@ -1004,7 +1065,7 @@ const App: React.FC = () => {
       'split-pdf': () => document && setSplitDialogOpen(true),
       'extract-pages': () => document && setExtractPagesDialogOpen(true),
       'extract-images': () => document && setExtractImagesDialogOpen(true),
-      'convert-to-pdf': () => setConvertDialogOpen(true),
+      'convert-to-pdf': () => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); },
       'settings': () => setSettingsDialogOpen(true),
       'document-properties': () => document && setPropertiesDialogOpen(true),
     };
@@ -1305,7 +1366,7 @@ const App: React.FC = () => {
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}
-        onTabSelect={switchTab}
+        onTabSelect={handleSwitchTab}
         onTabClose={handleCloseTab}
         onNewTab={handleOpenFile}
       />
@@ -1324,7 +1385,15 @@ const App: React.FC = () => {
           onDeletePage={(pageIndex) => deletePage(pageIndex)}
         />
 
-        {document ? (
+        {stagedDocument ? (
+          <StagingScreen
+            doc={stagedDocument}
+            libreOfficeAvailable={libreOfficeAvailable}
+            onConvertToPdf={handleConvertStagedToPdf}
+            onOpenDifferent={handleOpenFile}
+            onBack={() => setStagedDocument(null)}
+          />
+        ) : document ? (
           <>
             <PDFViewer
               ref={pdfViewerRef}
@@ -1351,12 +1420,6 @@ const App: React.FC = () => {
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
-            />
-            <ConversionActionBar
-              visible={showConversionBar}
-              onClose={() => setShowConversionBar(false)}
-              onConvertToImages={() => setConvertFromDialogOpen(true)}
-              onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div
@@ -1391,13 +1454,15 @@ const App: React.FC = () => {
         <ToolsPanel
           visible={toolsPanelVisible}
           onToggle={() => setToolsPanelVisible(prev => !prev)}
-          disabled={!document}
+          docType={docType}
+          stagedName={stagedDocument?.name}
           onMergePdfs={() => setMergeDialogOpen(true)}
           onSplitPdf={() => setSplitDialogOpen(true)}
           onExtractPages={() => setExtractPagesDialogOpen(true)}
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
-          onConvertToPdf={() => setConvertDialogOpen(true)}
+          onConvertToPdf={() => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); }}
+          onConvertStagedToPdf={handleConvertStagedToPdf}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
@@ -1464,8 +1529,10 @@ const App: React.FC = () => {
 
       <ConvertToPdfDialog
         isOpen={convertDialogOpen}
-        onClose={() => setConvertDialogOpen(false)}
+        onClose={() => { setConvertDialogOpen(false); setConvertToPdfInitialFiles(undefined); }}
         libreOfficeAvailable={libreOfficeAvailable}
+        initialFiles={convertToPdfInitialFiles}
+        onConverted={convertToPdfInitialFiles ? handleStagedConverted : undefined}
       />
 
       {document && (

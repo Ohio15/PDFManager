@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    # Gates the main process (src/main — includes the IPC security layer).
+    # DEBT: renderer typecheck (npm run typecheck:renderer) is NOT gated —
+    # 155 pre-existing tsc errors (tracked as review issue #7). Gate it once
+    # that baseline is burned down to zero.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  test:
+    # The path-confinement threat model (junctions, UNC, device paths, 8.3
+    # names, drive-letter casing, ADS) is Windows-specific, so the suite must
+    # run on windows-latest — a Linux-only run leaves those assertions unexercised
+    # (round-3 T-1/T-2). Ubuntu stays for fast cross-platform coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test

@@ -59,14 +59,12 @@ test.describe('Save Pipeline', () => {
     const data = await appPage.evaluate(() => (window as any).__savedPdfData);
     const error = await appPage.evaluate(() => (window as any).__savePipelineError);
 
-    // Test passes if save completed (data captured) or pipeline ran but errored
-    // (which proves the save flow was triggered — the error is a pipeline bug, not a test bug)
-    if (data) {
-      expect(data.length).toBeGreaterThan(100);
-    } else {
-      // Pipeline errored — still proves Ctrl+S triggers save flow
-      expect(error || 'timeout').toBeTruthy();
-    }
+    // The save must actually complete and produce PDF data. A pipeline error
+    // or timeout is a FAILURE — the previous accept-anything assertion here
+    // masked the page-ops data-corruption bug fixed in v2.14.1.
+    expect(error).toBeNull();
+    expect(data, 'save pipeline produced no PDF data before timeout').toBeTruthy();
+    expect(data.length).toBeGreaterThan(100);
 
     // Verify app is still functional
     const canvas = appPage.locator('canvas').first();

@@ -31,3 +31,16 @@ npm-debug.log*
 *.swp
 *.swo
 *~
+
+# Playwright / test output artifacts (belong in CI, not git)
+playwright-report/
+test-results/
+test-pdfs/*.pdf
+test-pdfs/*.png
+
+# Playwright / test output artifacts (belong in CI, not git)
+playwright-report/
+test-results/
+test-pdfs/roundtrip-output.pdf
+test-pdfs/verif-*.pdf
+test-pdfs/verif-*.png

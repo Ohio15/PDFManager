@@ -35,6 +35,9 @@ import { preparePageSource } from '../utils/pageInsertSource';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
+import { useMarkupRedaction } from './useMarkupRedaction';
+import { bakeFormValues } from '../utils/documentTransforms';
+import { withPdfJsDocument } from '../utils/pdfjsReload';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -69,6 +72,20 @@ interface HistoryEntry {
   redo: () => void;
 }
 
+/** A byte-level transform of the whole document (form authoring, flatten, compress). */
+export interface DocumentTransformInput {
+  /** The document as committed when the transform starts (serialized with page ops). */
+  doc: PDFDocument;
+  /** doc.pdfData with the values typed into form widgets written in. Transform these. */
+  bakedBytes: Uint8Array;
+}
+
+export interface DocumentTransformOutput {
+  pdfData: Uint8Array;
+  /** Replacement page model; omit to keep doc.pages (geometry must be unchanged). */
+  pages?: PDFDocument['pages'];
+}
+
 interface TabState {
   document: PDFDocument | null;
   modified: boolean;
@@ -96,10 +113,8 @@ export function usePDFDocument() {
   // Form field state
   const [formFieldMappings, setFormFieldMappings] = useState<FormFieldMapping[]>([]);
   const annotationStorageRef = useRef<any>(null);
-  // The pdfData the current formFieldMappings were built from. Mappings carry
-  // page indices and widget ids, so they go stale whenever pdfData is rebuilt
-  // (page ops, undo/redo, save, tab switch); see the rebuild effect below.
-  const mappingsSourceRef = useRef<Uint8Array | null>(null);
+  const formFieldMappingsRef = useRef<FormFieldMapping[]>([]);
+  formFieldMappingsRef.current = formFieldMappings;
 
   // Ref that always holds the latest state values (updated synchronously each render)
   const stateRef = useRef<{
@@ -236,37 +251,6 @@ export function usePDFDocument() {
 
     setTabs(newTabs);
   }, []);
-
-  // Rebuild form-field mappings whenever the bytes behind the active document
-  // change by any path other than openFile. Without this, a page op leaves the
-  // mappings pointing at old page indices, widgets created by duplicate/insert
-  // have no mapping (their values never save), and a tab switch keeps the
-  // previous tab's mappings.
-  const activePdfData = document?.pdfData;
-  useEffect(() => {
-    if (!activePdfData || activePdfData.length === 0) return;
-    if (mappingsSourceRef.current === activePdfData) return;
-    let cancelled = false;
-    let proxy: pdfjsLib.PDFDocumentProxy | null = null;
-    (async () => {
-      try {
-        proxy = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: new Uint8Array(activePdfData) }).promise;
-        const mappings = await buildFormFieldMapping(proxy);
-        if (cancelled) return;
-        mappingsSourceRef.current = activePdfData;
-        setFormFieldMappings(mappings);
-      } catch (e) {
-        if (!cancelled) {
-          console.warn('Failed to rebuild form field mappings:', e);
-          mappingsSourceRef.current = activePdfData;
-          setFormFieldMappings([]);
-        }
-      } finally {
-        proxy?.destroy().catch(() => {});
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [activePdfData]);
 
   // Clear in-memory plaintext material on app/window unload — passwords
   // always; pdfData only for protected docs (decrypted plaintext).
@@ -493,9 +477,6 @@ export function usePDFDocument() {
       const tabId = generateTabId();
       const newTab: TabInfo = { id: tabId, fileName, filePath, modified: false };
 
-      // Mappings for these bytes are built just below; stop the rebuild effect
-      // from parsing the same document a second time.
-      mappingsSourceRef.current = workingBytes;
       setDocument(newDoc);
       setModified(false);
       setHistory([]);
@@ -511,14 +492,8 @@ export function usePDFDocument() {
         historyIndex: -1,
       });
 
-      // Build form field mappings for the new document
-      try {
-        const mappings = await buildFormFieldMapping(pdfDoc);
-        setFormFieldMappings(mappings);
-      } catch (e) {
-        console.warn('Failed to build form field mappings:', e);
-        setFormFieldMappings([]);
-      }
+      // Form field mappings are rebuilt from pdfData by the effect below.
+      await pdfDoc.destroy();
     } catch (error) {
       console.error('Failed to open PDF:', error);
       throw error;
@@ -530,18 +505,59 @@ export function usePDFDocument() {
     }
   }, [saveCurrentTabState, switchTab]);
 
-  // Shared post-save logic: re-extract text items from the modified PDF
+  // Rebuild the pdf.js field mappings whenever the bytes change: open, tab
+  // switch, structural ops, form authoring, flatten, compress, undo/redo. The
+  // mappings key pdf.js annotation ids that only exist in those exact bytes.
+  const mappingRequestRef = useRef(0);
+  const currentPdfData = document?.pdfData;
+  useEffect(() => {
+    const requestId = ++mappingRequestRef.current;
+    if (!currentPdfData || currentPdfData.length === 0) {
+      setFormFieldMappings([]);
+      return;
+    }
+    withPdfJsDocument(currentPdfData, (pdf) => buildFormFieldMapping(pdf))
+      .then((mappings) => {
+        if (mappingRequestRef.current === requestId) setFormFieldMappings(mappings);
+      })
+      .catch((e) => {
+        console.warn('Failed to build form field mappings:', e);
+        if (mappingRequestRef.current === requestId) setFormFieldMappings([]);
+      });
+  }, [currentPdfData]);
+
+  // Shared post-save logic: re-extract text items from the modified PDF and
+  // commit the saved state. `savedFrom` is the document the save was built
+  // from; the write-back is applied only if it is STILL the current document.
+  // An undo, page op, edit or tab switch that landed while the save was in
+  // flight is newer than the save, so it wins: the write-back is dropped and
+  // the document stays modified (returns false). Previously the save's
+  // setDocument(prev => ...) silently overwrote such a change.
   const reExtractTextAfterSave = useCallback(async (
+    savedFrom: PDFDocument,
     modifiedPdfBytes: Uint8Array,
+    extra: Partial<PDFDocument>,
     newFilePath?: string | null,
     newFileName?: string
-  ) => {
+  ): Promise<boolean> => {
+    const commitIfUnchanged = (pages: PDFDocument['pages']): boolean => {
+      if (stateRef.current.document !== savedFrom) return false;
+      commitDocument({
+        ...savedFrom,
+        ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
+        ...(newFileName ? { fileName: newFileName } : {}),
+        ...extra,
+        pdfData: modifiedPdfBytes,
+        pages,
+      });
+      return true;
+    };
     try {
       const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
       const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs }).promise;
 
       const updatedPages = await Promise.all(
-        (document?.pages || []).map(async (page, i) => {
+        savedFrom.pages.map(async (page, i) => {
           const pdfPage = await pdfDocReload.getPage(i + 1);
           const viewport = pdfPage.getViewport({ scale: 1 });
           const [viewX1, viewY1] = viewport.viewBox;
@@ -620,21 +636,11 @@ export function usePDFDocument() {
         })
       );
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
-          ...(newFileName ? { fileName: newFileName } : {}),
-          pdfData: modifiedPdfBytes,
-          pages: updatedPages,
-        };
-      });
+      return commitIfUnchanged(updatedPages);
     } catch (reloadError) {
       console.error('Error re-extracting text after save:', reloadError);
-      setDocument((prev) => {
-        if (!prev) return null;
-        const updatedPages = prev.pages.map(page => ({
+      {
+        const updatedPages = savedFrom.pages.map(page => ({
           ...page,
           textEdits: [],
           annotations: [], // Clear annotations written to content stream to prevent double-rendering
@@ -644,16 +650,10 @@ export function usePDFDocument() {
             isEdited: false,
           })),
         }));
-        return {
-          ...prev,
-          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
-          ...(newFileName ? { fileName: newFileName } : {}),
-          pdfData: modifiedPdfBytes,
-          pages: updatedPages,
-        };
-      });
+        return commitIfUnchanged(updatedPages);
+      }
     }
-  }, [document]);
+  }, [commitDocument]);
 
   /** Apply pending encryption changes (or retain current encryption) to plaintext output bytes. */
   const applyOutputEncryption = useCallback(async (
@@ -714,14 +714,12 @@ export function usePDFDocument() {
       if (result.success) {
         // Re-extract from the plaintext (not the encrypted output) so downstream
         // tools continue to operate on plaintext bytes in memory.
-        await reExtractTextAfterSave(editedPlaintext);
-        setDocument((prev) => prev ? {
-          ...prev,
+        const applied = await reExtractTextAfterSave(document, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
-        } : null);
-        setModified(false);
+        });
+        if (applied) setModified(false);
       } else {
         throw new Error(result.error || 'Failed to save file');
       }
@@ -731,7 +729,7 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings, applyOutputEncryption]);
+  }, [document, formFieldMappings, applyOutputEncryption, reExtractTextAfterSave]);
 
   // Returns true only when the file was actually written (false on dialog
   // cancel), so callers can toast accurately instead of testing a void return.
@@ -753,14 +751,12 @@ export function usePDFDocument() {
       const result = await window.electronAPI.saveFileDialog(base64, document.fileName);
       if (result.success && result.path) {
         const fileName = result.path.split(/[\\/]/).pop() || 'Untitled';
-        await reExtractTextAfterSave(editedPlaintext, result.path, fileName);
-        setDocument((prev) => prev ? {
-          ...prev,
+        const applied = await reExtractTextAfterSave(document, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
-        } : null);
-        setModified(false);
+        }, result.path, fileName);
+        if (applied) setModified(false);
         return true;
       }
       return false;
@@ -770,7 +766,7 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings, applyOutputEncryption]);
+  }, [document, formFieldMappings, applyOutputEncryption, reExtractTextAfterSave]);
 
   /** Set, change, or remove the document password. Applied on next save. */
   const setPendingEncryption = useCallback((pending: PDFDocument['pendingEncryption']) => {
@@ -1570,6 +1566,42 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [runPageEdit]
   );
 
+  /**
+   * Commit a byte-level transform as one undoable step, serialized with the
+   * structural page ops. Live form values are baked first (see
+   * documentTransforms.ts); the baked bytes are the undo target so undo keeps
+   * the values typed before the transform. Resolves with the transform's
+   * output, or null when it declined (returned null) or no document is open.
+   */
+  const applyDocumentTransform = useCallback(
+    async <T extends DocumentTransformOutput>(
+      type: string,
+      transform: (input: DocumentTransformInput) => Promise<T | null>
+    ): Promise<T | null> => {
+      let result: T | null = null;
+      await runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc) return;
+        const bakedBytes = await bakeFormValues(doc.pdfData, annotationStorageRef.current, formFieldMappingsRef.current);
+        const output = await transform({ doc, bakedBytes });
+        if (!output) return;
+        const pages = output.pages ?? doc.pages;
+        const nextDoc: PDFDocument = { ...doc, pdfData: output.pdfData, pages, pageCount: pages.length };
+        const undoDoc: PDFDocument = bakedBytes === doc.pdfData ? doc : { ...doc, pdfData: bakedBytes };
+        commitDocument(nextDoc);
+        addToHistory({
+          type,
+          undo: () => commitDocument(undoDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+        result = output;
+      });
+      return result;
+    },
+    [runStructural, addToHistory, commitDocument]
+  );
+
+  const markupRedaction = useMarkupRedaction({ stateRef, commitDocument, addToHistory, applyDocumentTransform });
 
   const undo = useCallback(() => {
     const { history: hist, historyIndex: idx } = stateRef.current;
@@ -1631,6 +1663,10 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Text markup + redaction
+    ...markupRedaction,
+    // Byte-level transforms (form authoring, flatten, compress)
+    applyDocumentTransform,
   };
 }
 

@@ -49,6 +49,7 @@ import {
 import { ResourceAllocator } from './pdfResourceManager';
 import { appendContentStream } from './contentStreamInjector';
 import { visiblePageBox, PdfBox } from './pageStructure';
+import { writeRedactAnnotation, writeTextMarkupAnnotation } from './markupAnnotationWriter';
 import {
   mapToStandardFontName,
   measureTextWidth,
@@ -435,6 +436,17 @@ async function processAnnotations(
   const pendingStickyNotes: PendingStickyNote[] = [];
 
   for (const annotation of page.annotations) {
+    // Text markup and pending redaction marks are written as real annotation
+    // dictionaries (with appearance streams), never into the content stream —
+    // see markupAnnotationWriter.ts for why.
+    if (annotation.type === 'textMarkup') {
+      writeTextMarkupAnnotation(pdfDoc, page.index, annotation);
+      continue;
+    }
+    if (annotation.type === 'redaction') {
+      writeRedactAnnotation(pdfDoc, page.index, annotation);
+      continue;
+    }
     if (annotation.type === 'image') {
       const imageChunk = await buildImageChunk(pdfDoc, resources, page.index, annotation, pageHeight);
       if (imageChunk) batchedChunks.push(imageChunk);

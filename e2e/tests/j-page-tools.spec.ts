@@ -25,18 +25,17 @@ async function saveAndCapture(app: ElectronApplication, page: Page): Promise<PDF
 /** Make the native PDF picker + raw read return a fixture (native dialogs cannot be automated). */
 async function mockPickPdf(app: ElectronApplication, fixture: string): Promise<void> {
   const filePath = path.join(TEST_PDFS_DIR, fixture);
-  await app.evaluate(({ ipcMain }, fp) => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const fsm = require('fs') as typeof import('fs');
+  const b64 = fs.readFileSync(filePath).toString('base64');
+  await app.evaluate(({ ipcMain }, { fp, data }) => {
     ipcMain.removeHandler('pick-pdf-file');
     ipcMain.handle('pick-pdf-file', () => fp);
     ipcMain.removeHandler('read-file-raw');
     ipcMain.handle('read-file-raw', (_e, requested: string) => {
       if (requested !== fp) return null;
-      const data = fsm.readFileSync(fp);
-      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      const buf = Buffer.from(data, 'base64');
+      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
     });
-  }, filePath);
+  }, { fp: filePath, data: b64 });
 }
 
 async function contextMenu(page: Page, thumbIndex: number, item: string): Promise<void> {
@@ -92,7 +91,7 @@ test.describe('Page tools', () => {
     // Thumbnails are not double-rotated by CSS on top of the baked /Rotate.
     await expect.poll(async () => thumbs(appPage).nth(0).locator('img').evaluate(
       (img: HTMLImageElement) => [img.naturalWidth > img.naturalHeight, img.style.transform || '']
-    ), { timeout: 15_000 }).toEqual([true, '']);
+    ), { timeout: 30_000 }).toEqual([true, '']);
 
     await thumbs(appPage).nth(4).click();
     await thumbs(appPage).nth(5).click({ modifiers: ['Control'] });

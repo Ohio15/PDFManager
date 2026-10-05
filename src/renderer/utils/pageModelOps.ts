@@ -94,6 +94,11 @@ function shiftAnnotation(a: Annotation, dx: number, dy: number): Annotation {
       return { ...a, rects: a.rects.map((r) => shiftPoint(r, dx, dy)) };
     case 'drawing':
       return { ...a, paths: a.paths.map((path) => ({ ...path, points: path.points.map((pt) => shiftPoint(pt, dx, dy)) })) };
+    case 'textMarkup':
+    case 'redaction':
+      // Stored in absolute PDF user space (/QuadPoints, /Redact rects): a crop
+      // does not move them.
+      return a;
     default:
       return { ...a, position: shiftPoint(a.position, dx, dy) } as Annotation;
   }

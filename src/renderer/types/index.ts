@@ -89,6 +89,49 @@ export interface HighlightAnnotation {
   color: string;
 }
 
+export type TextMarkupType = 'highlight' | 'underline' | 'strikeout' | 'squiggly';
+
+/**
+ * Text markup created from a real text selection. Geometry is in PDF user
+ * space (bottom-left origin, unrotated) so it maps 1:1 onto /QuadPoints.
+ * Each quad is [ULx, ULy, URx, URy, LLx, LLy, LRx, LRy] in reading
+ * orientation (the de-facto order used by Acrobat and pdf.js).
+ */
+export interface TextMarkupAnnotation {
+  id: string;
+  type: 'textMarkup';
+  pageIndex: number;
+  markupType: TextMarkupType;
+  quads: number[][];
+  color: string;
+  opacity: number;
+  text?: string;
+}
+
+export interface PdfRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * A pending (unapplied) redaction mark. Rects are PDF user space. Saving
+ * without applying writes standard /Redact annotations; content is only
+ * removed by "Apply redactions".
+ */
+export interface RedactionMarkAnnotation {
+  id: string;
+  type: 'redaction';
+  pageIndex: number;
+  rects: PdfRect[];
+  source: 'area' | 'text' | 'search';
+  text?: string;
+  /** Search-and-redact group: the term is verified absent only if the whole group is applied unedited. */
+  searchGroup?: { id: string; term: string; size: number };
+  edited?: boolean;
+}
+
 export interface PDFTextItem {
   id: string;
   str: string;
@@ -146,7 +189,9 @@ export type Annotation =
   | HighlightAnnotation
   | ShapeAnnotation
   | StickyNoteAnnotation
-  | StampAnnotation;
+  | StampAnnotation
+  | TextMarkupAnnotation
+  | RedactionMarkAnnotation;
 
 export interface PDFPage {
   index: number;
@@ -208,6 +253,12 @@ export interface AnnotationStyle {
   stampType: 'approved' | 'rejected' | 'draft' | 'confidential' | 'final' | 'custom';
   stampText: string;
   noteColor: string;
+  /** Highlight tool: select text (default) or drag a rectangle. */
+  highlightMode?: 'text' | 'area';
+  /** Text Markup tool sub-type. */
+  markupType?: Exclude<TextMarkupType, 'highlight'>;
+  /** Redact tool: drag an area (default) or select text. */
+  redactMode?: 'area' | 'text';
 }
 
 export interface TabInfo {

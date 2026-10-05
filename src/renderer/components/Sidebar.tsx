@@ -115,20 +115,26 @@ const Sidebar: React.FC<SidebarProps> = ({
     return items;
   }, [document]);
 
-  // Generate thumbnails
+  // Generate thumbnails. They depend only on the bytes, and a newer run must
+  // win: without cancellation, a slow run for an older pdfData (e.g. the middle
+  // step of several quick rotations) could finish last and show stale pages.
+  const thumbnailPdfData = document?.pdfData;
   useEffect(() => {
-    if (!document) {
+    if (!thumbnailPdfData) {
       setThumbnails([]);
       return;
     }
+    let cancelled = false;
+    let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
 
     const generateThumbnails = async () => {
       try {
-        const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
+        const dataCopy = new Uint8Array(thumbnailPdfData);
+        pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const newThumbnails: string[] = [];
 
         for (let i = 1; i <= pdfDoc.numPages; i++) {
+          if (cancelled) return;
           const page = await pdfDoc.getPage(i);
           const viewport = page.getViewport({ scale: 0.2 });
 
@@ -145,14 +151,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           newThumbnails.push(canvas.toDataURL());
         }
 
-        setThumbnails(newThumbnails);
+        if (!cancelled) setThumbnails(newThumbnails);
       } catch (error) {
-        console.error('Failed to generate thumbnails:', error);
+        if (!cancelled) console.error('Failed to generate thumbnails:', error);
+      } finally {
+        pdfDoc?.destroy().catch(() => {});
       }
     };
 
     generateThumbnails();
-  }, [document]);
+    return () => { cancelled = true; };
+  }, [thumbnailPdfData]);
 
   // Extract bookmarks/outline from PDF
   useEffect(() => {

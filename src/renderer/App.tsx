@@ -26,6 +26,14 @@ import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
+import RedactionToolbar from './components/RedactionToolbar';
+import FormDesignerPanel from './components/FormDesignerPanel';
+import FormFieldOverlay from './components/FormFieldOverlay';
+import FlattenDialog from './components/FlattenDialog';
+import CompressDialog from './components/CompressDialog';
+import { useFormDesigner } from './hooks/useFormDesigner';
+import { useFinalizeActions } from './hooks/useFinalizeActions';
+import type { FlattenScope } from './utils/flatten';
 import DropOverlay from './components/DropOverlay';
 import CropPagesDialog from './components/CropPagesDialog';
 import { usePageSelection } from './hooks/usePageSelection';
@@ -41,7 +49,7 @@ import { useAppFileDrop } from './hooks/useFileDrop';
 import '../shared/ipc';
 import type { DropResult } from '../shared/ipc';
 
-export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature' | 'markup' | 'redact' | 'form';
 
 // Helper to convert Uint8Array to base64
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -124,6 +132,10 @@ const App: React.FC = () => {
     addShape,
     addStickyNote,
     addStamp,
+    addTextMarkup,
+    addRedactionMark,
+    markSearchResults,
+    applyRedactionMarks,
     insertBlankPage,
     replacePage,
     deletePage,
@@ -153,11 +165,38 @@ const App: React.FC = () => {
     rotatePages,
     cropPages,
     insertPdfPagesAt,
+    applyDocumentTransform,
   } = usePDFDocument();
 
   // Thumbnail multi-selection (0-based); page tools act on pageSelection.effective.
   const pageSelection = usePageSelection(document, activeTabId, currentPage, setCurrentPage);
   const [cropDialogPages, setCropDialogPages] = useState<number[] | null>(null);
+
+  // Forms + Finalize: form authoring tool, flatten, compress
+  const [flattenDialog, setFlattenDialog] = useState<{ open: boolean; scope: FlattenScope }>({ open: false, scope: 'both' });
+  const [compressDialogOpen, setCompressDialogOpen] = useState(false);
+  const formDesigner = useFormDesigner({
+    pdfData: document?.pdfData,
+    active: currentTool === 'form' && !!document,
+    applyDocumentTransform,
+    onError: toast.error,
+  });
+  const { flatten, analyzeCompress, applyCompress } = useFinalizeActions(applyDocumentTransform);
+  const handleFlatten = useCallback(async (scope: FlattenScope) => {
+    const result = await flatten(scope);
+    if (!result) return;
+    const { report } = result;
+    const parts = [
+      report.widgetsFlattened ? `${report.widgetsFlattened} form widget${report.widgetsFlattened === 1 ? '' : 's'}` : '',
+      report.annotationsFlattened + result.pendingAnnotationsBurned
+        ? `${report.annotationsFlattened + result.pendingAnnotationsBurned} annotation${report.annotationsFlattened + result.pendingAnnotationsBurned === 1 ? '' : 's'}`
+        : '',
+    ].filter(Boolean);
+    toast.success(parts.length ? `Flattened ${parts.join(' and ')}` : 'Nothing to flatten');
+    const kept = report.annotationsWithoutAppearance;
+    if (kept > 0) toast.warning(`${kept} annotation${kept === 1 ? ' has' : 's have'} no appearance to burn in and ${kept === 1 ? 'was' : 'were'} kept`);
+    if (report.appearanceFailures > 0) toast.warning(`${report.appearanceFailures} field appearance${report.appearanceFailures === 1 ? '' : 's'} could not be regenerated; the stored appearance was used`);
+  }, [flatten, toast]);
 
   // Refresh the recent files list
   const refreshRecentFiles = useCallback(async () => {
@@ -481,47 +520,9 @@ const App: React.FC = () => {
     // Force re-render by toggling a state (the form fields will reload from PDF defaults)
   }, [toast]);
 
-  const handleFlattenForm = useCallback(async () => {
-    if (!document) return;
-    const confirmed = window.confirm(
-      'Flattening will convert all form fields to static content. This cannot be undone. Continue?'
-    );
-    if (!confirmed) return;
-
-    try {
-      const { PDFDocument: PDFLibDoc } = await import('pdf-lib');
-      const pdfDoc = await PDFLibDoc.load(document.pdfData);
-
-      // Save current form values first
-      if (annotationStorageRef.current && formFieldMappings.length > 0) {
-        const { saveFormFieldValues } = await import('./utils/formFieldSaver');
-        await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
-      }
-
-      const form = pdfDoc.getForm();
-      form.flatten();
-
-      const flattenedPlaintext = await pdfDoc.save();
-      const flattenedBytes = await reEncryptIfProtected(new Uint8Array(flattenedPlaintext), document);
-      const base64 = uint8ArrayToBase64(flattenedBytes);
-
-      const result = await window.electronAPI.saveFileDialog(
-        base64,
-        document.fileName.replace(/\.pdf$/i, '_flattened.pdf')
-      );
-      if (result.success && result.path) {
-        toast.success('Form flattened successfully');
-        // Open the flattened file
-        const fileData = await window.electronAPI.readFileByPath(result.path);
-        if (fileData) {
-          await openFile(fileData.path, fileData.data);
-        }
-      }
-    } catch (error) {
-      console.error('Failed to flatten form:', error);
-      toast.error('Failed to flatten form');
-    }
-  }, [document, formFieldMappings, toast, openFile]);
+  const handleFlattenForm = useCallback(() => {
+    setFlattenDialog({ open: true, scope: 'forms' });
+  }, []);
 
   const handleImportFormData = useCallback(async () => {
     if (!annotationStorageRef.current || formFieldMappings.length === 0) {
@@ -651,7 +652,16 @@ const App: React.FC = () => {
     switchTab(tabId);
   }, [switchTab]);
 
+  const pendingRedactionMarks = useMemo(
+    () => document?.pages.reduce((n, p) => n + p.annotations.filter((a) => a.type === 'redaction').length, 0) ?? 0,
+    [document]
+  );
+
   const handleSave = useCallback(async () => {
+    if (pendingRedactionMarks > 0) {
+      // Unapplied marks are saved as /Redact annotations; nothing is removed yet.
+      toast.warning(`${pendingRedactionMarks} redaction mark${pendingRedactionMarks === 1 ? ' is' : 's are'} not applied: the content under them is still in the file. Use Redact > Apply redactions to remove it.`);
+    }
     try {
       if (document?.filePath) {
         try {
@@ -684,7 +694,7 @@ const App: React.FC = () => {
       toast.error('Failed to save document');
       console.error('Save error:', error);
     }
-  }, [document, saveFile, saveFileAs, toast]);
+  }, [document, saveFile, saveFileAs, toast, pendingRedactionMarks]);
 
   const handlePrint = useCallback(() => {
     if (document) {
@@ -1457,6 +1467,17 @@ const App: React.FC = () => {
         onStyleChange={handleStyleChange}
       />
 
+      {currentTool === 'redact' && document && (
+        <RedactionToolbar
+          style={annotationStyle}
+          onStyleChange={handleStyleChange}
+          markCount={pendingRedactionMarks}
+          onMarkSearch={markSearchResults}
+          onApply={applyRedactionMarks}
+          notify={toast}
+        />
+      )}
+
       <SearchBar
         isOpen={searchBarOpen}
         onClose={() => setSearchBarOpen(false)}
@@ -1531,6 +1552,16 @@ const App: React.FC = () => {
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
+              onAddTextMarkup={addTextMarkup}
+              onAddRedactionMark={addRedactionMark}
+              renderPageOverlay={currentTool === 'form'
+                ? (pageIndex, scale) => <FormFieldOverlay pageIndex={pageIndex} scale={scale} designer={formDesigner} />
+                : undefined}
+            />
+            <FormDesignerPanel
+              visible={currentTool === 'form'}
+              designer={formDesigner}
+              onClose={() => handleToolChange('select')}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div
@@ -1579,6 +1610,8 @@ const App: React.FC = () => {
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
+          onFlatten={() => setFlattenDialog({ open: true, scope: 'both' })}
+          onCompress={() => setCompressDialogOpen(true)}
           libreOfficeAvailable={libreOfficeAvailable}
         />
 
@@ -1615,6 +1648,24 @@ const App: React.FC = () => {
           onApply={handleCropPages}
         />
       )}
+      <FlattenDialog
+        isOpen={flattenDialog.open}
+        onClose={() => setFlattenDialog((d) => ({ ...d, open: false }))}
+        pdfData={document?.pdfData}
+        pendingAnnotationCount={document?.pages.reduce((n, p) => n + p.annotations.length, 0) ?? 0}
+        initialScope={flattenDialog.scope}
+        onFlatten={handleFlatten}
+      />
+      <CompressDialog
+        isOpen={compressDialogOpen}
+        onClose={() => setCompressDialogOpen(false)}
+        onAnalyze={analyzeCompress}
+        onApply={async (analysis) => {
+          const applied = await applyCompress(analysis);
+          if (applied) toast.success('Compression applied — save to write the smaller file');
+          return applied;
+        }}
+      />
       <MergePdfsDialog
         isOpen={mergeDialogOpen}
         onClose={() => setMergeDialogOpen(false)}

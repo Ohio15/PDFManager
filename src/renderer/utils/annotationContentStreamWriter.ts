@@ -519,6 +519,11 @@ export function writeAnnotation(
       return writeTextAnnotation(annotation, pageHeight);
     case 'image':
       return writeImageAnnotation(annotation, pageHeight);
+    case 'textMarkup':
+    case 'redaction':
+      // Written as annotation dictionaries by markupAnnotationWriter.ts;
+      // drawing them into the content stream too would double-render.
+      return null;
     default:
       return null;
   }

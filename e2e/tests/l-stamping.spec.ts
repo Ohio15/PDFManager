@@ -1,6 +1,6 @@
 import { test, expect } from '../fixtures/electron-app';
-import { openPDFViaIPC } from '../fixtures/helpers';
-import type { Page } from '@playwright/test';
+import { openPDFViaIPC, interceptSaveIpc, getInterceptedSaves } from '../fixtures/helpers';
+import type { ElectronApplication, Page } from '@playwright/test';
 
 /**
  * Stamping end to end: drive the real dialog, then capture the bytes the app
@@ -14,22 +14,20 @@ async function openStampDialog(page: Page): Promise<void> {
   await expect(page.locator('[data-testid="stamping-dialog"]')).toBeVisible({ timeout: 5_000 });
 }
 
-/** Save via Ctrl+S with the IPC write intercepted; returns the saved PDF bytes. */
-async function captureSave(page: Page): Promise<Buffer> {
-  await page.evaluate(() => {
-    const api = (window as any).electronAPI;
-    (window as any).__savedPdfData = null;
-    const interceptor = (data: string) => {
-      (window as any).__savedPdfData = data;
-      return Promise.resolve({ success: true, path: 'C:/fake/stamped.pdf' });
-    };
-    api.saveFile = interceptor;
-    api.saveFileDialog = interceptor;
-  });
+/**
+ * Save via Ctrl+S and capture the bytes at the main-process IPC boundary
+ * (the contextBridge API cannot be patched from the renderer).
+ */
+async function captureSave(electronApp: ElectronApplication, page: Page): Promise<Buffer> {
+  await interceptSaveIpc(electronApp);
+  // Ctrl+S is ignored while an input has focus.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.keyboard.press('Control+s');
-  await page.waitForFunction(() => (window as any).__savedPdfData !== null, undefined, { timeout: 20_000 });
-  const b64 = await page.evaluate(() => (window as any).__savedPdfData as string);
-  return Buffer.from(b64, 'base64');
+  await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+  const saves = await getInterceptedSaves(electronApp);
+  const bytes = Buffer.from(saves[saves.length - 1].data, 'base64');
+  expect(bytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
+  return bytes;
 }
 
 async function pageTexts(bytes: Buffer): Promise<string[]> {
@@ -63,7 +61,7 @@ test.describe('Stamping', () => {
     await appPage.locator('[data-testid="stamp-apply"]').click();
     await expect(appPage.locator('[data-testid="stamping-dialog"]')).toBeHidden({ timeout: 15_000 });
 
-    const texts = await pageTexts(await captureSave(appPage));
+    const texts = await pageTexts(await captureSave(electronApp, appPage));
     expect(texts).toHaveLength(3);
     expect(texts[0]).toContain('E2E00041');
     expect(texts[1]).toContain('E2E00042');
@@ -78,24 +76,24 @@ test.describe('Stamping', () => {
     await expect(appPage.locator('[data-testid="stamp-apply"]')).toBeEnabled({ timeout: 10_000 });
     await appPage.locator('[data-testid="stamp-apply"]').click();
     await expect(appPage.locator('[data-testid="stamping-dialog"]')).toBeHidden({ timeout: 15_000 });
-    expect((await pageTexts(await captureSave(appPage)))[0]).toContain('E2E-WATERMARK');
+    expect((await pageTexts(await captureSave(electronApp, appPage)))[0]).toContain('E2E-WATERMARK');
 
     // Undo restores the unstamped bytes.
-    await appPage.locator('.pdf-viewer').first().click({ position: { x: 5, y: 5 } }).catch(() => {});
+    await appPage.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await appPage.keyboard.press('Control+z');
-    await expect.poll(async () => (await pageTexts(await captureSave(appPage)))[0], { timeout: 15_000 })
+    await expect.poll(async () => (await pageTexts(await captureSave(electronApp, appPage)))[0], { timeout: 15_000 })
       .not.toContain('E2E-WATERMARK');
 
     // Redo, then remove through the dialog.
     await appPage.keyboard.press('Control+y');
-    await expect.poll(async () => (await pageTexts(await captureSave(appPage)))[0], { timeout: 15_000 })
+    await expect.poll(async () => (await pageTexts(await captureSave(electronApp, appPage)))[0], { timeout: 15_000 })
       .toContain('E2E-WATERMARK');
     await openStampDialog(appPage);
     const remove = appPage.locator('[data-testid="stamp-remove"]');
     await expect(remove).toBeVisible({ timeout: 10_000 });
     await remove.click();
     await expect(appPage.locator('[data-testid="stamping-dialog"]')).toBeHidden({ timeout: 15_000 });
-    expect((await pageTexts(await captureSave(appPage)))[0]).not.toContain('E2E-WATERMARK');
+    expect((await pageTexts(await captureSave(electronApp, appPage)))[0]).not.toContain('E2E-WATERMARK');
   });
 
   test('non-WinAnsi text shows a validation error and blocks Apply', async ({ electronApp, appPage }) => {

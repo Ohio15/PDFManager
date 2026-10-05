@@ -28,6 +28,9 @@ import {
   Lock,
   Unlock,
   LockKeyhole,
+  Underline,
+  EyeOff,
+  FormInput,
 } from 'lucide-react';
 
 export type ZoomMode = 'custom' | 'fit-width' | 'fit-page';
@@ -151,11 +154,14 @@ const Toolbar: React.FC<ToolbarProps> = ({
     { id: 'select', icon: <MousePointer />, label: 'Select', shortcut: 'V' },
     { id: 'text', icon: <Type />, label: 'Text', shortcut: 'T' },
     { id: 'highlight', icon: <Highlighter />, label: 'Highlight', shortcut: 'H' },
+    { id: 'markup', icon: <Underline />, label: 'Text Markup' },
+    { id: 'redact', icon: <EyeOff />, label: 'Redact' },
     { id: 'draw', icon: <Pencil />, label: 'Draw', shortcut: 'D' },
     { id: 'shape', icon: <Shapes />, label: 'Shape', shortcut: 'S' },
     { id: 'note', icon: <StickyNote />, label: 'Sticky Note', shortcut: 'N' },
     { id: 'stamp', icon: <Stamp />, label: 'Stamp' },
     { id: 'signature', icon: <PenLine />, label: 'Signature', shortcut: 'G' },
+    { id: 'form', icon: <FormInput />, label: 'Form Fields' },
     { id: 'image', icon: <Image />, label: 'Add Image', shortcut: 'I' },
     { id: 'erase', icon: <Eraser />, label: 'Eraser', shortcut: 'E' },
   ];

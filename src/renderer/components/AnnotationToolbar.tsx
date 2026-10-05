@@ -14,6 +14,11 @@ import {
   Lock,
   Flag,
   Edit3,
+  TextSelect,
+  BoxSelect,
+  Underline,
+  Strikethrough,
+  Waves,
 } from 'lucide-react';
 
 interface AnnotationToolbarProps {
@@ -78,7 +83,7 @@ const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
 }) => {
   const [customStampText, setCustomStampText] = useState(style.stampText || 'CUSTOM');
 
-  const showToolbar = ['text', 'highlight', 'draw', 'shape', 'note', 'stamp', 'signature'].includes(currentTool);
+  const showToolbar = ['text', 'highlight', 'markup', 'draw', 'shape', 'note', 'stamp', 'signature'].includes(currentTool);
   if (!showToolbar) return null;
 
   const renderColorPresets = (
@@ -169,7 +174,55 @@ const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
       {/* Highlight tool */}
       {currentTool === 'highlight' && (
         <>
+          <div className="annotation-toolbar-section">
+            <span className="annotation-toolbar-label">Mode</span>
+            <div className="shape-type-selector">
+              <button
+                className={`annotation-toolbar-btn ${style.highlightMode === 'text' ? 'active' : ''}`}
+                onClick={() => onStyleChange({ highlightMode: 'text' })}
+                title="Highlight selected text"
+                aria-label="Highlight text selection"
+              >
+                <TextSelect size={14} />
+              </button>
+              <button
+                className={`annotation-toolbar-btn ${style.highlightMode !== 'text' ? 'active' : ''}`}
+                onClick={() => onStyleChange({ highlightMode: 'area' })}
+                title="Highlight a rectangle"
+                aria-label="Highlight area"
+              >
+                <BoxSelect size={14} />
+              </button>
+            </div>
+          </div>
           {renderColorPresets(HIGHLIGHT_COLORS, style.color, (c) => onStyleChange({ color: c }), 'Color')}
+        </>
+      )}
+
+      {/* Text markup tool (selection-based underline / strikeout / squiggly) */}
+      {currentTool === 'markup' && (
+        <>
+          <div className="annotation-toolbar-section">
+            <span className="annotation-toolbar-label">Type</span>
+            <div className="shape-type-selector">
+              {([
+                { type: 'underline', icon: <Underline size={14} />, label: 'Underline' },
+                { type: 'strikeout', icon: <Strikethrough size={14} />, label: 'Strikeout' },
+                { type: 'squiggly', icon: <Waves size={14} />, label: 'Squiggly' },
+              ] as const).map((m) => (
+                <button
+                  key={m.type}
+                  className={`annotation-toolbar-btn ${(style.markupType ?? 'underline') === m.type ? 'active' : ''}`}
+                  onClick={() => onStyleChange({ markupType: m.type })}
+                  title={m.label}
+                  aria-label={m.label}
+                >
+                  {m.icon}
+                </button>
+              ))}
+            </div>
+          </div>
+          {renderColorPresets(COLOR_PRESETS, style.strokeColor, (c) => onStyleChange({ strokeColor: c }), 'Color')}
         </>
       )}
 

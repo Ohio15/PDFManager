@@ -14,6 +14,8 @@ import {
   AlertCircle,
   FileType2,
   Stamp,
+  Layers,
+  Minimize2,
 } from 'lucide-react';
 
 export type ToolsDocType = 'pdf' | 'staged' | 'none';
@@ -36,6 +38,9 @@ interface ToolsPanelProps {
   onConvertToDocx: () => void;
   onExportSvg: () => void;
   onStampPages: () => void;
+  /** Finalize tools (shown for PDFs when provided). */
+  onFlatten?: () => void;
+  onCompress?: () => void;
   libreOfficeAvailable: boolean;
 }
 
@@ -64,6 +69,8 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onConvertToDocx,
   onExportSvg,
   onStampPages,
+  onFlatten,
+  onCompress,
   libreOfficeAvailable,
 }) => {
   if (!visible) {
@@ -102,6 +109,10 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'to-svg', label: 'PDF to SVG', icon: <Code size={18} />, onClick: onExportSvg, description: 'Export PDF pages as SVG vector graphics' },
       ],
     });
+    const finalizeTools: ToolDef[] = [];
+    if (onFlatten) finalizeTools.push({ id: 'flatten', label: 'Flatten…', icon: <Layers size={18} />, onClick: onFlatten, description: 'Burn annotations and form fields into the page' });
+    if (onCompress) finalizeTools.push({ id: 'compress', label: 'Compress…', icon: <Minimize2 size={18} />, onClick: onCompress, description: 'Reduce file size (lossless, optional image downsampling)' });
+    if (finalizeTools.length > 0) sections.push({ title: 'Finalize', tools: finalizeTools });
   } else if (docType === 'staged') {
     sections.push({
       title: stagedName ? `Convert "${stagedName}"` : 'Convert',

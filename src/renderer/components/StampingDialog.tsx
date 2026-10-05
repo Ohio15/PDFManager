@@ -22,6 +22,7 @@ import {
   type PageNumberPreset,
   type StampFont,
 } from '../utils/stamping';
+import type { DocumentTransformInput, DocumentTransformOutput } from '../hooks/usePDFDocument';
 import '../styles/stamping.css';
 
 /** Picked image as returned by the existing open-image-dialog IPC. */
@@ -39,10 +40,13 @@ interface StampingDialogProps {
   fileName: string;
   currentPage: number;
   /**
-   * Commit a byte transform to the open document (undoable). Provided by the
-   * document hook so the stamp is rendered by the real viewer immediately.
+   * The document hook's committed byte transform: serialized with page ops,
+   * typed form values baked in first, one undo step, rendered by the real viewer.
    */
-  applyTransform: (type: string, transform: (pdfData: Uint8Array) => Promise<Uint8Array>) => Promise<void>;
+  applyDocumentTransform: <T extends DocumentTransformOutput>(
+    type: string,
+    transform: (input: DocumentTransformInput) => Promise<T | null>
+  ) => Promise<T | null>;
   pickImage: () => Promise<PickedImage | null>;
   onDone: (message: string) => void;
 }
@@ -158,7 +162,7 @@ const StampingDialog: React.FC<StampingDialogProps> = ({
   pageCount,
   fileName,
   currentPage,
-  applyTransform,
+  applyDocumentTransform,
   pickImage,
   onDone,
 }) => {
@@ -392,11 +396,12 @@ const StampingDialog: React.FC<StampingDialogProps> = ({
     setError(null);
     try {
       let stampedCount = 0;
-      await applyTransform(`stamp:${request.kind}`, async (bytes) => {
-        const result = await applyStamp(bytes, request, stampContext, { replaceExisting });
+      const committed = await applyDocumentTransform(`stamp:${request.kind}`, async ({ bakedBytes }) => {
+        const result = await applyStamp(bakedBytes, request, stampContext, { replaceExisting });
         stampedCount = result.stampedPages.length;
-        return result.bytes;
+        return { pdfData: result.bytes };
       });
+      if (!committed) throw new Error('No document is open.');
       onDone(`${STAMP_KIND_LABELS[request.kind]} added to ${stampedCount} page${stampedCount === 1 ? '' : 's'}`);
       onClose();
     } catch (e) {
@@ -404,19 +409,20 @@ const StampingDialog: React.FC<StampingDialogProps> = ({
     } finally {
       setBusy(false);
     }
-  }, [request, applyTransform, stampContext, replaceExisting, onDone, onClose]);
+  }, [request, applyDocumentTransform, stampContext, replaceExisting, onDone, onClose]);
 
   const handleRemove = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      await applyTransform(`removeStamp:${tab}`, async (bytes) => {
-        const result = await removeStamps(bytes, tab);
+      const committed = await applyDocumentTransform(`removeStamp:${tab}`, async ({ bakedBytes }) => {
+        const result = await removeStamps(bakedBytes, tab);
         if (result.removed === 0) {
           throw new Error(`No ${STAMP_KIND_LABELS[tab].toLowerCase()} added by PDF Manager was found.`);
         }
-        return result.bytes;
+        return { pdfData: result.bytes };
       });
+      if (!committed) throw new Error('No document is open.');
       onDone(`${STAMP_KIND_LABELS[tab]} removed`);
       onClose();
     } catch (e) {
@@ -424,7 +430,7 @@ const StampingDialog: React.FC<StampingDialogProps> = ({
     } finally {
       setBusy(false);
     }
-  }, [tab, applyTransform, onDone, onClose]);
+  }, [tab, applyDocumentTransform, onDone, onClose]);
 
   const hasExisting = existingKinds.includes(tab);
 

@@ -240,12 +240,16 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    // Only the in-app thumbnail reorder is handled here. External OS file drags
+    // (no reorder in progress) bubble to the app-wide drop target untouched.
+    if (dragIndex === null) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     setDropIndex(index);
-  }, []);
+  }, [dragIndex]);
 
   const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
+    if (dragIndex === null) return; // external drop: handled app-wide
     e.preventDefault();
     if (dragIndex !== null && dragIndex !== toIndex && onReorderPages) {
       onReorderPages(dragIndex, toIndex);

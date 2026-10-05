@@ -250,7 +250,10 @@ function createWindow(): void {
     title: 'PDF Manager',
   });
 
-  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  // E2E (NODE_ENV=test) must exercise the built renderer in dist/, not whatever
+  // dev server happens to be listening on :5200 (e.g. another checkout's).
+  const isDev =
+    process.env.NODE_ENV === 'development' || (!app.isPackaged && process.env.NODE_ENV !== 'test');
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5200');

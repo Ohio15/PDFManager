@@ -204,6 +204,8 @@ interface PDFViewerProps {
   onFormFieldsDetected?: (count: number) => void;
   onAnnotationStorageReady?: (storage: any) => void;
   formFieldMappings?: FormFieldMapping[];
+  /** Extra layer rendered on top of each page (e.g. the form authoring overlay). */
+  renderPageOverlay?: (pageIndex: number, scale: number) => React.ReactNode;
 }
 
 export interface PDFViewerHandle {
@@ -236,6 +238,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   onFormFieldsDetected,
   onAnnotationStorageReady,
   formFieldMappings,
+  renderPageOverlay,
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
@@ -250,6 +253,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   // AcroForm annotation layer state
   const annotationStorageRef = useRef<any>(null);
+  // renderAnnotationLayer is a stable callback; read the latest mappings via a
+  // ref (they are rebuilt whenever the bytes change, e.g. after form edits).
+  const formFieldMappingsRef = useRef(formFieldMappings);
+  formFieldMappingsRef.current = formFieldMappings;
   const annotationLayerDivsRef = useRef<Map<number, HTMLDivElement>>(new Map());
   const renderedAnnotLayersRef = useRef<Set<number>>(new Set());
   const [hasFormFields, setHasFormFields] = useState(false);
@@ -489,8 +496,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       } as any);
 
       // Post-render: decorate required/readonly fields with data attributes for CSS targeting
-      if (formFieldMappings && formFieldMappings.length > 0) {
-        const pageMappings = formFieldMappings.filter(m => m.pageIndex === pageNum - 1);
+      const currentMappings = formFieldMappingsRef.current;
+      if (currentMappings && currentMappings.length > 0) {
+        const pageMappings = currentMappings.filter(m => m.pageIndex === pageNum - 1);
         for (const mapping of pageMappings) {
           const section = div.querySelector(`[data-annotation-id="${mapping.annotationId}"]`);
           if (!section) continue;
@@ -1717,6 +1725,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
             <div className="text-layer">
               {page?.textItems?.map((textItem) => renderTextItem(pageNum, textItem))}
             </div>
+            {renderPageOverlay?.(i, scale)}
             {/* Highlight preview while drawing */}
             {highlightStart && highlightStart.pageNum === pageNum && highlightPreview && (
               <div

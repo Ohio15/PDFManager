@@ -27,13 +27,16 @@ import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
 import RedactionToolbar from './components/RedactionToolbar';
+import DropOverlay from './components/DropOverlay';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
 import { reEncryptIfProtected } from './utils/pdfEncryption';
 import { isPdf, isConvertibleToPdf } from './utils/supportedFormats';
+import { useAppFileDrop } from './hooks/useFileDrop';
 import '../shared/ipc';
+import type { DropResult } from '../shared/ipc';
 
 export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature' | 'markup' | 'redact';
 
@@ -555,48 +558,79 @@ const App: React.FC = () => {
     pdfViewerRef.current?.scrollToField(pageIndex, rect);
   }, []);
 
-  // A drop hands us the File (bytes), not a trusted path. Read the bytes in the
-  // renderer via FileReader — this works under path confinement (ENFORCE) with
-  // no main-process path read, and can't be abused: the renderer can only read
-  // Files the OS actually dropped. The path (if present) is display metadata
-  // only; a dropped file saves via Save As (its dir isn't blessed).
-  const handleFileDrop = useCallback(async (file: File) => {
-    const fileName = file.name;
-    const displayPath = (file as unknown as { path?: string }).path || fileName;
-    const readAsBase64 = (f: File) =>
-      new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(uint8ArrayToBase64(new Uint8Array(reader.result as ArrayBuffer)));
-        reader.onerror = () => reject(reader.error ?? new Error('Failed to read dropped file'));
-        reader.readAsArrayBuffer(f);
-      });
-
+  // External files dropped from the OS. The preload turns a TRUSTED drop into
+  // main-validated, exactly-blessed {path, name} records (see preload.ts), so
+  // a dropped PDF opens through the same path-based read as File -> Open and
+  // saves back in place; a dropped document can be converted in place.
+  const handleExternalDrop = useCallback(async (claim: Promise<DropResult>, droppedCount: number) => {
+    let result: DropResult;
     try {
-      if (isPdf(fileName)) {
-        const base64 = await readAsBase64(file);
-        setStagedDocument(null);
-        try {
-          await openFile(displayPath, base64);
-        } catch (error: any) {
-          if (!handlePasswordError(error, displayPath, base64)) {
-            toast.error('Failed to open file');
-          }
-        }
-      } else if (isConvertibleToPdf(fileName)) {
-        // Converting a document runs LibreOffice against a real on-disk path.
-        // A drop gives us only bytes (its filesystem location is untrusted and
-        // unblessed), so direct the user through File -> Open, which blesses the
-        // chosen directory and then converts. (Materializing dropped bytes into
-        // a temp dir was removed — it caused converted edits to be reaped on
-        // quit and handed the renderer an arbitrary-format LibreOffice input.)
-        toast.info(`Use File → Open to convert "${fileName}" to PDF`);
-      } else {
-        toast.error('Unsupported file type');
-      }
+      result = await claim;
     } catch {
-      toast.error('Failed to read dropped file');
+      toast.error('Failed to read dropped files');
+      return;
     }
-  }, [openFile, toast, handlePasswordError]);
+
+    if (result.files.length === 0) {
+      if (droppedCount > 0) {
+        toast.error(droppedCount === 1
+          ? 'That file cannot be opened. Drop a PDF or a Word, Excel or PowerPoint file.'
+          : 'None of the dropped files can be opened.');
+      }
+      return;
+    }
+
+    const pdfs = result.files.filter((f) => isPdf(f.path));
+    const documents = result.files.filter((f) => isConvertibleToPdf(f.path));
+    let failed = 0;
+    const needsPassword: Array<{ path: string; data: string }> = [];
+
+    // Open sequentially: each PDF gets its own tab and openFile's per-path
+    // de-duplication sees the tabs opened before it.
+    for (const file of pdfs) {
+      const fileData = await window.electronAPI.readFileByPath(file.path);
+      if (!fileData) {
+        failed++;
+        continue;
+      }
+      setStagedDocument(null);
+      try {
+        await openFile(fileData.path, fileData.data);
+      } catch (error: any) {
+        if (error?.message === 'PASSWORD_REQUIRED') {
+          needsPassword.push({ path: fileData.path, data: fileData.data });
+        } else {
+          failed++;
+        }
+      }
+    }
+
+    if (documents.length === 1 && pdfs.length === 0) {
+      // A lone document is staged exactly like File -> Open would stage it.
+      stageDocument(documents[0].path);
+    } else if (documents.length > 0) {
+      // Several documents (or documents alongside PDFs): queue them all in the
+      // converter rather than letting a staging screen hide the opened tabs.
+      setConvertToPdfInitialFiles(documents.map((f) => f.path));
+      setConvertDialogOpen(true);
+    }
+
+    // One password prompt at a time: prompt for the first, report the rest.
+    if (needsPassword.length > 0) {
+      const first = needsPassword[0];
+      handlePasswordError({ message: 'PASSWORD_REQUIRED' }, first.path, first.data);
+      if (needsPassword.length > 1) {
+        toast.warning(`${needsPassword.length - 1} more password-protected file(s) were not opened. Drop them again after this one.`);
+      }
+    }
+
+    const skipped = failed + result.rejected;
+    if (skipped > 0) {
+      toast.warning(`${skipped} dropped file${skipped === 1 ? ' was' : 's were'} skipped (unsupported or unreadable)`);
+    }
+  }, [openFile, toast, handlePasswordError, stageDocument]);
+
+  const fileDragActive = useAppFileDrop(handleExternalDrop);
 
   // What's currently open drives the contextual tools panel and main view.
   // Staged (non-PDF) documents take priority over an open PDF.
@@ -624,16 +658,17 @@ const App: React.FC = () => {
           await saveFile();
           toast.success('Document saved successfully');
         } catch (error: any) {
-          // A document opened by drag-and-drop has a real but unblessed path, so
-          // an in-place save is denied by path confinement. Fall back to Save As
-          // (its dialog blesses the chosen directory) instead of just failing.
+          // A document whose path is no longer permitted (e.g. one restored from
+          // auto-recovery, whose original location was never blessed this
+          // session) is denied an in-place save by path confinement. Fall back
+          // to Save As (its dialog blesses the chosen directory) instead of
+          // failing. Trusted drops are exactly blessed and save in place.
           // Match the EXACT confinement sentinels — a loose 'not permitted'
           // substring would also swallow Node's EPERM ("operation not permitted",
           // e.g. a read-only/locked file), mis-routing a real error to Save As.
           const msg = typeof error?.message === 'string' ? error.message : '';
           const isConfinementDenial = msg === 'Path not permitted' || msg === 'File type not permitted';
           if (isConfinementDenial) {
-            // dropped file: no blessed path, save via dialog
             if (await saveFileAs()) toast.success('Document saved successfully');
           } else {
             throw error;
@@ -1310,24 +1345,9 @@ const App: React.FC = () => {
     handleCloseTab,
   ]);
 
-  // Prevent default drag behavior
-  useEffect(() => {
-    const preventDefaultDrag = (e: DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-
-    window.document.addEventListener('dragover', preventDefaultDrag);
-    window.document.addEventListener('drop', preventDefaultDrag);
-
-    return () => {
-      window.document.removeEventListener('dragover', preventDefaultDrag);
-      window.document.removeEventListener('drop', preventDefaultDrag);
-    };
-  }, []);
-
   return (
     <div className="app-container">
+      <DropOverlay visible={fileDragActive} />
       <UpdateNotification />
       <Toolbar
         currentTool={currentTool}
@@ -1471,7 +1491,6 @@ const App: React.FC = () => {
               setConvertToDocxInitialMode('batch');
               setConvertToDocxDialogOpen(true);
             }}
-            onFileDropped={handleFileDrop}
             recentFiles={recentFiles}
             onOpenRecentFile={handleOpenRecentFile}
             onClearRecentFiles={handleClearRecentFiles}

@@ -9,6 +9,13 @@ import {
   isWithinAnyDir,
   resolveRealPath,
   isPathWithinBlessed,
+  isFileBlessed,
+  blessedFileKey,
+  validateDroppedFilePath,
+  validateDropPayload,
+  BlessedFileRegistry,
+  MAX_DROP_FILES,
+  isContainingDirOf,
 } from './security';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -280,5 +287,193 @@ describe('resolveRealPath / isPathWithinBlessed (round-3 H-1/M-1 — fail closed
     expect(resolveRealPath('')).toBeNull();
     expect(resolveRealPath(null as unknown)).toBeNull();
     expect(isPathWithinBlessed(undefined as unknown, [blessedReal])).toBe(false);
+  });
+});
+
+describe('exact-file blessing (trusted drag-and-drop)', () => {
+  let root: string;
+  let dir: string;
+  let dirReal: string;
+  let pdf: string;
+  let docx: string;
+  let sibling: string;
+  let exe: string;
+  let subdir: string;
+
+  beforeAll(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'pdfm-drop-'));
+    dir = path.join(root, 'downloads');
+    fs.mkdirSync(dir);
+    dirReal = fs.realpathSync.native(dir);
+    pdf = path.join(dir, 'dropped.pdf');
+    docx = path.join(dir, 'letter.docx');
+    sibling = path.join(dir, 'sibling.pdf');
+    exe = path.join(dir, 'payload.exe');
+    subdir = path.join(dir, 'folder.pdf'); // a DIRECTORY carrying a .pdf name
+    fs.writeFileSync(pdf, '%PDF-1.4\n');
+    fs.writeFileSync(docx, 'PK');
+    fs.writeFileSync(sibling, '%PDF-1.4\n');
+    fs.writeFileSync(exe, 'MZ');
+    fs.mkdirSync(subdir);
+  });
+  afterAll(() => {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  describe('validateDroppedFilePath', () => {
+    it('accepts an existing PDF and returns its canonical path and name', () => {
+      const v = validateDroppedFilePath(pdf);
+      expect(v).not.toBeNull();
+      expect(v!.path).toBe(path.join(dirReal, 'dropped.pdf'));
+      expect(v!.name).toBe('dropped.pdf');
+      expect(v!.ext).toBe('pdf');
+    });
+    it('accepts a convertible document', () => {
+      expect(validateDroppedFilePath(docx)?.ext).toBe('docx');
+    });
+    it('rejects disallowed extensions, directories and missing files', () => {
+      expect(validateDroppedFilePath(exe)).toBeNull();
+      expect(validateDroppedFilePath(subdir)).toBeNull(); // dir named *.pdf
+      expect(validateDroppedFilePath(dir)).toBeNull();
+      expect(validateDroppedFilePath(path.join(dir, 'missing.pdf'))).toBeNull();
+    });
+    it('rejects relative, empty, non-string, NUL and ADS inputs', () => {
+      expect(validateDroppedFilePath('dropped.pdf')).toBeNull();
+      expect(validateDroppedFilePath('')).toBeNull();
+      expect(validateDroppedFilePath(42 as unknown)).toBeNull();
+      expect(validateDroppedFilePath(null as unknown)).toBeNull();
+      expect(validateDroppedFilePath(`${pdf}\0.pdf`)).toBeNull();
+      expect(validateDroppedFilePath(path.join(dir, 'id_rsa:x.pdf'))).toBeNull();
+    });
+    it('rejects an over-long path without touching the filesystem', () => {
+      const spy = vi.spyOn(fs.realpathSync, 'native');
+      expect(validateDroppedFilePath(path.join(dir, `${'a'.repeat(40000)}.pdf`))).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+    it.skipIf(!isWin)('rejects UNC and device paths before any syscall', () => {
+      const spy = vi.spyOn(fs.realpathSync, 'native');
+      expect(validateDroppedFilePath('\\\\attacker\\share\\x.pdf')).toBeNull();
+      expect(validateDroppedFilePath('//attacker/share/x.pdf')).toBeNull();
+      expect(validateDroppedFilePath('\\\\?\\C:\\x.pdf')).toBeNull();
+      expect(validateDroppedFilePath('\\\\.\\C:\\x.pdf')).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+    it('refuses a .pdf-named link whose canonical target is a disallowed type', () => {
+      // The canonical-extension check is what stops `report.pdf -> payload.exe`.
+      // File symlinks need Developer Mode/elevation on Windows, so drive the
+      // check through realpath directly: it returns the link's real target.
+      const spy = vi.spyOn(fs.realpathSync, 'native').mockImplementation(() => exe);
+      try {
+        expect(validateDroppedFilePath(path.join(root, 'innocent.pdf'))).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+    it('refuses a local path whose canonical target is a UNC location', () => {
+      const spy = vi.spyOn(fs.realpathSync, 'native').mockImplementation(() => '\\\\host\\share\\x.pdf');
+      try {
+        if (isWin) expect(validateDroppedFilePath(pdf)).toBeNull();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
+  describe('validateDropPayload', () => {
+    it('accepts the valid entries, counts the refused ones, de-duplicates', () => {
+      const r = validateDropPayload([pdf, exe, docx, pdf, '', 7]);
+      expect(r.accepted.map((f) => f.name)).toEqual(['dropped.pdf', 'letter.docx']);
+      expect(r.rejected).toBe(3);
+    });
+    it('refuses a non-array payload outright', () => {
+      expect(validateDropPayload(pdf)).toEqual({ accepted: [], rejected: 0 });
+      expect(validateDropPayload({ 0: pdf, length: 1 })).toEqual({ accepted: [], rejected: 0 });
+    });
+    it('refuses entries beyond MAX_DROP_FILES instead of truncating silently', () => {
+      const many = Array.from({ length: MAX_DROP_FILES + 5 }, () => pdf);
+      const r = validateDropPayload(many);
+      expect(r.accepted).toHaveLength(1);
+      expect(r.rejected).toBe(5);
+    });
+  });
+
+  describe('isFileBlessed', () => {
+    const keysFor = (p: string) => new Set([blessedFileKey(validateDroppedFilePath(p)!.path)]);
+    it('matches only the exact canonical file', () => {
+      const keys = keysFor(pdf);
+      expect(isFileBlessed(pdf, keys)).toBe(true);
+      expect(isFileBlessed(path.join(dir, 'sub', '..', 'dropped.pdf'), keys)).toBe(true); // normalized
+      expect(isFileBlessed(sibling, keys)).toBe(false);
+      expect(isFileBlessed(dir, keys)).toBe(false);
+      expect(isFileBlessed(path.join(dir, 'dropped.pdf', 'child.pdf'), keys)).toBe(false);
+    });
+    it('is case-insensitive on win32/darwin only', () => {
+      const keys = keysFor(pdf);
+      const upper = path.join(dir, 'DROPPED.PDF');
+      expect(isFileBlessed(upper, keys)).toBe(isWin || process.platform === 'darwin');
+    });
+    it('fails closed on an empty set and on unresolvable input', () => {
+      expect(isFileBlessed(pdf, new Set())).toBe(false);
+      const keys = keysFor(pdf);
+      expect(isFileBlessed('', keys)).toBe(false);
+      expect(isFileBlessed(undefined as unknown, keys)).toBe(false);
+      if (isWin) expect(isFileBlessed('\\\\host\\share\\dropped.pdf', keys)).toBe(false);
+    });
+    it('a junction to the blessed file\'s directory reaches the same canonical file', () => {
+      // Canonicalization is what makes the key unforgeable by aliasing: an
+      // alias resolves to the same real file (allowed — it IS that file), and
+      // an alias to a sibling resolves to the sibling (denied).
+      const alias = path.join(root, 'alias');
+      fs.symlinkSync(dirReal, alias, isWin ? 'junction' : 'dir');
+      const keys = keysFor(pdf);
+      expect(isFileBlessed(path.join(alias, 'dropped.pdf'), keys)).toBe(true);
+      expect(isFileBlessed(path.join(alias, 'sibling.pdf'), keys)).toBe(false);
+    });
+  });
+
+  describe('isContainingDirOf', () => {
+    it('matches only the canonical parent directory of the file', () => {
+      expect(isContainingDirOf(dir, docx)).toBe(true);
+      expect(isContainingDirOf(path.join(dir, '.'), docx)).toBe(true);
+      expect(isContainingDirOf(root, docx)).toBe(false); // grandparent
+      expect(isContainingDirOf(subdir, docx)).toBe(false); // a child dir
+      expect(isContainingDirOf('', docx)).toBe(false);
+      expect(isContainingDirOf(dir, null as unknown)).toBe(false);
+    });
+  });
+
+  describe('BlessedFileRegistry', () => {
+    it('blesses dropped PDFs for read and write, convertibles for read only', () => {
+      const reg = new BlessedFileRegistry();
+      const r = reg.blessDrop([pdf, docx, exe]);
+      expect(r.accepted).toHaveLength(2);
+      expect(r.rejected).toBe(1);
+      expect(reg.has(pdf, 'read')).toBe(true);
+      expect(reg.has(pdf, 'write')).toBe(true);
+      expect(reg.has(docx, 'read')).toBe(true);
+      expect(reg.has(docx, 'write')).toBe(false);
+      expect(reg.has(exe, 'read')).toBe(false);
+      expect(reg.has(sibling, 'read')).toBe(false);
+      expect(reg.has(dir, 'read')).toBe(false);
+    });
+    it('blesses nothing for a forged or empty payload', () => {
+      const reg = new BlessedFileRegistry();
+      expect(reg.blessDrop([]).accepted).toHaveLength(0);
+      expect(reg.blessDrop(['', '', 'x.pdf']).accepted).toHaveLength(0);
+      expect(reg.blessDrop('C:/Windows/System32/cmd.exe').accepted).toHaveLength(0);
+      expect(reg.size).toBe(0);
+      expect(reg.has(pdf, 'read')).toBe(false);
+    });
+    it('addDerivedPdf only admits an existing regular PDF', () => {
+      const reg = new BlessedFileRegistry();
+      expect(reg.addDerivedPdf(path.join(dir, 'missing.pdf'))).toBe(false);
+      expect(reg.addDerivedPdf(docx)).toBe(false);
+      expect(reg.addDerivedPdf(subdir)).toBe(false);
+      expect(reg.addDerivedPdf(sibling)).toBe(true);
+      expect(reg.has(sibling, 'write')).toBe(true);
+      expect(reg.has(pdf, 'read')).toBe(false);
+    });
   });
 });

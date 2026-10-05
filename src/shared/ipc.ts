@@ -37,6 +37,28 @@ export interface UpdateProgress {
   total: number;
 }
 
+/** One file from a trusted OS drag-and-drop, blessed by main for exact-file access. */
+export interface DroppedFileRecord {
+  /** Canonical on-disk path (main-validated; usable with readFileByPath/saveFile). */
+  path: string;
+  /** Display name (basename). */
+  name: string;
+}
+
+/** Outcome of one drop: the blessed files and how many dropped items were refused. */
+export interface DropResult {
+  files: DroppedFileRecord[];
+  rejected: number;
+}
+
+/**
+ * Private preload -> main channel carrying the paths of a TRUSTED drop. It is
+ * deliberately NOT part of ElectronAPI: the main world can never invoke it.
+ * (preload.ts repeats this literal — a sandboxed preload cannot require a
+ * sibling module at runtime, only type-import it.)
+ */
+export const TRUSTED_DROP_CHANNEL = 'internal:trusted-drop';
+
 export interface ElectronAPI {
   openFileDialog: () => Promise<FileData | null>;
   readFileByPath: (filePath: string) => Promise<FileData | null>;
@@ -82,7 +104,7 @@ export interface ElectronAPI {
   onLibreOfficeStatus: (callback: (path: string | null) => void) => void;
   openDocumentsDialog: () => Promise<string[] | null>;
   convertToPdf: (inputPath: string, outputDir: string) => Promise<{ success: boolean; path?: string; data?: string; error?: string }>;
-  getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string; isDefault: boolean; status: number }>>;
+  getPrinters: () => Promise<Array<{ name: string; displayName: string; description: string }>>;
   printPdf: (options: { html: string; printerName: string; copies: number; landscape: boolean; color: boolean; scaleFactor: number }) => Promise<{ success: boolean; error?: string }>;
   getLaunchFile: () => Promise<FileData | null>;
   // Auto-recovery
@@ -90,6 +112,16 @@ export interface ElectronAPI {
   checkAutoRecovery: () => Promise<{ originalPath: string | null; fileName: string; timestamp: number } | null>;
   loadAutoRecovery: () => Promise<{ data: string; filePath: string | null; fileName: string } | null>;
   clearAutoRecovery: () => Promise<{ success: boolean }>;
+  // Trusted drag-and-drop
+  /**
+   * Claim the blessed files of the drop event CURRENTLY being dispatched. Must
+   * be called synchronously from a 'drop' listener (before any await): the
+   * preload records a trusted drop in its capture-phase listener and the
+   * record lives only until that event's dispatch finishes. One-shot — a second
+   * call for the same drop, or a call for a synthetic/forged drop, resolves to
+   * an empty result.
+   */
+  takeDroppedFiles: () => Promise<DropResult>;
 }
 
 declare global {

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "composite": false,
+    "tsBuildInfoFile": null
+  },
+  "include": ["src/main/preload.ts", "src/shared/**/*"],
+  "exclude": []
+}

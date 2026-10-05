@@ -1,6 +1,9 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import Modal from './Modal';
 import { Plus, Trash2, Loader2, FolderOpen, CheckCircle, AlertCircle, FileText } from 'lucide-react';
+import { useDropZone } from '../hooks/useFileDrop';
+import { isConvertibleToPdf } from '../utils/supportedFormats';
+import type { DropResult } from '../../shared/ipc';
 
 interface ConversionItem {
   path: string;
@@ -72,6 +75,38 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
     }
   }, [outputDir]);
 
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
+
+  // Trusted OS drops: each record is an exactly-blessed file, which main
+  // accepts as a conversion input. With no output folder chosen yet, default
+  // to the first file's own folder: main permits writing the converted
+  // `<name>.pdf` beside an exactly-blessed input without blessing the folder.
+  const handleDroppedFiles = useCallback(async (claim: Promise<DropResult>) => {
+    try {
+      const result = await claim;
+      const docs = result.files.filter((f) => isConvertibleToPdf(f.path));
+      const skipped = result.rejected + (result.files.length - docs.length);
+      if (docs.length > 0) {
+        const newItems: ConversionItem[] = docs.map((f) => ({ path: f.path, name: f.name, status: 'pending' }));
+        setFiles((prev) => {
+          const existingPaths = new Set(prev.map((f) => f.path));
+          return [...prev, ...newItems.filter((f) => !existingPaths.has(f.path))];
+        });
+        setOutputDir((current) => {
+          if (current) return current;
+          const first = docs[0].path;
+          const lastSlash = Math.max(first.lastIndexOf('/'), first.lastIndexOf('\\'));
+          return lastSlash > 0 ? first.substring(0, lastSlash) : current;
+        });
+      }
+      setDropNotice(skipped > 0 ? `${skipped} dropped file(s) skipped: not a convertible document` : null);
+    } catch {
+      setDropNotice('Failed to add dropped files');
+    }
+  }, []);
+
+  const { isOver, bindings: dropBindings } = useDropZone(handleDroppedFiles, converting);
+
   const handleRemoveFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   }, []);
@@ -139,6 +174,7 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
     setFiles([]);
     setOutputDir('');
     setCompleted(false);
+    setDropNotice(null);
     onClose();
   }, [onClose]);
 
@@ -235,10 +271,14 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
               </div>
             </div>
 
-            <div className="file-list-container">
+            <div
+              className={`file-list-container ${isOver ? 'drop-zone-active' : ''}`}
+              data-testid="convert-drop-zone"
+              {...dropBindings}
+            >
               {files.length === 0 ? (
                 <div className="file-list-empty">
-                  <p>No files added</p>
+                  <p>No files added. Drop documents here or click "Add Files"</p>
                   <p className="text-muted">
                     Supported: DOC, DOCX, ODT, RTF, PPT, PPTX, XLS, XLSX, HTML
                   </p>
@@ -270,6 +310,8 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
                 </div>
               )}
             </div>
+
+            {dropNotice && <p className="dialog-error">{dropNotice}</p>}
 
             <div className="dialog-actions">
               <button

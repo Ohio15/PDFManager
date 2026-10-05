@@ -113,6 +113,34 @@ export async function drawRect(
   await page.mouse.up();
 }
 
+/**
+ * Intercept the renderer's save IPC in the MAIN process. window.electronAPI is
+ * a contextBridge object (frozen in the main world), so assigning mocks onto it
+ * from page script silently does nothing and the real save runs. Replacing the
+ * ipcMain handlers captures exactly what the renderer sent across the boundary
+ * and never touches the fixtures on disk.
+ */
+export async function interceptSaveIpc(electronApp: ElectronApplication): Promise<void> {
+  await electronApp.evaluate(({ ipcMain }) => {
+    const g = globalThis as unknown as { __e2eSaves: Array<{ channel: string; data: string; path?: string }> };
+    g.__e2eSaves = [];
+    for (const channel of ['save-file', 'save-file-dialog']) {
+      ipcMain.removeHandler(channel);
+      ipcMain.handle(channel, (_event, args: { data: string; filePath?: string; defaultPath?: string }) => {
+        g.__e2eSaves.push({ channel, data: args.data, path: args.filePath ?? args.defaultPath });
+        return { success: true, path: args.filePath ?? 'C:/e2e/intercepted.pdf' };
+      });
+    }
+  });
+}
+
+/** Saves captured by interceptSaveIpc, in order. */
+export async function getInterceptedSaves(
+  electronApp: ElectronApplication
+): Promise<Array<{ channel: string; data: string; path?: string }>> {
+  return electronApp.evaluate(() => (globalThis as unknown as { __e2eSaves?: Array<{ channel: string; data: string; path?: string }> }).__e2eSaves ?? []);
+}
+
 /** Override an electronAPI method in the renderer to return controlled data. */
 export async function mockElectronAPI(
   page: Page,

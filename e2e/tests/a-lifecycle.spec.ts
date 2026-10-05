@@ -1,14 +1,18 @@
 import { test, expect } from '../fixtures/electron-app';
+import { spawn } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 test.describe('Application Lifecycle', () => {
-  test('app launches and shows window', async ({ electronApp }) => {
-    const page = await electronApp.firstWindow();
-    await page.waitForLoadState('domcontentloaded');
-
+  // These use the appPage fixture (which waits for the rendered app): reading
+  // the title/body straight off firstWindow() races the initial file:// load,
+  // whose placeholder title is "Loading file:///...".
+  test('app launches and shows window', async ({ electronApp, appPage }) => {
     const windows = electronApp.windows();
     expect(windows.length).toBeGreaterThanOrEqual(1);
 
-    const isVisible = await page.isVisible('body');
+    const isVisible = await appPage.isVisible('body');
     expect(isVisible).toBe(true);
   });
 
@@ -24,10 +28,8 @@ test.describe('Application Lifecycle', () => {
     expect(btnText?.toLowerCase()).toContain('open');
   });
 
-  test('app title is PDF Manager', async ({ electronApp }) => {
-    const page = await electronApp.firstWindow();
-    const title = await page.title();
-    expect(title).toContain('PDF Manager');
+  test('app title is PDF Manager', async ({ appPage }) => {
+    await expect(appPage).toHaveTitle(/PDF Manager/);
   });
 
   test('recent files section exists', async ({ appPage }) => {
@@ -48,14 +50,34 @@ test.describe('Application Lifecycle', () => {
     }
   });
 
-  test('app closes cleanly', async ({ electronApp }) => {
-    const page = await electronApp.firstWindow();
-    await page.waitForLoadState('domcontentloaded');
-    const isVisible = await page.isVisible('body');
+  test('app closes cleanly', async ({ electronApp, appPage }) => {
+    const isVisible = await appPage.isVisible('body');
     expect(isVisible).toBe(true);
 
     // Verify the app is alive by checking window count (pid may be undefined in some launch modes)
     const windows = electronApp.windows();
     expect(windows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a second instance forwards its PDF to the running window', async ({ appPage, userDataDir }) => {
+    // Real single-instance flow: a second process with the same profile loses
+    // requestSingleInstanceLock, quits, and the running app receives
+    // 'second-instance' with the second process's command line.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdfm-2nd-'));
+    const pdf = path.join(dir, 'second-instance.pdf');
+    fs.copyFileSync(path.resolve(__dirname, '../../test-pdfs/invoice.pdf'), pdf);
+    try {
+      const electronPath = require('electron') as unknown as string;
+      const second = spawn(electronPath, [
+        path.resolve(__dirname, '../../dist/main/main.js'),
+        `--user-data-dir=${userDataDir}`,
+        pdf,
+      ], { env: { ...process.env, NODE_ENV: 'test' }, stdio: 'ignore' });
+      const exitCode = await new Promise<number | null>((resolve) => second.on('exit', resolve));
+      expect(exitCode).toBe(0);
+      await expect(appPage.locator('.tab-bar-tab.active .tab-name')).toHaveText('second-instance.pdf', { timeout: 20_000 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

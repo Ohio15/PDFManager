@@ -1,11 +1,10 @@
-import React, { useState, useCallback } from 'react';
+import React from 'react';
 import { FileText, Upload, Clock, Trash2, FolderOpen } from 'lucide-react';
-import { isOpenable, SUPPORTED_FORMATS_LABEL } from '../utils/supportedFormats';
+import { SUPPORTED_FORMATS_LABEL } from '../utils/supportedFormats';
 
 interface WelcomeScreenProps {
   onOpenFile: () => void;
   onBatchConvert?: () => void;
-  onFileDropped?: (file: File) => void;
   recentFiles?: string[];
   onOpenRecentFile?: (filePath: string) => void;
   onClearRecentFiles?: () => void;
@@ -14,48 +13,10 @@ interface WelcomeScreenProps {
 const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onOpenFile,
   onBatchConvert,
-  onFileDropped,
   recentFiles = [],
   onOpenRecentFile,
   onClearRecentFiles,
 }) => {
-  const [isDragging, setIsDragging] = useState(false);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  }, []);
-
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragging(false);
-
-      const files = e.dataTransfer.files;
-      if (files.length > 0) {
-        const file = files[0];
-        const fileName = file.name.toLowerCase();
-
-        // Pass the File itself, not its path: the drop already handed us the
-        // bytes, so the app reads them via FileReader and never relays an
-        // (unblessed, untrusted) path to a main-process read. App decides how
-        // to handle it from the extension.
-        if (isOpenable(fileName) || file.type === 'application/pdf') {
-          onFileDropped?.(file);
-        }
-      }
-    },
-    [onFileDropped]
-  );
-
   const getFileName = (filePath: string) => {
     const parts = filePath.replace(/\\/g, '/').split('/');
     return parts[parts.length - 1];
@@ -68,12 +29,9 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   };
 
   return (
-    <div
-      className={`pdf-viewer ${isDragging ? 'dragging' : ''}`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
+    // External file drops are handled app-wide (useAppFileDrop in App.tsx),
+    // so this screen is not a drop target of its own.
+    <div className="pdf-viewer">
       <div className="welcome-screen">
         <FileText className="welcome-icon" />
         <h1 className="welcome-title">PDF Manager</h1>
@@ -133,7 +91,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         )}
 
         <p className="welcome-text" style={{ fontSize: '14px', marginTop: recentFiles.length > 0 ? '8px' : '16px' }}>
-          Drag and drop a file here to open
+          Drag and drop files here to open
         </p>
         <p className="welcome-text welcome-formats" style={{ fontSize: '12px', marginTop: '4px', opacity: 0.7 }}>
           Supports: {SUPPORTED_FORMATS_LABEL}

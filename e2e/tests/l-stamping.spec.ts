@@ -96,11 +96,11 @@ test.describe('Stamping', () => {
     expect((await pageTexts(await captureSave(electronApp, appPage)))[0]).not.toContain('E2E-WATERMARK');
   });
 
-  test('non-WinAnsi text shows a validation error and blocks Apply', async ({ electronApp, appPage }) => {
+  test('text the bundled fonts cannot show is named and blocks Apply', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
     await openStampDialog(appPage);
-    await appPage.fill('#wm-text', 'Привет');
-    await expect(appPage.locator('[data-testid="stamp-preview-error"]')).toContainText('WinAnsi', { timeout: 10_000 });
+    await appPage.fill('#wm-text', '機密');
+    await expect(appPage.locator('[data-testid="stamp-preview-error"]')).toContainText('cannot show', { timeout: 10_000 });
     await expect(appPage.locator('[data-testid="stamp-apply"]')).toBeDisabled();
     // The app is still alive and the dialog closes normally.
     await appPage.keyboard.press('Escape');

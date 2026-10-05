@@ -30,6 +30,20 @@ const FIXTURES = resolve(__dirname, '../../../test-pdfs');
 const fixture = (name: string) => new Uint8Array(readFileSync(resolve(FIXTURES, name)));
 
 const CTX: StampContext = { fileName: 'scan-document.pdf', date: new Date(2026, 9, 5, 12, 0, 0) };
+/** The app's bundled font directory, read from disk (the renderer fetches it). */
+const FONT_DIR = resolve(__dirname, '../public/standard_fonts');
+const loadFontFile = async (name: string) => new Uint8Array(readFileSync(resolve(FONT_DIR, name)));
+
+/** Names of every FontFile2-embedded (TrueType) font in the document. */
+async function embeddedTrueTypeFonts(bytes: Uint8Array): Promise<string[]> {
+  const doc = await PDFLib.load(bytes);
+  const names: string[] = [];
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFDict) || obj.get(PDFName.of('Type')) !== PDFName.of('FontDescriptor')) continue;
+    if (obj.get(PDFName.of('FontFile2'))) names.push(String(obj.get(PDFName.of('FontName'))));
+  }
+  return names;
+}
 const STYLE: TextStyle = { font: 'Helvetica', fontSize: 10, color: '#000000' };
 const MARGINS = { top: 24, bottom: 24, left: 36, right: 36 };
 
@@ -439,27 +453,74 @@ describe('rotation and CropBox', () => {
 // ─────────────────────────── validation ───────────────────────────
 
 describe('validation', () => {
-  it('rejects text outside WinAnsi with a clear message instead of crashing', async () => {
-    const err = await applyStamp(fixture('invoice.pdf'), {
+  it('stamps Cyrillic text by embedding the bundled Unicode font as a subset', async () => {
+    const { bytes } = await applyStamp(fixture('invoice.pdf'), {
       kind: 'Watermark',
       options: {
-        source: { type: 'text', text: 'Привет', style: STYLE },
+        source: { type: 'text', text: 'Привет мир', style: STYLE },
         opacity: 0.5, rotation: 0, position: 'center', tile: false, behind: false, pageRange: 'all', margin: 36,
       },
-    }, CTX).catch((e) => e);
-    expect(err).toBeInstanceOf(StampValidationError);
-    expect(String(err.message)).toMatch(/U\+041F/);
-    expect(String(err.message)).toMatch(/WinAnsi/);
+    }, CTX, { loadFontFile });
+    const [page] = await readText(bytes);
+    expect(page.joined).toContain('Привет мир');
+    const fonts = await embeddedTrueTypeFonts(bytes);
+    expect(fonts.some((n) => /LiberationSans/.test(n))).toBe(true);
   });
 
-  it('rejects non-WinAnsi characters coming from the {filename} token', async () => {
-    await expect(applyStamp(fixture('invoice.pdf'), {
+  it('stamps Greek in every header/footer slot of a Times stamp (sans fallback)', async () => {
+    const { bytes } = await applyStamp(fixture('invoice.pdf'), {
+      kind: 'HeaderFooter',
+      options: {
+        slots: { 'header-left': 'Ελληνικά', 'footer-right': 'Σελίδα {page}' },
+        style: { ...STYLE, font: 'Times-Roman' }, margins: MARGINS,
+        pageRange: 'all', skipFirstPage: false, startNumber: 1, numberFormat: 'arabic',
+      },
+    }, CTX, { loadFontFile });
+    const [page] = await readText(bytes);
+    expect(page.joined).toContain('Ελληνικά');
+    expect(page.joined).toContain('Σελίδα 1');
+  });
+
+  it('keeps Western text on the standard font (nothing embedded, output unchanged)', async () => {
+    const { bytes } = await applyStamp(fixture('invoice.pdf'), {
+      kind: 'HeaderFooter',
+      options: {
+        slots: { 'header-left': 'Plain header' }, style: STYLE, margins: MARGINS,
+        pageRange: 'all', skipFirstPage: false, startNumber: 1, numberFormat: 'arabic',
+      },
+    }, CTX, {
+      loadFontFile: async () => {
+        throw new Error('the Unicode font must not be loaded for WinAnsi text');
+      },
+    });
+    expect(await embeddedTrueTypeFonts(bytes)).toEqual(
+      await embeddedTrueTypeFonts(fixture('invoice.pdf'))
+    );
+  });
+
+  it('rejects characters the bundled fonts cannot show, naming them', async () => {
+    const err = await applyStamp(fixture('invoice.pdf'), {
       kind: 'HeaderFooter',
       options: {
         slots: { 'header-left': '{filename}' }, style: STYLE, margins: MARGINS,
         pageRange: 'all', skipFirstPage: false, startNumber: 1, numberFormat: 'arabic',
       },
-    }, { ...CTX, fileName: '報告.pdf' })).rejects.toBeInstanceOf(StampValidationError);
+    }, { ...CTX, fileName: '報告.pdf' }, { loadFontFile }).catch((e) => e);
+    expect(err).toBeInstanceOf(StampValidationError);
+    expect(String(err.message)).toMatch(/U\+5831/);
+    expect(String(err.message)).toMatch(/cannot show/);
+  });
+
+  it('rejects control characters in any font', async () => {
+    const err = await applyStamp(fixture('invoice.pdf'), {
+      kind: 'Watermark',
+      options: {
+        source: { type: 'text', text: 'Привет\u0007', style: STYLE },
+        opacity: 0.5, rotation: 0, position: 'center', tile: false, behind: false, pageRange: 'all', margin: 36,
+      },
+    }, CTX, { loadFontFile }).catch((e) => e);
+    expect(err).toBeInstanceOf(StampValidationError);
+    expect(String(err.message)).toMatch(/U\+0007/);
   });
 
   it('accepts WinAnsi extended characters (é, €, —)', async () => {

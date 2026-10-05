@@ -375,6 +375,10 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
         }
         break;
       }
+      case op('shadingFill'):
+        // Painted area is the current clip, which this scan does not model.
+        unexamined.push('Shading fill whose painted area cannot be bounded');
+        break;
       case op('paintSolidColorImageMask'):
         addImage('group', [...st.ctm] as Matrix, async () => null);
         break;

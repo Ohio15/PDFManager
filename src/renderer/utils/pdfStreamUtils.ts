@@ -13,9 +13,9 @@ import {
   PDFDict,
   PDFArray,
   PDFRef,
-  decodePDFRawStream,
 } from 'pdf-lib';
 import * as pako from 'pako';
+import { decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES } from './boundedDecode';
 
 export interface FontInfo {
   name: string;
@@ -57,13 +57,13 @@ export function getContentStreams(context: any, contentsRef: any): PDFStream[] {
  */
 export function decodeStream(stream: PDFStream): Uint8Array | null {
   try {
-    const decoded = decodePDFRawStream(stream as PDFRawStream);
-    return decoded.decode();
+    // Bounded: the stream comes from an untrusted PDF (Flate bomb defence).
+    return decodeRawStreamBounded(stream as PDFRawStream);
   } catch (e) {
     const rawStream = stream as any;
     if (rawStream.contents) {
       try {
-        return pako.inflate(rawStream.contents);
+        return inflateCapped(rawStream.contents, MAX_DECODED_STREAM_BYTES);
       } catch {
         return rawStream.contents;
       }

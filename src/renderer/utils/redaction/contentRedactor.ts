@@ -604,6 +604,14 @@ export async function redactContent(
       case 'BI':
         await inlineImage(i, op);
         break;
+      case 'sh':
+        // A shading fill paints the whole current clipping region, which this
+        // redactor does not bound, and mesh shadings (types 4-7) can encode an
+        // arbitrary picture. It cannot be shown to stay clear of the marks, so
+        // the page falls back to a full raster (content-removing).
+        if (rc.dryRun) rc.findings.push('Shading fill on a page with redaction marks');
+        else throw new WholePageFallback('Shading fill (sh) on a page with redaction marks');
+        break;
 
       default:
         if (PAINT_OPS.has(op.op)) finishPath(i, op.op);

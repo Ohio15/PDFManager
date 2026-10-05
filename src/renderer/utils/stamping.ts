@@ -59,6 +59,8 @@ import {
   drawObject,
   endMarkedContent,
 } from 'pdf-lib';
+import { Encodings } from '@pdf-lib/standard-fonts';
+import fontkit from '@pdf-lib/fontkit';
 import { getContentStreams, decodeStream, updateStream } from './pdfStreamUtils';
 
 // ───────────────────────────── Public types ─────────────────────────────
@@ -211,7 +213,14 @@ export type StampRequest =
 export interface ApplyStampOptions {
   /** Remove this app's existing stamps of the same kind first (default true). */
   replaceExisting?: boolean;
+  /**
+   * Reads a bundled font file by name (e.g. 'LiberationSans-Regular.ttf').
+   * Defaults to the app's `standard_fonts/` directory; tests pass a disk reader.
+   */
+  loadFontFile?: FontFileLoader;
 }
+
+export type FontFileLoader = (fileName: string) => Promise<Uint8Array>;
 
 /** User-correctable input problem. The message is safe to show verbatim. */
 export class StampValidationError extends Error {
@@ -386,9 +395,9 @@ function validateMargins(m: HeaderFooterOptions['margins']): void {
 }
 
 /**
- * Characters the font's WinAnsi encoding cannot represent. The repo ships no
- * fontkit, so Unicode TTF embedding is unavailable; reject instead of letting
- * pdf-lib throw mid-transform.
+ * Characters the font cannot encode. For a standard font that is anything
+ * outside WinAnsi; StampFontResolver only hands one out for WinAnsi text, so
+ * this is a final guard before drawing, never the user-facing fallback.
  */
 export function findUnencodableChars(font: PDFFont, text: string): string[] {
   const bad = new Set<string>();
@@ -416,6 +425,79 @@ function describeChars(chars: string[]): string {
       return `${printable}(U+${cp})`;
     })
     .join(', ') + (chars.length > 6 ? ` and ${chars.length - 6} more` : '');
+}
+
+/**
+ * Bundled Unicode fallback per stamp font. Only Liberation Sans ships with the
+ * app (it is pdf.js's standard-font data), so serif and monospace stamps fall
+ * back to the sans face of the same weight/style when they need it.
+ */
+const UNICODE_FALLBACK_FILE: Record<StampFont, string> = {
+  Helvetica: 'LiberationSans-Regular.ttf',
+  'Helvetica-Bold': 'LiberationSans-Bold.ttf',
+  'Helvetica-Oblique': 'LiberationSans-Italic.ttf',
+  'Times-Roman': 'LiberationSans-Regular.ttf',
+  'Times-Bold': 'LiberationSans-Bold.ttf',
+  'Times-Italic': 'LiberationSans-Italic.ttf',
+  Courier: 'LiberationSans-Regular.ttf',
+  'Courier-Bold': 'LiberationSans-Bold.ttf',
+};
+
+const defaultLoadFontFile: FontFileLoader = async (fileName) => {
+  const res = await fetch(new URL(`standard_fonts/${fileName}`, document.baseURI));
+  if (!res.ok) throw new Error(`Could not load bundled font ${fileName} (${res.status})`);
+  return new Uint8Array(await res.arrayBuffer());
+};
+
+function isControlChar(ch: string): boolean {
+  const cp = ch.codePointAt(0) ?? 0;
+  return cp < 0x20 || cp === 0x7f;
+}
+
+/** True when every character is representable in the standard fonts' WinAnsi encoding. */
+function isWinAnsiText(text: string): boolean {
+  for (const ch of text) {
+    if (isControlChar(ch)) return false;
+    if (!Encodings.WinAnsi.canEncodeUnicodeCodePoint(ch.codePointAt(0) ?? 0)) return false;
+  }
+  return true;
+}
+
+/**
+ * Picks the font for one stamp. Western (WinAnsi) text keeps the chosen
+ * standard font, so existing output is unchanged; anything else embeds the
+ * bundled Unicode font as a subset. Characters that font has no glyph for are
+ * rejected by name before anything is mutated.
+ */
+class StampFontResolver {
+  constructor(private readonly pdfDoc: PDFLib, private readonly loadFontFile: FontFileLoader) {}
+
+  async resolve(fontName: StampFont, texts: Array<{ text: string; where: string }>): Promise<PDFFont> {
+    if (texts.every((t) => isWinAnsiText(t.text))) {
+      return this.pdfDoc.embedFont(FONT_MAP[fontName]);
+    }
+    // Control characters are never drawable, in any font.
+    for (const t of texts) {
+      const controls = [...new Set([...t.text].filter(isControlChar))];
+      if (controls.length) {
+        throw new StampValidationError(`${t.where} contains characters that cannot be drawn: ${describeChars(controls)}.`);
+      }
+    }
+    this.pdfDoc.registerFontkit(fontkit);
+    const bytes = await this.loadFontFile(UNICODE_FALLBACK_FILE[fontName]);
+    const font = await this.pdfDoc.embedFont(bytes, { subset: true });
+    const covered = new Set(font.getCharacterSet());
+    for (const t of texts) {
+      const missing = [...new Set([...t.text].filter((ch) => !covered.has(ch.codePointAt(0) ?? -1)))];
+      if (missing.length) {
+        throw new StampValidationError(
+          `${t.where} contains characters the bundled fonts cannot show: ${describeChars(missing)}. ` +
+            'Latin, Greek and Cyrillic text is supported.'
+        );
+      }
+    }
+    return font;
+  }
 }
 
 function assertEncodable(font: PDFFont, text: string, where: string): void {
@@ -810,7 +892,8 @@ async function stampWatermark(
   pdfDoc: PDFLib,
   opts: WatermarkOptions,
   pageIndices: number[],
-  date: Date
+  date: Date,
+  fontResolver: StampFontResolver
 ): Promise<void> {
   validateWatermark(opts);
   const ocgRef = ensureOcg(pdfDoc, 'Watermark');
@@ -829,7 +912,7 @@ async function stampWatermark(
 
   if (opts.source.type === 'text') {
     const { text, style } = opts.source;
-    const font = await pdfDoc.embedFont(FONT_MAP[style.font]);
+    const font = await fontResolver.resolve(style.font, [{ text, where: 'The watermark text' }]);
     assertEncodable(font, text, 'The watermark text');
     const rgb = parseHexColor(style.color);
     itemW = font.widthOfTextAtSize(text, style.fontSize);
@@ -917,24 +1000,26 @@ async function stampSlots(
   margins: HeaderFooterOptions['margins'],
   pageIndices: number[],
   textFor: (pageIndex: number, ordinal: number) => Partial<Record<SlotPosition, string>>,
-  date: Date
+  date: Date,
+  fontResolver: StampFontResolver
 ): Promise<void> {
   validateStyle(style);
   validateMargins(margins);
-  const font = await pdfDoc.embedFont(FONT_MAP[style.font]);
+
+  // Resolve every page's text first; the font is chosen from ALL of it and
+  // validated before mutating anything, so a bad character on page 40 never
+  // leaves pages 1-39 half-stamped.
+  const plan = pageIndices.map((pageIndex, ordinal) => ({ pageIndex, slots: textFor(pageIndex, ordinal) }));
+  const allTexts = plan.flatMap(({ slots }) =>
+    Object.entries(slots)
+      .filter(([, text]) => !!text)
+      .map(([slot, text]) => ({ text: text as string, where: `The ${slot.replace('-', ' ')} text` }))
+  );
+  const font = await fontResolver.resolve(style.font, allTexts);
+  for (const t of allTexts) assertEncodable(font, t.text, t.where);
   const rgb = parseHexColor(style.color);
   const ascent = font.heightAtSize(style.fontSize, { descender: false });
   const descent = font.heightAtSize(style.fontSize) - ascent;
-
-  // Resolve and validate every page's text before mutating anything, so a bad
-  // character on page 40 never leaves pages 1-39 half-stamped.
-  const plan = pageIndices.map((pageIndex, ordinal) => {
-    const slots = textFor(pageIndex, ordinal);
-    for (const [slot, text] of Object.entries(slots)) {
-      if (text) assertEncodable(font, text, `The ${slot.replace('-', ' ')} text`);
-    }
-    return { pageIndex, slots };
-  });
 
   const ocgRef = ensureOcg(pdfDoc, kind);
   for (const { pageIndex, slots } of plan) {
@@ -960,7 +1045,8 @@ async function stampHeaderFooter(
   kind: 'HeaderFooter' | 'PageNumbers',
   opts: HeaderFooterOptions,
   ctx: StampContext,
-  date: Date
+  date: Date,
+  fontResolver: StampFontResolver
 ): Promise<void> {
   const pageCount = pdfDoc.getPageCount();
   assertFinite(opts.startNumber, 'Start number', opts.numberFormat === 'arabic' ? 0 : 1, 1_000_000_000);
@@ -991,10 +1077,10 @@ async function stampHeaderFooter(
       if (tpl && tpl.trim() !== '') out[slot] = resolveTokens(tpl, values);
     }
     return out;
-  }, date);
+  }, date, fontResolver);
 }
 
-async function stampBates(pdfDoc: PDFLib, opts: BatesOptions, date: Date): Promise<void> {
+async function stampBates(pdfDoc: PDFLib, opts: BatesOptions, date: Date, fontResolver: StampFontResolver): Promise<void> {
   if (!Number.isInteger(opts.startNumber) || opts.startNumber < 0) {
     throw new StampValidationError('Bates start number must be a whole number of 0 or more.');
   }
@@ -1013,7 +1099,8 @@ async function stampBates(pdfDoc: PDFLib, opts: BatesOptions, date: Date): Promi
     opts.margins,
     indices,
     (_pageIndex, ordinal) => ({ [opts.position]: formatBates(opts.startNumber + ordinal, opts) }),
-    date
+    date,
+    fontResolver
   );
 }
 
@@ -1138,20 +1225,21 @@ function stampedPagesFor(request: StampRequest, pageCount: number): number[] {
 async function applyToDoc(pdfDoc: PDFLib, request: StampRequest, ctx: StampContext, opts: ApplyStampOptions): Promise<number[]> {
   if (opts.replaceExisting !== false) removeStampsInDoc(pdfDoc, request.kind);
   const now = new Date();
+  const fonts = new StampFontResolver(pdfDoc, opts.loadFontFile ?? defaultLoadFontFile);
   switch (request.kind) {
     case 'Watermark': {
       const indices = parsePageRange(request.options.pageRange, pdfDoc.getPageCount());
-      await stampWatermark(pdfDoc, request.options, indices, now);
+      await stampWatermark(pdfDoc, request.options, indices, now, fonts);
       return indices;
     }
     case 'HeaderFooter':
-      await stampHeaderFooter(pdfDoc, 'HeaderFooter', request.options, ctx, now);
+      await stampHeaderFooter(pdfDoc, 'HeaderFooter', request.options, ctx, now, fonts);
       return stampedPagesFor(request, pdfDoc.getPageCount());
     case 'PageNumbers':
-      await stampHeaderFooter(pdfDoc, 'PageNumbers', pageNumbersToHeaderFooter(request.options), ctx, now);
+      await stampHeaderFooter(pdfDoc, 'PageNumbers', pageNumbersToHeaderFooter(request.options), ctx, now, fonts);
       return stampedPagesFor(request, pdfDoc.getPageCount());
     case 'Bates':
-      await stampBates(pdfDoc, request.options, now);
+      await stampBates(pdfDoc, request.options, now, fonts);
       return stampedPagesFor(request, pdfDoc.getPageCount());
   }
 }

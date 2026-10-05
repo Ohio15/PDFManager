@@ -331,3 +331,30 @@ describe('page tree sanity', () => {
     expect(lib.getPage(0).node.lookup(PDFName.of('Resources'))).toBeInstanceOf(PDFDict);
   }, 120_000);
 });
+
+describe('shading fills', () => {
+  it('a page with an sh shading fill under a mark falls back to a full raster and verifies clean', async () => {
+    const src = await syntheticTextPdf(
+      'q /Sh1 sh Q BT /F1 24 Tf 72 700 Td (TOPSECRET payload) Tj ET',
+      (doc, page) => {
+        const shading = doc.context.obj({
+          ShadingType: 2,
+          ColorSpace: 'DeviceRGB',
+          Coords: [0, 0, 612, 792],
+          Function: { FunctionType: 2, Domain: [0, 1], C0: [1, 1, 1], C1: [0.2, 0.4, 0.8], N: 1 },
+        });
+        const fontRes = page.node.Resources()!;
+        fontRes.set(PDFName.of('Shading'), doc.context.obj({ Sh1: shading }));
+      }
+    );
+    const { bytes, report } = await redactTerm(src, 'TOPSECRET');
+    expect(report.verification.ok).toBe(true);
+    // The shading's painted area cannot be bounded, so the whole page was rasterized.
+    expect(report.rasterized).toEqual([expect.objectContaining({ pageIndex: 0, scope: 'page' })]);
+    expect(squash((await pageTexts(bytes))[0])).not.toContain('topsecret');
+    for (const s of await allDecodedStreams(bytes)) {
+      expect(s).not.toContain('TOPSECRET');
+      expect(s).not.toMatch(/\/Sh1\s+sh/);
+    }
+  }, 120_000);
+});

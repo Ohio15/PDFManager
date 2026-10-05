@@ -1,0 +1,3 @@
+TEST_CMD=npm test
+TEST_TIMEOUT=600
+TEST_PATHS=src/**|package.json|package-lock.json|vitest.config.ts

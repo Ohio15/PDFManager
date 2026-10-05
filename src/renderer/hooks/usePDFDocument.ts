@@ -1485,6 +1485,42 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [runStructural, addToHistory, commitDocument]
   );
 
+  // Page-preserving byte transform (stamping). Committed like a structural op:
+  // serialized under the structural mutex off the LATEST bytes, then rendered by
+  // the viewer from the real result, with an undo entry restoring prior bytes.
+  // Throws (without committing) if the transform fails or alters the page count.
+  const applyStampTransform = useCallback(
+    (type: string, transform: (pdfData: Uint8Array) => Promise<Uint8Array>): Promise<void> =>
+      runStructural(async () => {
+        const startDoc = stateRef.current.document;
+        const startTabId = stateRef.current.activeTabId;
+        if (!startDoc) throw new Error('No document is open');
+
+        const newPdfData = await transform(startDoc.pdfData);
+
+        // The transform is async; never commit onto a different tab's document.
+        if (stateRef.current.activeTabId !== startTabId || !stateRef.current.document) {
+          throw new Error('The active document changed before the stamp finished; nothing was applied.');
+        }
+        const { PDFDocument: PDFLib } = await import('pdf-lib');
+        const check = await PDFLib.load(newPdfData, { ignoreEncryption: true, updateMetadata: false });
+        if (check.getPageCount() !== startDoc.pages.length) {
+          throw new Error('Stamping changed the page count; nothing was applied.');
+        }
+
+        // Commit onto the latest model so annotation edits made meanwhile survive.
+        const prevDoc = stateRef.current.document;
+        const nextDoc: PDFDocument = { ...prevDoc, pdfData: newPdfData };
+        commitDocument(nextDoc);
+        addToHistory({
+          type,
+          undo: () => commitDocument(prevDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+      }),
+    [runStructural, addToHistory, commitDocument]
+  );
+
   const undo = useCallback(() => {
     if (!canUndo) return;
     history[historyIndex].undo();
@@ -1534,6 +1570,8 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Stamping (watermark / header-footer / page numbers / Bates)
+    applyStampTransform,
   };
 }
 

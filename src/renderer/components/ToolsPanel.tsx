@@ -13,6 +13,7 @@ import {
   ExternalLink,
   AlertCircle,
   FileType2,
+  Stamp,
 } from 'lucide-react';
 
 export type ToolsDocType = 'pdf' | 'staged' | 'none';
@@ -34,6 +35,7 @@ interface ToolsPanelProps {
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
   onExportSvg: () => void;
+  onStampPages: () => void;
   libreOfficeAvailable: boolean;
 }
 
@@ -61,6 +63,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onConvertFromPdf,
   onConvertToDocx,
   onExportSvg,
+  onStampPages,
   libreOfficeAvailable,
 }) => {
   if (!visible) {
@@ -88,6 +91,7 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'extract', label: 'Extract Pages', icon: <FileOutput size={18} />, onClick: onExtractPages, description: 'Extract specific pages' },
         { id: 'images', label: 'Extract Images', icon: <ImageDown size={18} />, onClick: onExtractImages, description: 'Export embedded images' },
         { id: 'rotate', label: 'Rotate All Pages', icon: <RotateCw size={18} />, onClick: onRotateAll, description: 'Rotate all pages 90°' },
+        { id: 'stamp', label: 'Stamp Pages', icon: <Stamp size={18} />, onClick: onStampPages, description: 'Watermark, header/footer, page numbers, Bates numbering' },
       ],
     });
     sections.push({

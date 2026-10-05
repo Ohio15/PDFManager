@@ -159,7 +159,7 @@ describe('applyPdfPageOrder / bulk ops (bytes)', () => {
     outlines.set(PDFName.of('First'), itemRef);
     outlines.set(PDFName.of('Last'), itemRef);
     d.catalog.set(PDFName.of('Outlines'), outlinesRef);
-    let bytes = new Uint8Array(await d.save());
+    let bytes: Uint8Array = new Uint8Array(await d.save());
     bytes = await duplicatePdfPages(bytes, [0]);
     bytes = await deletePdfPages(bytes, [1]);
     bytes = await movePdfPages(bytes, [2], 0);

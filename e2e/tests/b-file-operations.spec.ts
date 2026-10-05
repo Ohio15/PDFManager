@@ -6,8 +6,7 @@ import {
   getPageCount,
   mockElectronAPI,
   drawStroke,
-  isToolActive,
-} from '../fixtures/helpers';
+  isToolActive, interceptSaveIpc, getInterceptedSaves } from '../fixtures/helpers';
 
 test.describe('File Operations', () => {
   test('open PDF via IPC', async ({ electronApp, appPage }) => {
@@ -96,43 +95,24 @@ test.describe('File Operations', () => {
     await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
     await appPage.waitForTimeout(1500);
 
-    // Intercept at the lowest level — replace electronAPI methods and track both
-    // success and error paths. The Ctrl+S goes through Electron menu → menu-save IPC
-    // → handleSave → applyEditsAndAnnotations → saveFile/saveFileDialog.
-    // If applyEditsAndAnnotations throws, saveFile is never called.
+    // Intercept at the real IPC boundary (main process): Ctrl+S -> handleSave ->
+    // applyEditsAndAnnotations -> save-file / save-file-dialog. If the pipeline
+    // throws, no save reaches main and the poll below fails.
+    await interceptSaveIpc(electronApp);
     await appPage.evaluate(() => {
-      const api = (window as any).electronAPI;
-      (window as any).__saveResult = { called: false, error: null };
-
-      api.saveFile = async (data: string, filePath: string) => {
-        (window as any).__saveResult = { called: true, error: null };
-        return { success: true };
-      };
-      api.saveFileDialog = async (data: string, defaultPath?: string) => {
-        (window as any).__saveResult = { called: true, error: null };
-        return { success: true, path: '/tmp/test.pdf', canceled: false };
-      };
-
-      // Catch unhandled promise rejections from the save pipeline
+      (window as any).__saveError = null;
       window.addEventListener('unhandledrejection', (e) => {
-        (window as any).__saveResult = { called: false, error: String(e.reason) };
+        (window as any).__saveError = String(e.reason);
       });
     });
 
     await appPage.keyboard.press('Control+s');
 
-    // Wait for either success or error (max 15s)
-    await appPage.waitForFunction(
-      () => {
-        const r = (window as any).__saveResult;
-        return r && (r.called || r.error);
-      },
-      { timeout: 15_000 }
-    ).catch(() => {});
-
-    const result = await appPage.evaluate(() => (window as any).__saveResult);
-    // If save pipeline errored, that's still a valid test — it proves Ctrl+S triggers the flow
-    expect(result.called || result.error !== null).toBe(true);
+    // The save must cross the IPC boundary with real PDF bytes.
+    await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    const [saved] = await getInterceptedSaves(electronApp);
+    expect(await appPage.evaluate(() => (window as any).__saveError)).toBeNull();
+    expect(Buffer.from(saved.data, 'base64').subarray(0, 5).toString('latin1')).toBe('%PDF-');
   });
 
   test('Ctrl+S triggers save', async ({ electronApp, appPage, }) => {
@@ -140,36 +120,21 @@ test.describe('File Operations', () => {
     await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
     await appPage.waitForTimeout(1500);
 
+    await interceptSaveIpc(electronApp);
     await appPage.evaluate(() => {
-      const api = (window as any).electronAPI;
-      (window as any).__ctrlSResult = { called: false, error: null };
-
-      api.saveFile = async (data: string, filePath: string) => {
-        (window as any).__ctrlSResult = { called: true, error: null };
-        return { success: true };
-      };
-      api.saveFileDialog = async (data: string, defaultPath?: string) => {
-        (window as any).__ctrlSResult = { called: true, error: null };
-        return { success: true, path: '/tmp/test.pdf', canceled: false };
-      };
-
+      (window as any).__saveError = null;
       window.addEventListener('unhandledrejection', (e) => {
-        (window as any).__ctrlSResult = { called: false, error: String(e.reason) };
+        (window as any).__saveError = String(e.reason);
       });
     });
 
     await appPage.keyboard.press('Control+s');
 
-    await appPage.waitForFunction(
-      () => {
-        const r = (window as any).__ctrlSResult;
-        return r && (r.called || r.error);
-      },
-      { timeout: 15_000 }
-    ).catch(() => {});
-
-    const result = await appPage.evaluate(() => (window as any).__ctrlSResult);
-    expect(result.called || result.error !== null).toBe(true);
+    // The save must cross the IPC boundary with real PDF bytes.
+    await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    const [saved] = await getInterceptedSaves(electronApp);
+    expect(await appPage.evaluate(() => (window as any).__saveError)).toBeNull();
+    expect(Buffer.from(saved.data, 'base64').subarray(0, 5).toString('latin1')).toBe('%PDF-');
   });
 
   test('modified indicator shows after annotation', async ({ electronApp, appPage }) => {

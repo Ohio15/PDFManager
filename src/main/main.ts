@@ -13,7 +13,11 @@ import {
   isAllowedSaveTarget,
   resolveRealPath,
   isPathWithinBlessed,
+  isContainingDirOf,
+  BlessedFileRegistry,
 } from './security';
+import { TRUSTED_DROP_CHANNEL } from '../shared/ipc';
+import type { DropResult } from '../shared/ipc';
 
 // Define config schema for type safety
 interface StoreSchema {
@@ -83,14 +87,30 @@ function isPathBlessed(targetPath: unknown): boolean {
   return isPathWithinBlessed(targetPath, blessedDirs);
 }
 
+// Files the user dragged onto the window from the OS, blessed as EXACT files
+// (never their directories) by the private trusted-drop channel below. Every
+// entry is readable; only PDFs are writable (in-place save). See the threat
+// model in preload.ts.
+const blessedFiles = new BlessedFileRegistry();
+
+/**
+ * What a handler does with the renderer-supplied path:
+ *  - 'read'  - read a file (blessed dir subtree, or an exactly-blessed file);
+ *  - 'write' - write a file (blessed dir subtree, or an exactly-blessed PDF);
+ *  - 'dir'   - operate on a directory (blessed dir subtree ONLY: an exact-file
+ *              blessing never authorizes a directory operation).
+ */
+type PathAccess = 'read' | 'write' | 'dir';
+
 /**
  * Returns true if the renderer-supplied path may be used. In 'warn' mode an
  * out-of-bounds path is logged but allowed; in 'enforce' mode it is denied.
  */
-function guardPath(targetPath: unknown, label: string): boolean {
+function guardPath(targetPath: unknown, label: string, access: PathAccess): boolean {
   if (isPathBlessed(targetPath)) return true;
+  if (access !== 'dir' && blessedFiles.has(targetPath, access)) return true;
   console.warn(
-    `[security] ${label}: path outside blessed dirs (${PATH_CONFINEMENT_MODE}): ${String(targetPath)}`
+    `[security] ${label}: path outside blessed dirs/files (${PATH_CONFINEMENT_MODE}): ${String(targetPath)}`
   );
   return PATH_CONFINEMENT_MODE === 'warn';
 }
@@ -250,7 +270,13 @@ function createWindow(): void {
     title: 'PDF Manager',
   });
 
-  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  // An unpackaged run normally loads the Vite dev server. The e2e harness
+  // (NODE_ENV=test) launches the BUILT dist and must load that build: with the
+  // dev URL it renders a blank page, or worse another worktree's dev server
+  // on the same port.
+  const isDev =
+    process.env.NODE_ENV === 'development' ||
+    (!app.isPackaged && process.env.NODE_ENV !== 'test');
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5200');
@@ -562,7 +588,7 @@ ipcMain.handle('open-file-dialog', async () => {
 
 ipcMain.handle('save-file', async (_event, { data, filePath }) => {
   try {
-    if (!guardPath(filePath, 'save-file')) {
+    if (!guardPath(filePath, 'save-file', 'write')) {
       return { success: false, error: 'Path not permitted' };
     }
     if (!isAllowedSaveTarget(filePath, 'pdf')) {
@@ -643,9 +669,11 @@ ipcMain.handle('set-store', (_event, key, value) => {
 
 ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
   try {
-    if (!guardPath(filePath, 'read-file-by-path')) return null;
+    if (!guardPath(filePath, 'read-file-by-path', 'read')) return null;
+    // No blessParentOf here: the path is either already inside a blessed dir
+    // (a no-op) or an exactly-blessed dropped file, whose blessing must never
+    // widen to its directory.
     const fileData = fs.readFileSync(filePath);
-    blessParentOf(filePath);
     return {
       path: filePath,
       data: fileData.toString('base64'),
@@ -659,7 +687,7 @@ ipcMain.handle('read-file-by-path', async (_event, filePath: string) => {
 const SCAN_MAX_DEPTH = 12;
 const SCAN_MAX_RESULTS = 5000;
 ipcMain.handle('scan-directory-for-pdfs', async (_event, dirPath: string) => {
-  if (!guardPath(dirPath, 'scan-directory-for-pdfs')) return [];
+  if (!guardPath(dirPath, 'scan-directory-for-pdfs', 'dir')) return [];
   const pdfs: string[] = [];
   function walkDir(dir: string, depth: number): void {
     if (depth > SCAN_MAX_DEPTH || pdfs.length >= SCAN_MAX_RESULTS) return;
@@ -685,7 +713,7 @@ ipcMain.handle('scan-directory-for-pdfs', async (_event, dirPath: string) => {
 // Read a file as raw bytes (ArrayBuffer) for batch processing
 ipcMain.handle('read-file-raw', async (_event, filePath: string) => {
   try {
-    if (!guardPath(filePath, 'read-file-raw')) return null;
+    if (!guardPath(filePath, 'read-file-raw', 'read')) return null;
     const data = fs.readFileSync(filePath);
     return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   } catch {
@@ -710,7 +738,7 @@ ipcMain.handle('pick-pdf-file', async () => {
 // Check if a file exists at the given path
 ipcMain.handle('check-file-exists', async (_event, filePath: string) => {
   try {
-    if (!guardPath(filePath, 'check-file-exists')) return false;
+    if (!guardPath(filePath, 'check-file-exists', 'read')) return false;
     return fs.existsSync(filePath);
   } catch {
     return false;
@@ -766,12 +794,13 @@ ipcMain.handle('get-launch-file', () => {
 ipcMain.handle('get-printers', async () => {
   if (!mainWindow) return [];
   const printers = await mainWindow.webContents.getPrintersAsync();
+  // Electron 44's PrinterInfo carries no default flag or status (both were
+  // removed upstream; verified at runtime: only name/displayName/description/
+  // options, with options empty on Windows).
   return printers.map(p => ({
     name: p.name,
     displayName: p.displayName,
     description: p.description,
-    isDefault: p.isDefault,
-    status: p.status,
   }));
 });
 
@@ -914,7 +943,7 @@ ipcMain.handle('show-save-docx-dialog', async (_event, { defaultName, defaultDir
 
 ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
   try {
-    if (!guardPath(filePath, 'save-file-to-path')) {
+    if (!guardPath(filePath, 'save-file-to-path', 'write')) {
       return { success: false, error: 'Path not permitted' };
     }
     // Emits split PDF pages and per-page SVG exports only.
@@ -937,7 +966,7 @@ ipcMain.handle('save-file-to-path', async (_event, { data, filePath }) => {
 // Save raw binary bytes directly (bypasses base64 encoding for DOCX)
 ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
   try {
-    if (!guardPath(filePath, 'save-raw-bytes-to-path')) {
+    if (!guardPath(filePath, 'save-raw-bytes-to-path', 'write')) {
       return { success: false, error: 'Path not permitted' };
     }
     if (!isAllowedSaveTarget(filePath, 'docx')) {
@@ -958,7 +987,7 @@ ipcMain.handle('save-raw-bytes-to-path', async (_event, { data, filePath }) => {
 
 ipcMain.handle('save-image-to-path', async (_event, { data, filePath }) => {
   try {
-    if (!guardPath(filePath, 'save-image-to-path')) {
+    if (!guardPath(filePath, 'save-image-to-path', 'write')) {
       return { success: false, error: 'Path not permitted' };
     }
     if (!isAllowedSaveTarget(filePath, 'image')) {
@@ -982,7 +1011,7 @@ ipcMain.handle('open-folder', async (_event, folderPath: string) => {
     // guard would leak a path existence/type oracle for arbitrary absolute
     // paths (round-3 L-1). shell.openPath EXECUTES a file if handed one, so we
     // also restrict to existing directories.
-    if (typeof folderPath !== 'string' || !guardPath(folderPath, 'open-folder')) {
+    if (typeof folderPath !== 'string' || !guardPath(folderPath, 'open-folder', 'dir')) {
       return { success: false, error: 'Folder not permitted' };
     }
     if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
@@ -1018,6 +1047,9 @@ ipcMain.handle('add-recent-file', (_event, filePath: string) => {
   // Only record paths the user actually opened this session (a blessed dir).
   // recentFiles is blessed at startup, so an unvalidated write here would let a
   // compromised renderer expand the blessed set across a restart (H3).
+  // Deliberately dir-only: an exactly-blessed dropped file is NOT recordable,
+  // because the startup pass blesses each recent file's PARENT DIRECTORY, so
+  // recording a drop would silently widen a one-file grant into its folder.
   if (!isPathBlessed(filePath)) {
     console.warn(`[security] add-recent-file: refused unblessed path: ${String(filePath)}`);
     return recentFiles;
@@ -1159,10 +1191,18 @@ ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
   if (!isSafeOutputDir(outputDir)) {
     return { success: false, error: 'Invalid output directory' };
   }
-  if (!guardPath(inputPath, 'convert-to-pdf inputPath')) {
+  if (!guardPath(inputPath, 'convert-to-pdf inputPath', 'read')) {
     return { success: false, error: 'Input file not permitted' };
   }
-  if (!guardPath(outputDir, 'convert-to-pdf outputDir')) {
+  // The output dir must be a blessed directory, OR, for an exactly-blessed
+  // dropped input, the very directory that input sits in. In that case the only
+  // file written is the main-derived `<input name>.pdf` beside the input (the
+  // renderer cannot choose the name), and the directory itself is not blessed.
+  const outputBesideBlessedInput =
+    !isPathBlessed(outputDir) &&
+    blessedFiles.has(inputPath, 'read') &&
+    isContainingDirOf(outputDir, inputPath);
+  if (!outputBesideBlessedInput && !guardPath(outputDir, 'convert-to-pdf outputDir', 'dir')) {
     return { success: false, error: 'Output directory not permitted' };
   }
 
@@ -1193,6 +1233,9 @@ ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
         const baseName = path.basename(inputPath, path.extname(inputPath));
         const outputPath = path.join(outputDir, `${baseName}.pdf`);
         if (fs.existsSync(outputPath)) {
+          // A PDF written beside a dropped input is outside every blessed dir;
+          // bless that exact output so the opened result can save in place.
+          if (outputBesideBlessedInput) blessedFiles.addDerivedPdf(outputPath);
           const fileData = fs.readFileSync(outputPath);
           resolve({ success: true, path: outputPath, data: fileData.toString('base64') });
         } else {
@@ -1221,6 +1264,32 @@ ipcMain.handle('open-documents-dialog', async () => {
     return result.filePaths;
   }
   return null;
+});
+
+// Private trusted-drop channel (NOT exposed through contextBridge: only the
+// preload's isolated-world drop listener sends on it). Every path is
+// re-validated as untrusted and blessed as an exact file; the reply carries the
+// canonical records the main world may then open/save. Senders other than the
+// main window's top frame (e.g. the transient print window) are refused.
+ipcMain.handle(TRUSTED_DROP_CHANNEL, (event, paths: unknown): DropResult => {
+  const offered = Array.isArray(paths) ? paths.length : 0;
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    event.sender !== mainWindow.webContents ||
+    event.senderFrame !== mainWindow.webContents.mainFrame
+  ) {
+    console.warn('[security] trusted-drop: refused sender outside the main window top frame');
+    return { files: [], rejected: offered };
+  }
+  const { accepted, rejected } = blessedFiles.blessDrop(paths);
+  if (rejected > 0) {
+    console.warn(`[security] trusted-drop: refused ${rejected} of ${offered} dropped path(s)`);
+  }
+  return {
+    files: accepted.map((file) => ({ path: file.path, name: file.name })),
+    rejected,
+  };
 });
 
 // Handle second instance (user double-clicks a PDF while app is already running)

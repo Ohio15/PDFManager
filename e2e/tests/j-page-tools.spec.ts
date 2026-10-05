@@ -1,6 +1,6 @@
 import { test, expect } from '../fixtures/electron-app';
-import { openPDFViaIPC, getPageCount } from '../fixtures/helpers';
-import type { Page } from '@playwright/test';
+import { openPDFViaIPC, getPageCount, interceptSaveIpc, getInterceptedSaves } from '../fixtures/helpers';
+import type { Page, ElectronApplication } from '@playwright/test';
 import { PDFDocument as PDFLib, PDFName, PDFArray, PDFNumber } from 'pdf-lib';
 import path from 'path';
 import fs from 'fs';
@@ -8,42 +8,40 @@ import fs from 'fs';
 const TEST_PDFS_DIR = path.resolve(__dirname, '../../test-pdfs');
 const thumbs = (page: Page) => page.locator('.sidebar .page-thumbnail');
 
-/** Intercept the save IPC and return the bytes the app would have written. */
-async function saveAndCapture(page: Page): Promise<PDFLib> {
-  await page.evaluate(() => {
-    const api = (window as any).electronAPI;
-    (window as any).__saved = null;
-    const intercept = (data: string) => {
-      (window as any).__saved = data;
-      return Promise.resolve({ success: true, path: '/fake/saved.pdf' });
-    };
-    api.saveFile = intercept;
-    api.saveFileDialog = intercept;
-  });
+/**
+ * Save through the real renderer pipeline and return the bytes that crossed
+ * the IPC boundary. window.electronAPI is a frozen contextBridge object, so the
+ * save handlers are replaced in the MAIN process (Wave A's interceptSaveIpc).
+ */
+async function saveAndCapture(app: ElectronApplication, page: Page): Promise<PDFLib> {
+  await interceptSaveIpc(app);
+  await page.locator('.pdf-viewer').click({ position: { x: 5, y: 5 } });
   await page.keyboard.press('Control+s');
-  await page.waitForFunction(() => (window as any).__saved !== null, null, { timeout: 20_000 });
-  const b64 = await page.evaluate(() => (window as any).__saved as string);
-  return PDFLib.load(Buffer.from(b64, 'base64'));
+  await expect.poll(async () => (await getInterceptedSaves(app)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+  const saves = await getInterceptedSaves(app);
+  return PDFLib.load(Buffer.from(saves[saves.length - 1].data, 'base64'));
 }
 
-/** Make the native PDF picker + raw read return a fixture (dialogs cannot be automated). */
-async function mockPickPdf(page: Page, fixture: string): Promise<void> {
-  const b64 = fs.readFileSync(path.join(TEST_PDFS_DIR, fixture)).toString('base64');
-  await page.evaluate(({ name, data }) => {
-    const api = (window as any).electronAPI;
-    api.pickPdfFile = () => Promise.resolve(`C:/fixtures/${name}`);
-    api.readFileRaw = () => {
-      const bin = atob(data);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return Promise.resolve(bytes.buffer);
-    };
-  }, { name: fixture, data: b64 });
+/** Make the native PDF picker + raw read return a fixture (native dialogs cannot be automated). */
+async function mockPickPdf(app: ElectronApplication, fixture: string): Promise<void> {
+  const filePath = path.join(TEST_PDFS_DIR, fixture);
+  await app.evaluate(({ ipcMain }, fp) => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fsm = require('fs') as typeof import('fs');
+    ipcMain.removeHandler('pick-pdf-file');
+    ipcMain.handle('pick-pdf-file', () => fp);
+    ipcMain.removeHandler('read-file-raw');
+    ipcMain.handle('read-file-raw', (_e, requested: string) => {
+      if (requested !== fp) return null;
+      const data = fsm.readFileSync(fp);
+      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    });
+  }, filePath);
 }
 
-async function contextMenu(page: Page, thumbIndex: number, item: RegExp): Promise<void> {
+async function contextMenu(page: Page, thumbIndex: number, item: string): Promise<void> {
   await thumbs(page).nth(thumbIndex).click({ button: 'right' });
-  await page.locator('.page-context-menu .context-menu-item', { hasText: item }).click();
+  await page.locator('.page-context-menu').getByRole('menuitem', { name: item, exact: true }).click();
 }
 
 async function expectPageCount(page: Page, n: number): Promise<void> {
@@ -72,14 +70,14 @@ test.describe('Page tools', () => {
   test('duplicate page is undoable/redoable and survives save', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
     await expectPageCount(appPage, 3);
-    await contextMenu(appPage, 0, /^Duplicate page$/);
+    await contextMenu(appPage, 0, 'Duplicate page');
     await expectPageCount(appPage, 4);
     await appPage.locator('.pdf-viewer').click({ position: { x: 5, y: 5 } });
     await appPage.keyboard.press('Control+z');
     await expectPageCount(appPage, 3);
     await appPage.keyboard.press('Control+y');
     await expectPageCount(appPage, 4);
-    const saved = await saveAndCapture(appPage);
+    const saved = await saveAndCapture(electronApp, appPage);
     expect(saved.getPageCount()).toBe(4);
   });
 
@@ -88,9 +86,9 @@ test.describe('Page tools', () => {
     await expectPageCount(appPage, 9);
     await thumbs(appPage).nth(0).click();
     await thumbs(appPage).nth(2).click({ modifiers: ['Shift'] });
-    await contextMenu(appPage, 1, /Rotate 3 pages right/);
-    await contextMenu(appPage, 1, /Rotate 3 pages right/);
-    await contextMenu(appPage, 1, /Rotate 3 pages left/);
+    await contextMenu(appPage, 1, 'Rotate 3 pages right');
+    await contextMenu(appPage, 1, 'Rotate 3 pages right');
+    await contextMenu(appPage, 1, 'Rotate 3 pages left');
     // Thumbnails are not double-rotated by CSS on top of the baked /Rotate.
     await expect.poll(async () => thumbs(appPage).nth(0).locator('img').evaluate(
       (img: HTMLImageElement) => [img.naturalWidth > img.naturalHeight, img.style.transform || '']
@@ -98,10 +96,10 @@ test.describe('Page tools', () => {
 
     await thumbs(appPage).nth(4).click();
     await thumbs(appPage).nth(5).click({ modifiers: ['Control'] });
-    await contextMenu(appPage, 4, /Delete 2 pages/);
+    await contextMenu(appPage, 4, 'Delete 2 pages');
     await expectPageCount(appPage, 7);
 
-    const saved = await saveAndCapture(appPage);
+    const saved = await saveAndCapture(electronApp, appPage);
     expect(saved.getPageCount()).toBe(7);
     expect(saved.getPages().map((p) => p.getRotation().angle)).toEqual([90, 90, 90, 0, 0, 0, 0]);
   });
@@ -110,13 +108,13 @@ test.describe('Page tools', () => {
     await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
     await expectPageCount(appPage, 3);
     // Mark page 1 by rotating it, then drag it below page 3.
-    await contextMenu(appPage, 0, /Rotate page right/);
+    await contextMenu(appPage, 0, 'Rotate page right');
     await thumbs(appPage).nth(0).click();
     const target = thumbs(appPage).nth(2);
     const box = (await target.boundingBox())!;
     await thumbs(appPage).nth(0).dragTo(target, { targetPosition: { x: box.width / 2, y: box.height - 4 } });
     await expect.poll(async () => {
-      const saved = await saveAndCapture(appPage);
+      const saved = await saveAndCapture(electronApp, appPage);
       return saved.getPages().map((p) => p.getRotation().angle);
     }, { timeout: 20_000 }).toEqual([0, 0, 90]);
   });
@@ -124,18 +122,18 @@ test.describe('Page tools', () => {
   test('insert pages from another PDF at a position', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
     await expectPageCount(appPage, 3);
-    await mockPickPdf(appPage, 'cleaning-services.pdf');
-    await contextMenu(appPage, 0, /Insert pages from PDF after/);
+    await mockPickPdf(electronApp, 'cleaning-services.pdf');
+    await contextMenu(appPage, 0, 'Insert pages from PDF after…');
     await expectPageCount(appPage, 4);
-    const saved = await saveAndCapture(appPage);
+    const saved = await saveAndCapture(electronApp, appPage);
     expect(saved.getPages().map((p) => Math.round(p.getSize().width))).toEqual([612, 595, 612, 612]);
   });
 
   test('inserting a password-protected PDF fails with a clear error and changes nothing', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
     await expectPageCount(appPage, 3);
-    await mockPickPdf(appPage, 'encrypted-sample.pdf');
-    await contextMenu(appPage, 0, /Insert pages from PDF before/);
+    await mockPickPdf(electronApp, 'encrypted-sample.pdf');
+    await contextMenu(appPage, 0, 'Insert pages from PDF before…');
     await expect(appPage.getByText(/password-protected/)).toBeVisible({ timeout: 15_000 });
     await expectPageCount(appPage, 3);
   });
@@ -144,7 +142,7 @@ test.describe('Page tools', () => {
     await openPDFViaIPC(electronApp, appPage, 'invoice.pdf');
     await expectPageCount(appPage, 1);
     const before = (await appPage.locator('.pdf-page-container').first().boundingBox())!;
-    await contextMenu(appPage, 0, /Crop page/);
+    await contextMenu(appPage, 0, 'Crop page…');
     const dialog = appPage.getByTestId('crop-dialog');
     await expect(dialog.getByTestId('crop-box')).toBeVisible({ timeout: 15_000 });
     for (const [side, v] of [['top', '36'], ['right', '18'], ['bottom', '72'], ['left', '54']]) {
@@ -160,7 +158,7 @@ test.describe('Page tools', () => {
     }).toBeCloseTo(540 / 684, 2);
     expect(before.width / before.height).toBeCloseTo(612 / 792, 2);
 
-    const saved = await saveAndCapture(appPage);
+    const saved = await saveAndCapture(electronApp, appPage);
     const crop = (saved.getPage(0).node.get(PDFName.of('CropBox')) as PDFArray).asArray()
       .map((n) => (n as PDFNumber).asNumber());
     expect(crop).toEqual([54, 72, 594, 756]);
@@ -168,12 +166,41 @@ test.describe('Page tools', () => {
     expect([media.width, media.height]).toEqual([612, 792]);
   });
 
+  test('Rotate All then Undo restores every page, and queued ops each get their own undo step', async ({ electronApp, appPage }) => {
+    await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
+    await expectPageCount(appPage, 3);
+    const rotations = async () => (await saveAndCapture(electronApp, appPage)).getPages().map((p) => p.getRotation().angle);
+
+    await appPage.locator('.tool-btn', { hasText: 'Rotate All Pages' }).click();
+    await expect.poll(rotations, { timeout: 20_000 }).toEqual([90, 90, 90]);
+    await appPage.keyboard.press('Control+z');
+    await expect.poll(rotations, { timeout: 20_000 }).toEqual([0, 0, 0]);
+
+    // Three ops queued from ONE render (no re-render in between): each must
+    // record its own history entry, so three undos walk back cleanly and a
+    // fourth is a harmless no-op instead of throwing.
+    const pageErrors: string[] = [];
+    appPage.on('pageerror', (e) => pageErrors.push(e.message));
+    await appPage.evaluate(() => {
+      const right = document.querySelector('.toolbar-btn[aria-label="Rotate Right"]') as HTMLButtonElement;
+      right.click(); right.click(); right.click();
+    });
+    await expect.poll(rotations, { timeout: 20_000 }).toEqual([270, 0, 0]);
+    for (const expected of [[180, 0, 0], [90, 0, 0], [0, 0, 0]]) {
+      await appPage.keyboard.press('Control+z');
+      await expect.poll(rotations, { timeout: 20_000 }).toEqual(expected);
+    }
+    await appPage.keyboard.press('Control+z');
+    await expect.poll(rotations, { timeout: 20_000 }).toEqual([0, 0, 0]);
+    expect(pageErrors).toEqual([]);
+  });
+
   test('duplicating a form page keeps every field (linked widgets)', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'repair-calibration-form.pdf');
     await expectPageCount(appPage, 1);
-    await contextMenu(appPage, 0, /^Duplicate page$/);
+    await contextMenu(appPage, 0, 'Duplicate page');
     await expectPageCount(appPage, 2);
-    const saved = await saveAndCapture(appPage);
+    const saved = await saveAndCapture(electronApp, appPage);
     const fields = saved.getForm().getFields();
     expect(fields.length).toBe(47);
     for (const f of fields) expect(f.acroField.getWidgets().length).toBe(2);

@@ -4,21 +4,27 @@ import fs from 'fs';
 import os from 'os';
 
 type Fixtures = {
+  userDataDir: string;
   electronApp: ElectronApplication;
   appPage: Page;
 };
 
 export const test = base.extend<Fixtures>({
-  electronApp: async ({}, use) => {
-    // Each launch gets its own userData dir. The app takes a single-instance
-    // lock keyed on userData, so a shared default dir made any concurrently
-    // running PDF Manager (another checkout's e2e run, or the installed app)
-    // quit the app under test at launch.
-    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdfm-e2e-'));
-    // A fresh profile would start the first-run onboarding tour, whose overlay
-    // intercepts every click; seed electron-store's default config like a
-    // returning user's profile (the tour has its own coverage in its spec).
-    fs.writeFileSync(path.join(userDataDir, 'config.json'), JSON.stringify({ hasSeenOnboarding: true }));
+  // Every test gets its own throwaway userData directory. Without this, runs
+  // share the developer's real `pdf-manager` profile: its recent files/last
+  // dirs leak blessed directories into the test, and — because the single-
+  // instance lock lives in userData — a concurrent run from another worktree
+  // (or a lingering instance) makes the launched app quit immediately.
+  userDataDir: async ({}, use) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdfm-e2e-'));
+    // Pre-seed electron-store so the first-run onboarding tour does not
+    // overlay the UI under test.
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ hasSeenOnboarding: true }));
+    await use(dir);
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  },
+
+  electronApp: async ({ userDataDir }, use) => {
     const app = await _electron.launch({
       args: [path.resolve(__dirname, '../../dist/main/main.js'), `--user-data-dir=${userDataDir}`],
       env: {
@@ -26,12 +32,8 @@ export const test = base.extend<Fixtures>({
         NODE_ENV: 'test',
       },
     });
-    try {
-      await use(app);
-    } finally {
-      await app.close();
-      fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 3 });
-    }
+    await use(app);
+    await app.close();
   },
 
   appPage: async ({ electronApp }, use) => {

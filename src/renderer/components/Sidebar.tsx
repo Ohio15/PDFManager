@@ -4,6 +4,7 @@ import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Ima
 import { PDFDocument, Annotation, PDFSourceAnnotation } from '../types';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { dropGap, PageClickModifiers } from '../utils/pageSelectionModel';
+import { orderWithMove } from '../utils/pageStructure';
 import '../styles/pageTools.css';
 
 /** Drag payload type for moving pages within the sidebar (never set by external drags). */
@@ -285,6 +286,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   const isPageDrag = (e: React.DragEvent) => e.dataTransfer.types.includes(PAGE_DRAG_MIME);
 
   const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    // Only in-app page moves are handled here. External OS file drags carry no
+    // PAGE_DRAG_MIME and bubble to the app-wide drop target untouched.
     if (!isPageDrag(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
@@ -294,19 +297,26 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
-    if (!isPageDrag(e)) return;
+    if (!isPageDrag(e)) return; // external drop: handled app-wide
     e.preventDefault();
     e.stopPropagation();
     const moving = dragSetRef.current;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const gap = dropGap(toIndex, e.clientY < rect.top + rect.height / 2);
+    let gap = dropGap(toIndex, e.clientY < rect.top + rect.height / 2);
+    const count = document?.pages.length ?? 0;
+    if (moving && !moving.includes(toIndex) && orderWithMove(count, moving, gap).every((src, i) => src === i)) {
+      // The half-based gap is the pages' current spot (e.g. page 1 dropped on the
+      // top half of page 2). Dropping onto a DIFFERENT page always means "put it
+      // there": past the target when dragging down, before it when dragging up.
+      gap = toIndex > moving[moving.length - 1] ? toIndex + 1 : toIndex;
+    }
     if (moving && onMovePages) {
       onMovePages(moving, gap);
     } else if (dragIndex !== null && dragIndex !== toIndex && onReorderPages) {
       onReorderPages(dragIndex, toIndex);
     }
     handleDragEnd();
-  }, [dragIndex, onMovePages, onReorderPages, handleDragEnd]);
+  }, [dragIndex, onMovePages, onReorderPages, handleDragEnd, document]);
 
   const handleThumbnailClick = useCallback((e: React.MouseEvent, index: number) => {
     if (onPageClick) {

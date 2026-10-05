@@ -6,6 +6,8 @@ import {
   drawStroke,
   drawRect,
   getAnnotationCount,
+  interceptSaveIpc,
+  getInterceptedSaves,
 } from '../fixtures/helpers';
 import path from 'path';
 import fs from 'fs';
@@ -25,46 +27,29 @@ test.describe('Save Pipeline', () => {
     await appPage.keyboard.press('Escape');
     await appPage.waitForTimeout(500);
 
-    // Set up interceptors + error capture. The save pipeline may throw during
-    // applyEditsAndAnnotations before reaching saveFile/saveFileDialog.
+    // Capture the save at the real IPC boundary (main process) plus any
+    // renderer-side pipeline error.
+    await interceptSaveIpc(electronApp);
     await appPage.evaluate(() => {
-      const api = (window as any).electronAPI;
-      (window as any).__savedPdfData = null;
-      (window as any).__saveCompleted = false;
       (window as any).__savePipelineError = null;
-
-      const interceptor = (data: string, _pathOrDefault?: string) => {
-        (window as any).__savedPdfData = data;
-        (window as any).__saveCompleted = true;
-        return Promise.resolve({ success: true, path: '/fake/saved.pdf' });
-      };
-
-      api.saveFile = interceptor;
-      api.saveFileDialog = interceptor;
-
       window.addEventListener('unhandledrejection', (e) => {
         (window as any).__savePipelineError = String(e.reason);
-        (window as any).__saveCompleted = true;
       });
     });
 
     await appPage.keyboard.press('Control+s');
 
-    // Wait for either save success or pipeline error
-    await appPage.waitForFunction(
-      () => (window as any).__saveCompleted === true,
-      { timeout: 20_000 }
-    ).catch(() => {});
-
-    const data = await appPage.evaluate(() => (window as any).__savedPdfData);
+    await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    const [saved] = await getInterceptedSaves(electronApp);
     const error = await appPage.evaluate(() => (window as any).__savePipelineError);
 
     // The save must actually complete and produce PDF data. A pipeline error
-    // or timeout is a FAILURE — the previous accept-anything assertion here
+    // or timeout is a FAILURE: the previous accept-anything assertion here
     // masked the page-ops data-corruption bug fixed in v2.14.1.
     expect(error).toBeNull();
-    expect(data, 'save pipeline produced no PDF data before timeout').toBeTruthy();
-    expect(data.length).toBeGreaterThan(100);
+    const bytes = Buffer.from(saved.data, 'base64');
+    expect(bytes.length).toBeGreaterThan(100);
+    expect(bytes.subarray(0, 5).toString('latin1')).toBe('%PDF-');
 
     // Verify app is still functional
     const canvas = appPage.locator('canvas').first();
@@ -83,8 +68,10 @@ test.describe('Save Pipeline', () => {
     expect(annotationsBefore).toBeGreaterThanOrEqual(1);
 
     // Trigger save via keyboard shortcut
+    await interceptSaveIpc(electronApp);
     await appPage.keyboard.press('Control+s');
-    await appPage.waitForTimeout(1_000);
+    await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    expect(Buffer.from((await getInterceptedSaves(electronApp))[0].data, 'base64').subarray(0, 5).toString('latin1')).toBe('%PDF-');
 
     // Reopen and verify the PDF still loads
     await openPDFViaIPC(electronApp, appPage, 'announcement.pdf');
@@ -111,8 +98,10 @@ test.describe('Save Pipeline', () => {
     expect(annotationsBefore).toBeGreaterThanOrEqual(1);
 
     // Trigger save
+    await interceptSaveIpc(electronApp);
     await appPage.keyboard.press('Control+s');
-    await appPage.waitForTimeout(1_000);
+    await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    expect(Buffer.from((await getInterceptedSaves(electronApp))[0].data, 'base64').subarray(0, 5).toString('latin1')).toBe('%PDF-');
 
     // Reopen and verify
     await openPDFViaIPC(electronApp, appPage, 'cleaning-services.pdf');
@@ -151,8 +140,9 @@ test.describe('Save Pipeline', () => {
       expect(header).toBe('%PDF-');
     } else {
       // If the API doesn't expose data directly, verify the save flow completes without error
+      await interceptSaveIpc(electronApp);
       await appPage.keyboard.press('Control+s');
-      await appPage.waitForTimeout(1_000);
+      await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
       // No crash or error dialog means success
       const errorDialog = appPage.locator('.error-dialog, .error-modal');
       const errorVisible = await errorDialog.isVisible().catch(() => false);
@@ -200,8 +190,9 @@ test.describe('Save Pipeline', () => {
       expect(savedSize).toBeGreaterThan(100);
     } else {
       // Fallback: trigger a save and verify no crash
+      await interceptSaveIpc(electronApp);
       await appPage.keyboard.press('Control+s');
-      await appPage.waitForTimeout(1_000);
+      await expect.poll(async () => (await getInterceptedSaves(electronApp)).length, { timeout: 20_000 }).toBeGreaterThan(0);
       const canvas = appPage.locator('canvas').first();
       await expect(canvas).toBeVisible();
     }

@@ -156,7 +156,7 @@ function simpleFont(context: PDFContext, font: PDFDict, subtype: string): FontMo
       return { w: metrics.missingWidth / 1000, known: true };
     };
   } else {
-    const std = STANDARD_14[baseFont];
+    const std = Object.prototype.hasOwnProperty.call(STANDARD_14, baseFont) ? STANDARD_14[baseFont] : undefined;
     if (!std) {
       return {
         kind: 'simple',
@@ -257,14 +257,40 @@ function bytesToInt(b: number[]): number {
   return v;
 }
 
+/** Embedded CMaps are tens of KB in practice; larger text is treated as unreliable. */
+const MAX_CMAP_TEXT = 2 * 1024 * 1024;
+/** Upper bound on mapping entries kept from one CMap (lookups are linear in this). */
+const MAX_CMAP_ENTRIES = 100_000;
+
+/**
+ * Bodies between `open` and `close` keywords, found with a linear indexOf scan.
+ * (A lazy `[\s\S]*?` regex rescans to end-of-text for every unterminated
+ * opener, which is quadratic on hostile input.) An unterminated block ends it.
+ */
+function blocksBetween(text: string, open: string, close: string): string[] {
+  const out: string[] = [];
+  let pos = 0;
+  for (;;) {
+    const at = text.indexOf(open, pos);
+    if (at < 0) break;
+    const bodyStart = at + open.length;
+    const end = text.indexOf(close, bodyStart);
+    if (end < 0) break;
+    out.push(text.slice(bodyStart, end));
+    pos = end + close.length;
+  }
+  return out;
+}
+
 function parseEmbeddedCMap(text: string): CMapModel {
+  if (text.length > MAX_CMAP_TEXT) {
+    return { vertical: false, ranges: [], toCid: () => 0, reliable: false, reason: 'Embedded CMap is too large' };
+  }
   const ranges: CodespaceRange[] = [];
-  const csBlock = /begincodespacerange([\s\S]*?)endcodespacerange/g;
-  let m: RegExpExecArray | null;
-  while ((m = csBlock.exec(text))) {
+  for (const body of blocksBetween(text, 'begincodespacerange', 'endcodespacerange')) {
     const pair = /<([0-9a-fA-F\s]+)>\s*<([0-9a-fA-F\s]+)>/g;
     let p: RegExpExecArray | null;
-    while ((p = pair.exec(m[1]))) {
+    while ((p = pair.exec(body))) {
       const lo = parseHexBytes(p[1]);
       const hi = parseHexBytes(p[2]);
       if (lo.length === hi.length && lo.length > 0) ranges.push({ len: lo.length, lo, hi });
@@ -273,20 +299,18 @@ function parseEmbeddedCMap(text: string): CMapModel {
 
   const singles = new Map<string, number>();
   const rangeMaps: Array<{ len: number; lo: number; hi: number; cid: number }> = [];
-  const cidRange = /begincidrange([\s\S]*?)endcidrange/g;
-  while ((m = cidRange.exec(text))) {
+  for (const body of blocksBetween(text, 'begincidrange', 'endcidrange')) {
     const entry = /<([0-9a-fA-F\s]+)>\s*<([0-9a-fA-F\s]+)>\s*(\d+)/g;
     let e: RegExpExecArray | null;
-    while ((e = entry.exec(m[1]))) {
+    while ((e = entry.exec(body)) && rangeMaps.length < MAX_CMAP_ENTRIES) {
       const lo = parseHexBytes(e[1]);
       rangeMaps.push({ len: lo.length, lo: bytesToInt(lo), hi: bytesToInt(parseHexBytes(e[2])), cid: parseInt(e[3], 10) });
     }
   }
-  const cidChar = /begincidchar([\s\S]*?)endcidchar/g;
-  while ((m = cidChar.exec(text))) {
+  for (const body of blocksBetween(text, 'begincidchar', 'endcidchar')) {
     const entry = /<([0-9a-fA-F\s]+)>\s*(\d+)/g;
     let e: RegExpExecArray | null;
-    while ((e = entry.exec(m[1]))) {
+    while ((e = entry.exec(body)) && singles.size < MAX_CMAP_ENTRIES) {
       const b = parseHexBytes(e[1]);
       singles.set(`${b.length}:${bytesToInt(b)}`, parseInt(e[2], 10));
     }

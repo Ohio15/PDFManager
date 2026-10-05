@@ -36,10 +36,10 @@ import {
   PDFStream,
   PDFObject,
   PDFBool,
-  decodePDFRawStream,
 } from 'pdf-lib';
 import * as pako from 'pako';
 import { removeUnreachableObjects, rewriteReferences } from './pdfObjectGraph';
+import { decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES as MAX_INFLATE_BYTES } from './boundedDecode';
 
 export interface LossyOptions {
   /** Downsample images whose effective resolution exceeds this. */
@@ -102,6 +102,11 @@ export class CompressError extends Error {
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 const MAX_FORM_DEPTH = 12;
+/**
+ * Total Form XObject interpretations per document. Depth alone does not bound
+ * work: a form that invokes the next form N times per level costs N^depth.
+ */
+const MAX_FORM_INVOCATIONS = 5000;
 const DPI_TOLERANCE = 1.05;
 const MIN_STREAM_FOR_DEFLATE = 64;
 /** Longest operator/name we decode; longer runs are binary noise, not syntax. */
@@ -184,7 +189,7 @@ function lookupByDecodedName(dict: PDFDict | undefined, name: string): PDFObject
 function decodeContent(stream: PDFObject | undefined): Uint8Array | null {
   if (!(stream instanceof PDFRawStream)) return null;
   try {
-    return decodePDFRawStream(stream).decode();
+    return decodeRawStreamBounded(stream);
   } catch {
     return null;
   }
@@ -327,8 +332,11 @@ function findInlineImageEnd(data: Uint8Array, from: number): number {
 function scanImagePlacements(doc: PDFDocument): Map<string, number> {
   const context = doc.context;
   const minDpi = new Map<string, number>();
+  let formInvocations = 0;
+  let exhausted = false;
 
   const walk = (data: Uint8Array, resources: PDFDict | undefined, ctm: Matrix, depth: number, visiting: Set<string>) => {
+    if (exhausted) return;
     interpretContent(data, (name, current) => {
       const xobjects = resources?.lookupMaybe(PDFName.of('XObject'), PDFDict);
       const entry = lookupByDecodedName(xobjects, name);
@@ -347,6 +355,10 @@ function scanImagePlacements(doc: PDFDocument): Map<string, number> {
         const prev = minDpi.get(key);
         if (prev === undefined || dpi < prev) minDpi.set(key, dpi);
       } else if (subtype === 'Form' && depth < MAX_FORM_DEPTH && !visiting.has(key)) {
+        if (++formInvocations > MAX_FORM_INVOCATIONS) {
+          exhausted = true;
+          return;
+        }
         const decoded = decodeContent(stream);
         if (!decoded) return;
         const formResources = stream.dict.lookupMaybe(PDFName.of('Resources'), PDFDict) ?? resources;
@@ -389,8 +401,11 @@ function scanImagePlacements(doc: PDFDocument): Map<string, number> {
       joined[offset++] = 0x0a;
     }
     walk(joined, resources, IDENTITY, 0, new Set());
+    if (exhausted) break;
   }
-  return minDpi;
+  // Placements are incomplete once the budget runs out, so no image size can be
+  // trusted: report none, which leaves every image unresampled.
+  return exhausted ? new Map() : minDpi;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,9 +536,11 @@ function decodeFlateImageToRgba(
 ): Uint8ClampedArray<ArrayBuffer> | string {
   let inflated: Uint8Array;
   try {
-    inflated = pako.inflate(stream.contents);
+    // Row data plus one predictor byte per row is all a valid image can need.
+    const expected = height * (width * components + 1);
+    inflated = inflateCapped(stream.contents, Math.min(MAX_INFLATE_BYTES, expected + 64 * 1024));
   } catch {
-    return 'corrupt Flate data';
+    return 'corrupt or oversized Flate data';
   }
   const parmsObj = stream.dict.lookup(PDFName.of('DecodeParms'));
   const parms = parmsObj instanceof PDFDict ? parmsObj : parmsObj instanceof PDFArray ? (parmsObj.lookup(0) as PDFDict) : undefined;
@@ -782,7 +799,7 @@ function recompressStreams(doc: PDFDocument): number {
       setFilter = true;
     } else if (filters.length === 1 && filters[0] === 'FlateDecode') {
       try {
-        candidate = pako.deflate(pako.inflate(obj.contents), { level: 9 });
+        candidate = pako.deflate(inflateCapped(obj.contents, MAX_INFLATE_BYTES), { level: 9 });
       } catch {
         continue;
       }

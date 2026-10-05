@@ -46,6 +46,9 @@ export interface ContentOp {
 }
 
 const WS = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20]);
+/** Real content streams nest operands a few levels deep at most. */
+const MAX_CONTAINER_NESTING = 64;
+
 const DELIM = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]);
 
 function isWs(c: number): boolean {
@@ -300,7 +303,25 @@ export class ContentTokenizer {
     return { type: 'name', value: name, start, end: this.pos };
   }
 
+  /** Current array/dictionary nesting; bounded so hostile input cannot overflow the stack. */
+  private nesting = 0;
+
+  private enterContainer(start: number): void {
+    if (++this.nesting > MAX_CONTAINER_NESTING) {
+      throw new ContentParseError('Operand nesting too deep', start);
+    }
+  }
+
   private readArray(start: number): Operand {
+    this.enterContainer(start);
+    try {
+      return this.readArrayItems(start);
+    } finally {
+      this.nesting--;
+    }
+  }
+
+  private readArrayItems(start: number): Operand {
     const items: Operand[] = [];
     for (;;) {
       const tok = this.next();
@@ -314,6 +335,15 @@ export class ContentTokenizer {
   }
 
   private readDict(start: number): Operand {
+    this.enterContainer(start);
+    try {
+      return this.readDictEntries(start);
+    } finally {
+      this.nesting--;
+    }
+  }
+
+  private readDictEntries(start: number): Operand {
     const entries = new Map<string, Operand>();
     for (;;) {
       const keyTok = this.next();

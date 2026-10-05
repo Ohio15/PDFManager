@@ -100,6 +100,16 @@ test.describe('Trusted drag-and-drop', () => {
     expect(access.readNull).toBe(true);
     expect(access.write).toEqual({ success: false, error: 'Path not permitted' });
     expect(fs.readFileSync(sibling).equals(fs.readFileSync(path.join(TEST_PDFS_DIR, 'invoice.pdf')))).toBe(true);
+
+    // A dropped file must not be recordable as a recent file: startup blesses
+    // each recent file's PARENT directory, which would widen the one-file grant.
+    const recent = await appPage.evaluate(async ({ droppedPath }) => {
+      const after = await window.electronAPI.addRecentFile(droppedPath);
+      const stored = await window.electronAPI.getRecentFiles();
+      return { after, stored };
+    }, { droppedPath: dropped });
+    expect(recent.after).not.toContain(dropped);
+    expect(recent.stored).not.toContain(dropped);
   });
 
   test('multi-file drop opens each PDF in its own tab and reports skipped files', async ({ appPage }) => {

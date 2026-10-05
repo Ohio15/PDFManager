@@ -43,6 +43,12 @@ export interface PageScan {
   glyphs: ScannedGlyph[];
   images: ScannedImage[];
   paths: ScannedPath[];
+  /**
+   * Content the scan could NOT examine (e.g. text shown in a font pdf.js failed
+   * to load). Fail closed: a verifier must treat any entry as a violation,
+   * never as "nothing found".
+   */
+  unexamined: string[];
 }
 
 interface TextState {
@@ -89,6 +95,7 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
   const glyphs: ScannedGlyph[] = [];
   const images: ScannedImage[] = [];
   const paths: ScannedPath[] = [];
+  const unexamined: string[] = [];
 
   let st: TextState = {
     ctm: [...IDENTITY] as Matrix,
@@ -124,7 +131,14 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
   const showGlyphs = (items: Array<PdfjsGlyph | number | null>) => {
     const font = st.font;
     const fontSize = st.fontSize;
-    if (!font || fontSize === 0) return;
+    if (fontSize === 0) return;
+    if (!font) {
+      // Glyph positions are unknowable without the font; the run is unexamined.
+      if (items.some((g) => g !== null && g !== undefined && typeof g !== 'number')) {
+        unexamined.push('Text drawn with a font that could not be loaded');
+      }
+      return;
+    }
     const fm = font.fontMatrix ?? [0.001, 0, 0, 0.001, 0, 0];
     const widthAdvanceScale = fontSize * fm[0];
     const hScale = st.textHScale * st.fontDirection;
@@ -369,7 +383,7 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     }
   }
 
-  return { glyphs, images, paths };
+  return { glyphs, images, paths, unexamined };
 }
 
 export { UNIT_SQUARE };

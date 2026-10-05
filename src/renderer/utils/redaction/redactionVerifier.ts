@@ -68,6 +68,11 @@ export async function verifyRedaction(
       const scan = await scanPdfjsPage(page, env.lib.OPS);
       checks.pages++;
 
+      // Fail closed: content the oracle could not examine is never "clean".
+      for (const reason of new Set(scan.unexamined)) {
+        add(pageIndex, `Could not be verified: ${reason}`);
+      }
+
       for (const g of scan.glyphs) {
         checks.glyphs++;
         if (pointInAny(g.center, marks)) add(pageIndex, `Text glyph "${g.unicode}" remains under a mark`);
@@ -158,6 +163,9 @@ export async function verifyRedaction(
         try {
           text = new TextDecoder('latin1').decode(decodeStreamStrict(obj));
         } catch {
+          const msg = `Stream ${ref.toString()} could not be decoded to check for the term`;
+          if (!subtype || subtype === 'Form') globalViolations.push(msg);
+          else residualLocations.push(msg);
           continue;
         }
         const lower = text.toLowerCase();

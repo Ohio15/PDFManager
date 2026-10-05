@@ -409,3 +409,43 @@ export class BlessedFileRegistry {
     return this.readable.size;
   }
 }
+
+/**
+ * The trusted-drop channel accepts only the main window's top frame. Identity
+ * comparisons only: any other webContents (e.g. the transient print window) or
+ * a subframe is refused, as is a destroyed/missing main window.
+ */
+export function isTrustedDropSender(input: {
+  windowAlive: boolean;
+  sender: unknown;
+  senderFrame: unknown;
+  mainContents: unknown;
+  mainFrame: unknown;
+}): boolean {
+  return (
+    input.windowAlive &&
+    input.mainContents != null &&
+    input.sender === input.mainContents &&
+    input.mainFrame != null &&
+    input.senderFrame === input.mainFrame
+  );
+}
+
+/**
+ * convert-to-pdf may write next to an exactly-blessed (dropped) input without
+ * the output directory itself being blessed, but ONLY into the directory that
+ * directly contains that input. A blessed output directory takes the normal
+ * dir-guard path instead, so this returns false for it.
+ */
+export function isOutputBesideBlessedInput(
+  outputDir: unknown,
+  inputPath: unknown,
+  deps: { isDirBlessed: (p: string) => boolean; isInputFileBlessed: (p: string) => boolean }
+): boolean {
+  if (typeof outputDir !== 'string' || typeof inputPath !== 'string') return false;
+  return (
+    !deps.isDirBlessed(outputDir) &&
+    deps.isInputFileBlessed(inputPath) &&
+    isContainingDirOf(outputDir, inputPath)
+  );
+}

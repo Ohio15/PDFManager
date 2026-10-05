@@ -3,6 +3,7 @@
  * modules. Every lookup tolerates indirect references and wrong types by
  * returning undefined instead of throwing.
  */
+import { decodeRawStreamBounded } from '../boundedDecode';
 import {
   PDFArray,
   PDFBool,
@@ -16,7 +17,6 @@ import {
   PDFRef,
   PDFStream,
   PDFString,
-  decodePDFRawStream,
 } from 'pdf-lib';
 
 export function resolve(context: PDFContext, obj: PDFObject | undefined): PDFObject | undefined {
@@ -98,7 +98,9 @@ export function streamFilters(context: PDFContext, stream: PDFStream): string[] 
  */
 export function decodeStreamStrict(stream: PDFStream): Uint8Array {
   if (stream instanceof PDFRawStream) {
-    return decodePDFRawStream(stream).decode();
+    // Bounded: the input is an untrusted PDF; an overflow throws, which callers
+    // treat as "could not examine" (never as clean).
+    return decodeRawStreamBounded(stream);
   }
   // PDFContentStream / PDFFlateStream built in-memory by pdf-lib keep their
   // plaintext separately; getContents() would return the deflated bytes.

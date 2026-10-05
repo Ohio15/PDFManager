@@ -13,7 +13,8 @@ import {
   isAllowedSaveTarget,
   resolveRealPath,
   isPathWithinBlessed,
-  isContainingDirOf,
+  isOutputBesideBlessedInput,
+  isTrustedDropSender,
   BlessedFileRegistry,
 } from './security';
 import { TRUSTED_DROP_CHANNEL } from '../shared/ipc';
@@ -1198,10 +1199,10 @@ ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
   // dropped input, the very directory that input sits in. In that case the only
   // file written is the main-derived `<input name>.pdf` beside the input (the
   // renderer cannot choose the name), and the directory itself is not blessed.
-  const outputBesideBlessedInput =
-    !isPathBlessed(outputDir) &&
-    blessedFiles.has(inputPath, 'read') &&
-    isContainingDirOf(outputDir, inputPath);
+  const outputBesideBlessedInput = isOutputBesideBlessedInput(outputDir, inputPath, {
+    isDirBlessed: isPathBlessed,
+    isInputFileBlessed: (p) => blessedFiles.has(p, 'read'),
+  });
   if (!outputBesideBlessedInput && !guardPath(outputDir, 'convert-to-pdf outputDir', 'dir')) {
     return { success: false, error: 'Output directory not permitted' };
   }
@@ -1273,11 +1274,15 @@ ipcMain.handle('open-documents-dialog', async () => {
 // main window's top frame (e.g. the transient print window) are refused.
 ipcMain.handle(TRUSTED_DROP_CHANNEL, (event, paths: unknown): DropResult => {
   const offered = Array.isArray(paths) ? paths.length : 0;
+  const windowAlive = !!mainWindow && !mainWindow.isDestroyed();
   if (
-    !mainWindow ||
-    mainWindow.isDestroyed() ||
-    event.sender !== mainWindow.webContents ||
-    event.senderFrame !== mainWindow.webContents.mainFrame
+    !isTrustedDropSender({
+      windowAlive,
+      sender: event.sender,
+      senderFrame: event.senderFrame,
+      mainContents: windowAlive ? mainWindow!.webContents : null,
+      mainFrame: windowAlive ? mainWindow!.webContents.mainFrame : null,
+    })
   ) {
     console.warn('[security] trusted-drop: refused sender outside the main window top frame');
     return { files: [], rejected: offered };

@@ -10,6 +10,24 @@ export function isExternalFileDrag(dataTransfer: DataTransfer | null | undefined
   return !!dataTransfer && Array.from(dataTransfer.types).includes('Files');
 }
 
+/**
+ * Native drop events already claimed by a nested handler that must NOT stop
+ * propagation (the app-wide target still needs the event to reset its overlay
+ * depth). The app-wide handler skips the claim step for these.
+ */
+const claimedDrops = new WeakSet<Event>();
+
+/**
+ * Claim an external file drop inside a nested target (e.g. the sidebar
+ * thumbnails) while letting the event bubble so the app-wide overlay resets.
+ * Must be called synchronously from the drop handler.
+ */
+export function claimExternalDrop(e: React.DragEvent): Promise<DropResult> {
+  e.preventDefault();
+  claimedDrops.add(e.nativeEvent);
+  return window.electronAPI.takeDroppedFiles();
+}
+
 /** True while any modal dialog is open; the app-wide drop target stands down. */
 function isModalOpen(): boolean {
   return window.document.querySelector('.modal-overlay') !== null;
@@ -68,7 +86,7 @@ export function useAppFileDrop(onDrop: FileDropHandler): boolean {
       if (!isExternalFileDrag(e.dataTransfer)) return;
       e.preventDefault();
       reset();
-      if (isModalOpen()) return;
+      if (claimedDrops.has(e) || isModalOpen()) return;
       // Claim synchronously: the preload's record lives only for this dispatch.
       const claim = window.electronAPI.takeDroppedFiles();
       onDropRef.current(claim, e.dataTransfer?.files.length ?? 0);

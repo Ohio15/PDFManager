@@ -1010,6 +1010,36 @@ const App: React.FC = () => {
     });
   }, [document, runPageTool, insertPdfPagesAt, pageSelection, toast]);
 
+  /**
+   * External PDFs dropped onto the sidebar thumbnails: insert every page of
+   * each, in drop order, into gap `beforeIndex`. The files come from the trusted
+   * drop claim (main-blessed), never from a renderer-supplied path.
+   */
+  const handleThumbnailPdfDrop = useCallback(async (claim: Promise<DropResult>, beforeIndex: number) => {
+    if (!document) return;
+    await runPageTool('Insert pages', async () => {
+      const result = await claim;
+      const pdfs = result.files.filter((f) => isPdf(f.path));
+      const skipped = result.rejected + (result.files.length - pdfs.length);
+      const allInserted: number[] = [];
+      let at = beforeIndex;
+      for (const file of pdfs) {
+        const raw = await window.electronAPI.readFileRaw(file.path);
+        if (!raw) throw new Error(`Could not read ${file.name}`);
+        const inserted = await insertPdfPagesAt(at, new Uint8Array(raw));
+        allInserted.push(...inserted);
+        at += inserted.length;
+      }
+      if (allInserted.length > 0) {
+        pageSelection.select(allInserted);
+        toast.success(`Inserted ${allInserted.length} page${allInserted.length === 1 ? '' : 's'}`);
+      }
+      if (skipped > 0) {
+        toast.warning(`${skipped} dropped file${skipped === 1 ? ' was' : 's were'} skipped: only PDFs can be inserted as pages`);
+      }
+    });
+  }, [document, runPageTool, insertPdfPagesAt, pageSelection, toast]);
+
   // Extract images handler
   const handleExtractImages = useCallback(async (outputDir: string): Promise<{ count: number; folder: string }> => {
     if (!document) return { count: 0, folder: outputDir };
@@ -1511,6 +1541,7 @@ const App: React.FC = () => {
           onDeletePages={handleDeletePages}
           onExtractPages={handleExtractSelectedPages}
           onCropPages={(indices) => setCropDialogPages(indices)}
+          onExternalPdfDrop={handleThumbnailPdfDrop}
           onInsertPdfAt={handleInsertPdfAt}
           onDeleteAnnotation={deleteAnnotation}
           onSelectAnnotation={(id) => setSelectedAnnotationId(id)}

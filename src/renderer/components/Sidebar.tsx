@@ -5,6 +5,8 @@ import { PDFDocument, Annotation, PDFSourceAnnotation } from '../types';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { dropGap, PageClickModifiers } from '../utils/pageSelectionModel';
 import { orderWithMove } from '../utils/pageStructure';
+import { claimExternalDrop, isExternalFileDrag } from '../hooks/useFileDrop';
+import type { DropResult } from '../../shared/ipc';
 import '../styles/pageTools.css';
 
 /** Drag payload type for moving pages within the sidebar (never set by external drags). */
@@ -45,6 +47,8 @@ interface SidebarProps {
   onCropPages?: (indices: number[]) => void;
   /** Insert another PDF's pages into gap `beforeIndex`. */
   onInsertPdfAt?: (beforeIndex: number) => void;
+  /** External (OS) PDFs dropped onto the thumbnails: insert into gap `beforeIndex`. */
+  onExternalPdfDrop?: (claim: Promise<DropResult>, beforeIndex: number) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -68,6 +72,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onExtractPages,
   onCropPages,
   onInsertPdfAt,
+  onExternalPdfDrop,
 }) => {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [dropGapIndex, setDropGapIndex] = useState<number | null>(null);
@@ -78,6 +83,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  /** Insertion gap shown while an external PDF is dragged over the thumbnails. */
+  const [externalGap, setExternalGap] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [annotationFilter, setAnnotationFilter] = useState<string>('all');
   const [pageContextMenu, setPageContextMenu] = useState<{ isOpen: boolean; x: number; y: number; pageIndex: number }>({
@@ -295,18 +302,35 @@ const Sidebar: React.FC<SidebarProps> = ({
   const isPageDrag = (e: React.DragEvent) => e.dataTransfer.types.includes(PAGE_DRAG_MIME);
 
   const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
-    // Only in-app page moves are handled here. External OS file drags carry no
-    // PAGE_DRAG_MIME and bubble to the app-wide drop target untouched.
+    // External OS file drags over a thumbnail insert their pages at that gap.
+    // They are not stopped: the app-wide target still sees the events, which
+    // keeps its overlay depth count balanced.
+    if (onExternalPdfDrop && isExternalFileDrag(e.dataTransfer)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setExternalGap(dropGap(index, e.clientY < rect.top + rect.height / 2));
+      return;
+    }
+    // Otherwise only in-app page moves are handled here.
     if (!isPageDrag(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setDropIndex(index);
     setDropGapIndex(dropGap(index, e.clientY < rect.top + rect.height / 2));
-  }, []);
+  }, [onExternalPdfDrop]);
 
   const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
-    if (!isPageDrag(e)) return; // external drop: handled app-wide
+    if (onExternalPdfDrop && isExternalFileDrag(e.dataTransfer)) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const gap = dropGap(toIndex, e.clientY < rect.top + rect.height / 2);
+      setExternalGap(null);
+      // Claimed synchronously; the event still bubbles so the overlay resets.
+      onExternalPdfDrop(claimExternalDrop(e), gap);
+      return;
+    }
+    if (!isPageDrag(e)) return;
     e.preventDefault();
     e.stopPropagation();
     const moving = dragSetRef.current;
@@ -325,7 +349,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       onReorderPages(dragIndex, toIndex);
     }
     handleDragEnd();
-  }, [dragIndex, onMovePages, onReorderPages, handleDragEnd, document]);
+  }, [dragIndex, onMovePages, onReorderPages, handleDragEnd, document, onExternalPdfDrop]);
 
   const handleThumbnailClick = useCallback((e: React.MouseEvent, index: number) => {
     if (onPageClick) {
@@ -460,6 +484,11 @@ const Sidebar: React.FC<SidebarProps> = ({
         <div
           className="sidebar-content pages-content"
           ref={containerRef}
+          onDragLeave={(e) => {
+            // Leaving the thumbnail list (not just crossing into a child) clears the gap.
+            const next = e.relatedTarget as Node | null;
+            if (!next || !e.currentTarget.contains(next)) setExternalGap(null);
+          }}
           tabIndex={0}
           onKeyDown={handlePagesKeyDown}
           aria-label="Page thumbnails"
@@ -470,13 +499,15 @@ const Sidebar: React.FC<SidebarProps> = ({
             const thumbnail = thumbnails[index];
             const isSelected = selectedSet.has(index);
             const showGap = dragIndex !== null && dropIndex === index && dropGapIndex !== null;
+            const extBefore = externalGap === index;
+            const extAfter = externalGap === index + 1 && index === (document?.pages.length ?? 0) - 1;
             return (
               <div
                 key={index}
                 data-page-index={index}
                 role="option"
                 aria-selected={isSelected || currentPage === index + 1}
-                className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${isSelected ? 'selected' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${showGap && dropGapIndex === index ? 'drop-before' : ''} ${showGap && dropGapIndex === index + 1 ? 'drop-after' : ''}`}
+                className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${isSelected ? 'selected' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${showGap && dropGapIndex === index ? 'drop-before' : ''} ${showGap && dropGapIndex === index + 1 ? 'drop-after' : ''} ${extBefore ? 'drop-before' : ''} ${extAfter ? 'drop-after' : ''}`}
                 onClick={(e) => handleThumbnailClick(e, index)}
                 draggable={!!(onMovePages || onReorderPages)}
                 onDragStart={(e) => handleDragStart(e, index)}

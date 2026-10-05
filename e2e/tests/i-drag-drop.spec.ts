@@ -179,6 +179,27 @@ test.describe('Trusted drag-and-drop', () => {
     await expect(appPage.locator('.tab-bar-tab')).toHaveCount(0);
   });
 
+  test('a PDF dropped onto a thumbnail inserts its pages there instead of opening a tab', async ({ electronApp, appPage }) => {
+    staged = stageFixtures(['announcement.pdf']);
+    const { PDFDocument } = await import('pdf-lib');
+    const insertedCount = (await PDFDocument.load(fs.readFileSync(staged.paths['announcement.pdf']), { ignoreEncryption: true })).getPageCount();
+
+    await openPDFViaIPC(electronApp, appPage, 'scan-document.pdf');
+    const thumbs = appPage.locator('.page-thumbnail');
+    await expect(thumbs.first()).toBeVisible({ timeout: 10_000 });
+    const before = await thumbs.count();
+
+    await trustedDrop(appPage, '.page-thumbnail', [staged.paths['announcement.pdf']]);
+
+    await expect(thumbs).toHaveCount(before + insertedCount, { timeout: 20_000 });
+    await expect(appPage.locator('.toast-success .toast-message', { hasText: `Inserted ${insertedCount} page` }))
+      .toBeVisible({ timeout: 10_000 });
+    // Inserted into the open document: no new tab, and the overlay reset.
+    await expect(appPage.locator('.tab-bar-tab')).toHaveCount(1);
+    await expect(appPage.locator('[data-testid="drop-overlay"]')).toHaveCount(0);
+    await expect(appPage.locator('.tab-bar-tab .tab-modified-dot')).toHaveCount(1);
+  });
+
   test('in-app thumbnail reorder still works and is not taken for a file drop', async ({ electronApp, appPage }) => {
     await openPDFViaIPC(electronApp, appPage, 'scan-document.pdf');
     const thumbs = appPage.locator('.page-thumbnail');

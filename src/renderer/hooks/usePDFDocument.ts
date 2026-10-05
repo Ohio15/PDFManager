@@ -13,6 +13,8 @@ import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
 import { useMarkupRedaction } from './useMarkupRedaction';
+import { bakeFormValues } from '../utils/documentTransforms';
+import { withPdfJsDocument } from '../utils/pdfjsReload';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -47,6 +49,20 @@ interface HistoryEntry {
   redo: () => void;
 }
 
+/** A byte-level transform of the whole document (form authoring, flatten, compress). */
+export interface DocumentTransformInput {
+  /** The document as committed when the transform starts (serialized with page ops). */
+  doc: PDFDocument;
+  /** doc.pdfData with the values typed into form widgets written in. Transform these. */
+  bakedBytes: Uint8Array;
+}
+
+export interface DocumentTransformOutput {
+  pdfData: Uint8Array;
+  /** Replacement page model; omit to keep doc.pages (geometry must be unchanged). */
+  pages?: PDFDocument['pages'];
+}
+
 interface TabState {
   document: PDFDocument | null;
   modified: boolean;
@@ -74,6 +90,8 @@ export function usePDFDocument() {
   // Form field state
   const [formFieldMappings, setFormFieldMappings] = useState<FormFieldMapping[]>([]);
   const annotationStorageRef = useRef<any>(null);
+  const formFieldMappingsRef = useRef<FormFieldMapping[]>([]);
+  formFieldMappingsRef.current = formFieldMappings;
 
   // Ref that always holds the latest state values (updated synchronously each render)
   const stateRef = useRef<{
@@ -116,11 +134,19 @@ export function usePDFDocument() {
     annotationStorageRef.current = storage;
   }, []);
 
+  // Advanced synchronously: several ops queued from one render (e.g. Rotate
+  // All looping rotatePage through runStructural) must each append after the
+  // previous one, not all slice at the index captured by that render.
+  const historyIndexRef = useRef(historyIndex);
+  historyIndexRef.current = historyIndex;
+
   const addToHistory = useCallback((entry: HistoryEntry) => {
-    setHistory((prev) => [...prev.slice(0, historyIndex + 1), entry]);
-    setHistoryIndex((prev) => prev + 1);
+    const base = historyIndexRef.current;
+    historyIndexRef.current = base + 1;
+    setHistory((prev) => [...prev.slice(0, base + 1), entry]);
+    setHistoryIndex(base + 1);
     setModified(true);
-  }, [historyIndex]);
+  }, []);
 
   // Save current active tab state to the cache
   const saveCurrentTabState = useCallback(() => {
@@ -440,14 +466,8 @@ export function usePDFDocument() {
         historyIndex: -1,
       });
 
-      // Build form field mappings for the new document
-      try {
-        const mappings = await buildFormFieldMapping(pdfDoc);
-        setFormFieldMappings(mappings);
-      } catch (e) {
-        console.warn('Failed to build form field mappings:', e);
-        setFormFieldMappings([]);
-      }
+      // Form field mappings are rebuilt from pdfData by the effect below.
+      await pdfDoc.destroy();
     } catch (error) {
       console.error('Failed to open PDF:', error);
       throw error;
@@ -458,6 +478,27 @@ export function usePDFDocument() {
       }
     }
   }, [saveCurrentTabState, switchTab]);
+
+  // Rebuild the pdf.js field mappings whenever the bytes change: open, tab
+  // switch, structural ops, form authoring, flatten, compress, undo/redo. The
+  // mappings key pdf.js annotation ids that only exist in those exact bytes.
+  const mappingRequestRef = useRef(0);
+  const currentPdfData = document?.pdfData;
+  useEffect(() => {
+    const requestId = ++mappingRequestRef.current;
+    if (!currentPdfData || currentPdfData.length === 0) {
+      setFormFieldMappings([]);
+      return;
+    }
+    withPdfJsDocument(currentPdfData, (pdf) => buildFormFieldMapping(pdf))
+      .then((mappings) => {
+        if (mappingRequestRef.current === requestId) setFormFieldMappings(mappings);
+      })
+      .catch((e) => {
+        console.warn('Failed to build form field mappings:', e);
+        if (mappingRequestRef.current === requestId) setFormFieldMappings([]);
+      });
+  }, [currentPdfData]);
 
   // Shared post-save logic: re-extract text items from the modified PDF
   const reExtractTextAfterSave = useCallback(async (
@@ -1486,18 +1527,55 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [runStructural, addToHistory, commitDocument]
   );
 
-  const markupRedaction = useMarkupRedaction({ stateRef, runStructural, commitDocument, addToHistory, setFormFieldMappings });
+  /**
+   * Commit a byte-level transform as one undoable step, serialized with the
+   * structural page ops. Live form values are baked first (see
+   * documentTransforms.ts); the baked bytes are the undo target so undo keeps
+   * the values typed before the transform. Resolves with the transform's
+   * output, or null when it declined (returned null) or no document is open.
+   */
+  const applyDocumentTransform = useCallback(
+    async <T extends DocumentTransformOutput>(
+      type: string,
+      transform: (input: DocumentTransformInput) => Promise<T | null>
+    ): Promise<T | null> => {
+      let result: T | null = null;
+      await runStructural(async () => {
+        const doc = stateRef.current.document;
+        if (!doc) return;
+        const bakedBytes = await bakeFormValues(doc.pdfData, annotationStorageRef.current, formFieldMappingsRef.current);
+        const output = await transform({ doc, bakedBytes });
+        if (!output) return;
+        const pages = output.pages ?? doc.pages;
+        const nextDoc: PDFDocument = { ...doc, pdfData: output.pdfData, pages, pageCount: pages.length };
+        const undoDoc: PDFDocument = bakedBytes === doc.pdfData ? doc : { ...doc, pdfData: bakedBytes };
+        commitDocument(nextDoc);
+        addToHistory({
+          type,
+          undo: () => commitDocument(undoDoc),
+          redo: () => commitDocument(nextDoc),
+        });
+        result = output;
+      });
+      return result;
+    },
+    [runStructural, addToHistory, commitDocument]
+  );
+
+  const markupRedaction = useMarkupRedaction({ stateRef, commitDocument, addToHistory, applyDocumentTransform });
 
   const undo = useCallback(() => {
     if (!canUndo) return;
     history[historyIndex].undo();
-    setHistoryIndex((prev) => prev - 1);
+    historyIndexRef.current = historyIndex - 1;
+    setHistoryIndex(historyIndex - 1);
   }, [canUndo, history, historyIndex]);
 
   const redo = useCallback(() => {
     if (!canRedo) return;
     history[historyIndex + 1].redo();
-    setHistoryIndex((prev) => prev + 1);
+    historyIndexRef.current = historyIndex + 1;
+    setHistoryIndex(historyIndex + 1);
   }, [canRedo, history, historyIndex]);
 
   return {
@@ -1539,6 +1617,8 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     setPendingEncryption,
     // Text markup + redaction
     ...markupRedaction,
+    // Byte-level transforms (form authoring, flatten, compress)
+    applyDocumentTransform,
   };
 }
 

@@ -3,7 +3,8 @@
  *
  * Kept in its own hook so the shared document hook only gains one call and a
  * few return-object entries. It uses the document hook's serialization
- * (runStructural), synchronous commit (commitDocument) and history.
+ * byte-transform path (applyDocumentTransform), synchronous commit
+ * (commitDocument) and history.
  */
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
@@ -19,7 +20,7 @@ import type {
   TextMarkupType,
 } from '../types';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
-import { buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver';
+import type { DocumentTransformInput, DocumentTransformOutput } from './usePDFDocument';
 import { buildFilledRectMap, buildTextColorMap, matchBackgroundColor, matchTextColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { getTextHeight, mapToStandardFontName, measureTextWidth } from '../utils/standardFontMetrics';
@@ -36,10 +37,12 @@ interface HistoryEntry {
 
 interface Deps {
   stateRef: MutableRefObject<{ document: PDFDocument | null }>;
-  runStructural: (op: () => Promise<void>) => Promise<void>;
   commitDocument: (doc: PDFDocument) => void;
   addToHistory: (entry: HistoryEntry) => void;
-  setFormFieldMappings: (m: FormFieldMapping[]) => void;
+  applyDocumentTransform: <T extends DocumentTransformOutput>(
+    type: string,
+    transform: (input: DocumentTransformInput) => Promise<T | null>
+  ) => Promise<T | null>;
 }
 
 export interface ApplyRedactionsRequest {
@@ -161,7 +164,7 @@ async function extractTextItems(page: pdfjsLib.PDFPageProxy, i: number): Promise
   return items;
 }
 
-export function useMarkupRedaction({ stateRef, runStructural, commitDocument, addToHistory, setFormFieldMappings }: Deps) {
+export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, applyDocumentTransform }: Deps) {
   const commitAnnotations = useCallback(
     (type: string, pageIndex1: number, mutate: (annotations: Annotation[]) => Annotation[]) => {
       const doc = stateRef.current.document;
@@ -242,110 +245,86 @@ export function useMarkupRedaction({ stateRef, runStructural, commitDocument, ad
    * rejects (leaving the document untouched) when verification fails.
    */
   const applyRedactionMarks = useCallback(
-    (request: ApplyRedactionsRequest): Promise<RedactionReport> =>
-      new Promise<RedactionReport>((resolveReport, rejectReport) => {
-        runStructural(async () => {
-          try {
-            const doc = stateRef.current.document;
-            if (!doc) throw new Error('No document open');
-            const marks: RedactionMarkAnnotation[] = doc.pages.flatMap((p) => p.annotations.filter((a): a is RedactionMarkAnnotation => a.type === 'redaction'));
-            if (!marks.length) throw new Error('There are no redaction marks to apply');
+    async (request: ApplyRedactionsRequest): Promise<RedactionReport> => {
+      interface RedactionTransformOutput extends DocumentTransformOutput {
+        report: RedactionReport;
+      }
+      // Committed through the shared byte-transform path: serialized with page
+      // ops, live form values baked in first, one undo step back to the
+      // pre-redaction bytes. Errors (including failed verification) reject and
+      // leave the document untouched.
+      const output = await applyDocumentTransform<RedactionTransformOutput>('applyRedactions', async ({ doc, bakedBytes }) => {
+        const marks: RedactionMarkAnnotation[] = doc.pages.flatMap((p) => p.annotations.filter((a): a is RedactionMarkAnnotation => a.type === 'redaction'));
+        if (!marks.length) throw new Error('There are no redaction marks to apply');
 
-            // A search term is asserted absent only when its whole group is applied unedited.
-            const groups = new Map<string, { term: string; size: number; count: number; edited: boolean }>();
-            for (const m of marks) {
-              if (!m.searchGroup) continue;
-              const g = groups.get(m.searchGroup.id) ?? { term: m.searchGroup.term, size: m.searchGroup.size, count: 0, edited: false };
-              g.count++;
-              g.edited ||= !!m.edited;
-              groups.set(m.searchGroup.id, g);
+        // A search term is asserted absent only when its whole group is applied unedited.
+        const groups = new Map<string, { term: string; size: number; count: number; edited: boolean }>();
+        for (const m of marks) {
+          if (!m.searchGroup) continue;
+          const g = groups.get(m.searchGroup.id) ?? { term: m.searchGroup.term, size: m.searchGroup.size, count: 0, edited: false };
+          g.count++;
+          g.edited ||= !!m.edited;
+          groups.set(m.searchGroup.id, g);
+        }
+        const mustBeAbsent = [...groups.values()].filter((g) => g.count === g.size && !g.edited).map((g) => g.term);
+
+        const { bytes, report } = await applyRedactions(
+          bakedBytes,
+          marks.map((m) => ({ pageIndex: m.pageIndex - 1, rects: m.rects })),
+          { fill: request.fill, stripMetadata: request.stripMetadata, mustBeAbsent, encoder: browserEncoder },
+          pdfjsEnv
+        );
+
+        const marksByPage = new Map<number, PdfRect[]>();
+        for (const m of marks) marksByPage.set(m.pageIndex - 1, [...(marksByPage.get(m.pageIndex - 1) ?? []), ...m.rects]);
+
+        const proxy = await openPdfjs(pdfjsEnv, bytes);
+        const pages: PDFPage[] = [];
+        try {
+          for (const page of doc.pages) {
+            const pageMarks = marksByPage.get(page.index);
+            const remaining = page.annotations.filter((a) => a.type !== 'redaction');
+            if (!pageMarks) {
+              pages.push({ ...page, annotations: remaining });
+              continue;
             }
-            const mustBeAbsent = [...groups.values()].filter((g) => g.count === g.size && !g.edited).map((g) => g.term);
-
-            const { bytes, report } = await applyRedactions(
-              doc.pdfData,
-              marks.map((m) => ({ pageIndex: m.pageIndex - 1, rects: m.rects })),
-              { fill: request.fill, stripMetadata: request.stripMetadata, mustBeAbsent, encoder: browserEncoder },
-              pdfjsEnv
-            );
-
-            const marksByPage = new Map<number, PdfRect[]>();
-            for (const m of marks) marksByPage.set(m.pageIndex - 1, [...(marksByPage.get(m.pageIndex - 1) ?? []), ...m.rects]);
-
-            const proxy = await openPdfjs(pdfjsEnv, bytes);
-            let mappings: FormFieldMapping[] = [];
-            const pages: PDFPage[] = [];
-            try {
-              for (const page of doc.pages) {
-                const pageMarks = marksByPage.get(page.index);
-                const remaining = page.annotations.filter((a) => a.type !== 'redaction');
-                if (!pageMarks) {
-                  pages.push({ ...page, annotations: remaining });
-                  continue;
-                }
-                const pdfPage = await proxy.getPage(page.index + 1);
-                const viewport = pdfPage.getViewport({ scale: 1 });
-                const freshItems = await extractTextItems(pdfPage, page.index);
-                // Carry pending text edits over to the re-extracted items when the
-                // edited word was not under a mark (matched by text + position).
-                const textEdits = [];
-                const underMark = (item: PDFTextItem) =>
-                  pageMarks.some((m) => intersects({ x0: item.x, y0: viewport.height - item.y - item.height, x1: item.x + item.width, y1: viewport.height - item.y }, m));
-                for (const old of page.textItems ?? []) {
-                  if (!old.isEdited && !old.isDeleted) continue;
-                  if (underMark(old)) continue;
-                  const match = freshItems.find((n) => n.originalStr === old.originalStr && Math.abs(n.x - old.x) < 1 && Math.abs(n.y - old.y) < 1);
-                  if (!match) continue;
-                  Object.assign(match, { str: old.str, isEdited: old.isEdited, isDeleted: old.isDeleted });
-                  const edit = page.textEdits?.find((e) => e.itemId === old.id);
-                  if (edit) textEdits.push({ ...edit, itemId: match.id });
-                }
-                pages.push({
-                  ...page,
-                  annotations: remaining.filter((a) => {
-                    const b = annotationPdfBounds(a, page);
-                    return !b || !pageMarks.some((m) => intersects(b, m));
-                  }),
-                  textItems: freshItems,
-                  textEdits,
-                  sourceAnnotations: await extractSourceAnnotations(pdfPage, page.index, viewport.height),
-                });
-              }
-              mappings = await buildFormFieldMapping(proxy as never);
-            } finally {
-              await proxy.destroy();
+            const pdfPage = await proxy.getPage(page.index + 1);
+            const viewport = pdfPage.getViewport({ scale: 1 });
+            const freshItems = await extractTextItems(pdfPage, page.index);
+            // Carry pending text edits over to the re-extracted items when the
+            // edited word was not under a mark (matched by text + position).
+            const textEdits = [];
+            const underMark = (item: PDFTextItem) =>
+              pageMarks.some((m) => intersects({ x0: item.x, y0: viewport.height - item.y - item.height, x1: item.x + item.width, y1: viewport.height - item.y }, m));
+            for (const old of page.textItems ?? []) {
+              if (!old.isEdited && !old.isDeleted) continue;
+              if (underMark(old)) continue;
+              const match = freshItems.find((n) => n.originalStr === old.originalStr && Math.abs(n.x - old.x) < 1 && Math.abs(n.y - old.y) < 1);
+              if (!match) continue;
+              Object.assign(match, { str: old.str, isEdited: old.isEdited, isDeleted: old.isDeleted });
+              const edit = page.textEdits?.find((e) => e.itemId === old.id);
+              if (edit) textEdits.push({ ...edit, itemId: match.id });
             }
-
-            const prevDoc = doc;
-            const nextDoc: PDFDocument = { ...doc, pages, pdfData: bytes };
-            commitDocument(nextDoc);
-            setFormFieldMappings(mappings);
-            const restoreMappings = async (d: PDFDocument, set: (m: FormFieldMapping[]) => void) => {
-              const p = await openPdfjs(pdfjsEnv, d.pdfData);
-              try {
-                set(await buildFormFieldMapping(p as never));
-              } finally {
-                await p.destroy();
-              }
-            };
-            addToHistory({
-              type: 'applyRedactions',
-              undo: () => {
-                commitDocument(prevDoc);
-                void restoreMappings(prevDoc, setFormFieldMappings);
-              },
-              redo: () => {
-                commitDocument(nextDoc);
-                setFormFieldMappings(mappings);
-              },
+            pages.push({
+              ...page,
+              annotations: remaining.filter((a) => {
+                const b = annotationPdfBounds(a, page);
+                return !b || !pageMarks.some((m) => intersects(b, m));
+              }),
+              textItems: freshItems,
+              textEdits,
+              sourceAnnotations: await extractSourceAnnotations(pdfPage, page.index, viewport.height),
             });
-            resolveReport(report);
-          } catch (e) {
-            rejectReport(e);
           }
-        });
-      }),
-    [stateRef, runStructural, commitDocument, addToHistory, setFormFieldMappings]
+        } finally {
+          await proxy.destroy();
+        }
+        return { pdfData: bytes, pages, report };
+      });
+      if (!output) throw new Error('No document open');
+      return output.report;
+    },
+    [applyDocumentTransform]
   );
 
   return { addTextMarkup, addRedactionMark, markSearchResults, applyRedactionMarks };

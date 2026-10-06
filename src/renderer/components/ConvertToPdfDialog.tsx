@@ -227,7 +227,7 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
   }
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Convert Documents to PDF" width="600px">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Convert Documents to PDF" width="600px" dropZone={dropBindings}>
       <div className="convert-dialog">
         {completed ? (
           <div className="result-summary">
@@ -274,7 +274,6 @@ const ConvertToPdfDialog: React.FC<ConvertToPdfDialogProps> = ({
             <div
               className={`file-list-container ${isOver ? 'drop-zone-active' : ''}`}
               data-testid="convert-drop-zone"
-              {...dropBindings}
             >
               {files.length === 0 ? (
                 <div className="file-list-empty">

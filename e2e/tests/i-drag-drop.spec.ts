@@ -189,6 +189,29 @@ test.describe('Trusted drag-and-drop', () => {
     await expect(appPage.locator('.tab-bar-tab')).toHaveCount(0);
   });
 
+  for (const target of ['[data-testid="convert-drop-zone"]', '.modal-header']) {
+    test(`a .docx dropped on the Convert Documents dialog (${target}) is queued, output defaults to its folder`, async ({ electronApp, appPage }) => {
+      staged = stageFixtures(['invoice-test.docx', 'notes.xyz']);
+
+      await electronApp.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0].webContents.send('menu-convert-to-pdf');
+      });
+      const dialog = appPage.locator('.modal-content', { hasText: 'Convert Documents to PDF' });
+      const noLibreOffice = appPage.locator('.modal-content', { hasText: 'LibreOffice' }).locator('.warning-box');
+      await expect(dialog.or(noLibreOffice)).toBeVisible({ timeout: 10_000 });
+      test.skip(await noLibreOffice.isVisible(), 'LibreOffice is not installed on this machine; the dialog shows the install warning instead');
+
+      // Dropping anywhere in the dialog counts, not only on the file list.
+      await trustedDrop(appPage, `.modal-content ${target}`, [staged.paths['invoice-test.docx'], staged.paths['notes.xyz']]);
+
+      await expect(dialog.locator('.file-list-item .file-name')).toHaveText(['invoice-test.docx'], { timeout: 15_000 });
+      await expect(dialog.locator('input[placeholder="Select output folder..."]')).toHaveValue(path.dirname(staged.paths['invoice-test.docx']), { timeout: 5_000 });
+      await expect(dialog.getByText('1 dropped file(s) skipped')).toBeVisible();
+      // The modal consumed the drop: nothing was staged or opened behind it.
+      await expect(appPage.locator('.tab-bar-tab')).toHaveCount(0);
+    });
+  }
+
   test('a PDF dropped onto a thumbnail inserts its pages there instead of opening a tab', async ({ electronApp, appPage }) => {
     staged = stageFixtures(['announcement.pdf']);
     const { PDFDocument } = await import('pdf-lib');

@@ -131,7 +131,7 @@ const MergePdfsDialog: React.FC<MergePdfsDialogProps> = ({
   }, [onClose]);
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Merge PDFs" width="600px">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Merge PDFs" width="600px" dropZone={dropBindings}>
       <div className="merge-dialog">
         <p className="dialog-description">
           Add PDF files (or drop them here), order them, then click Merge.
@@ -140,7 +140,6 @@ const MergePdfsDialog: React.FC<MergePdfsDialogProps> = ({
         <div
           className={`file-list-container ${isOver ? 'drop-zone-active' : ''}`}
           data-testid="merge-drop-zone"
-          {...dropBindings}
         >
           {files.length === 0 ? (
             <div className="file-list-empty">

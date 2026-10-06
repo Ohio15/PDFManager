@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
+import type { DropZoneBindings } from '../hooks/useFileDrop';
 
 interface ModalProps {
   isOpen: boolean;
@@ -7,6 +8,13 @@ interface ModalProps {
   title: string;
   children: React.ReactNode;
   width?: string;
+  /**
+   * Make the WHOLE window a file drop target while this dialog is open. The
+   * app-wide target stands down behind a modal, so without this only the
+   * element the dialog bound would accept a drop and a file released anywhere
+   * else (title, buttons, backdrop) would be silently refused.
+   */
+  dropZone?: DropZoneBindings;
 }
 
 const Modal: React.FC<ModalProps> = ({
@@ -15,6 +23,7 @@ const Modal: React.FC<ModalProps> = ({
   title,
   children,
   width = '500px',
+  dropZone,
 }) => {
   const overlayRef = useRef<HTMLDivElement>(null);
 
@@ -49,6 +58,7 @@ const Modal: React.FC<ModalProps> = ({
       className="modal-overlay"
       ref={overlayRef}
       onClick={handleOverlayClick}
+      {...dropZone}
     >
       <div className="modal-content" style={{ maxWidth: width }}>
         <div className="modal-header">

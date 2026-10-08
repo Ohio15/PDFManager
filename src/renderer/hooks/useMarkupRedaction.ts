@@ -9,6 +9,7 @@
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import { PDFDocument as PDFLib } from 'pdf-lib';
 import type {
   Annotation,
   PDFDocument,
@@ -29,6 +30,8 @@ import { PdfjsEnv, openPdfjs } from '../utils/redaction/pdfjsEnv';
 import { findOccurrences, SearchOptions } from '../utils/redaction/textSearch';
 import { intersects } from '../utils/redaction/geometry';
 import { snapshotDocument, isSameSourceBytes, StaleDocumentError } from '../utils/documentGuard';
+import { pageGeometry } from '../utils/pageStructure';
+import { AnnotationPageFrame, isUnderAnyMark } from '../utils/annotationBounds';
 
 interface HistoryEntry {
   type: string;
@@ -70,41 +73,6 @@ const browserEncoder = {
 
 let idCounter = 0;
 const newId = (prefix: string) => `${prefix}-${Date.now()}-${idCounter++}`;
-
-/** Approximate PDF-space bounds of an in-memory (unflattened) annotation; rotation-0 pages only. */
-function annotationPdfBounds(a: Annotation, page: PDFPage): PdfRect | null {
-  if (page.rotation % 360 !== 0) return null;
-  const H = page.height;
-  const fromTopLeft = (x: number, y: number, w: number, h: number): PdfRect => ({ x0: x, y0: H - y - h, x1: x + w, y1: H - y });
-  switch (a.type) {
-    case 'text':
-      return fromTopLeft(a.position.x, a.position.y, a.size?.width ?? a.content.length * a.fontSize * 0.6, a.size?.height ?? a.fontSize * 1.4);
-    case 'image':
-    case 'shape':
-    case 'stamp':
-      return fromTopLeft(a.position.x, a.position.y, a.size.width, a.size.height);
-    case 'note':
-      return fromTopLeft(a.position.x, a.position.y, 24, 24);
-    case 'highlight': {
-      const xs = a.rects.flatMap((r) => [r.x, r.x + r.width]);
-      const ys = a.rects.flatMap((r) => [r.y, r.y + r.height]);
-      return xs.length ? fromTopLeft(Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) : null;
-    }
-    case 'drawing': {
-      const pts = a.paths.flatMap((p) => p.points);
-      if (!pts.length) return null;
-      const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
-      return fromTopLeft(Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-    }
-    case 'textMarkup': {
-      const xs = a.quads.flatMap((q) => [q[0], q[2], q[4], q[6]]);
-      const ys = a.quads.flatMap((q) => [q[1], q[3], q[5], q[7]]);
-      return xs.length ? { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) } : null;
-    }
-    default:
-      return null;
-  }
-}
 
 /**
  * Text items for one page, same algorithm as usePDFDocument.openFile.
@@ -283,6 +251,10 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
         const marksByPage = new Map<number, PdfRect[]>();
         for (const m of marks) marksByPage.set(m.pageIndex - 1, [...(marksByPage.get(m.pageIndex - 1) ?? []), ...m.rects]);
 
+        // Page frames (visible box + /Rotate) read from the redacted bytes with
+        // the same helper the save pipeline uses, so pending-annotation
+        // footprints are computed where they will actually be written.
+        const geometryDoc = await PDFLib.load(bytes);
         const proxy = await openPdfjs(pdfjsEnv, bytes);
         const pages: PDFPage[] = [];
         try {
@@ -310,12 +282,17 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
               const edit = page.textEdits?.find((e) => e.itemId === old.id);
               if (edit) textEdits.push({ ...edit, itemId: match.id });
             }
+            // Fail closed: an annotation under a mark, or one whose footprint
+            // cannot be computed, is dropped; it may carry the redacted text.
+            const geo = pageGeometry(geometryDoc.getPage(page.index));
+            const frames: AnnotationPageFrame[] = [{ box: geo.box, rotation: geo.rotation }];
+            const modelRotation = ((page.rotation % 360) + 360) % 360;
+            // The viewer displays with the model's rotation; if it disagrees
+            // with the file, test the displayed placement under both.
+            if (modelRotation !== geo.rotation) frames.push({ box: geo.box, rotation: modelRotation });
             pages.push({
               ...page,
-              annotations: remaining.filter((a) => {
-                const b = annotationPdfBounds(a, page);
-                return !b || !pageMarks.some((m) => intersects(b, m));
-              }),
+              annotations: remaining.filter((a) => !frames.some((frame) => isUnderAnyMark(a, frame, pageMarks))),
               textItems: freshItems,
               textEdits,
               sourceAnnotations: await extractSourceAnnotations(pdfPage, page.index, viewport.height),

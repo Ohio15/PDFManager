@@ -12,14 +12,26 @@
  *     text extraction of every page and from every decoded content stream.
  *     Occurrences in metadata / bookmarks / form values are reported as
  *     residual locations (not page content) so the user can strip them.
+ *  4. Presence, not just drawing (checks 1-3 only see what is DRAWN or
+ *     LISTED; the file can still CONTAIN the original):
+ *     - every /XObject and /Pattern binding reachable from a marked page's
+ *       resources is drawn by some remaining content op (a replaced original
+ *       left bound under its old name is a violation);
+ *     - no object the engine removed (annotation, widget, field, structure
+ *       node) is still present in the output;
+ *     - no annotation anywhere in the file that belongs to a marked page
+ *       (/P) overlaps a mark, whether or not the page /Annots lists it;
+ *     - no AcroForm /XFA (an unredacted parallel copy of the form) remains.
  */
-import { PDFArray, PDFDict, PDFDocument as PDFLib, PDFHexString, PDFName, PDFStream, PDFString } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFDocument as PDFLib, PDFHexString, PDFName, PDFRef, PDFStream, PDFString } from 'pdf-lib';
 import { IDENTITY, Rect, applyToPoint, insetRect, intersects, pointInAny } from './geometry';
 import { emptyStats, redactContent, RedactorContext, WholePageFallback } from './contentRedactor';
 import { Rgb } from './imageRedactor';
 import { PdfjsEnv, imageDataToRgba, openPdfjs } from './pdfjsEnv';
 import { scanPdfjsPage } from './pdfjsScan';
-import { decodeStreamStrict, getName } from './pdfObjects';
+import { decodeStreamStrict, dictGet, getDict, getName, numberArray } from './pdfObjects';
+import { auditResourceUse } from './resourceUsage';
+import type { RemovedObject } from './documentScrub';
 import { ResourceScope } from './resourceScope';
 import { concat } from './contentRedactor';
 
@@ -43,7 +55,9 @@ export async function verifyRedaction(
   marksByPage: Map<number, Rect[]>,
   fill: Rgb,
   env: PdfjsEnv,
-  mustBeAbsent: string[] = []
+  mustBeAbsent: string[] = [],
+  /** Objects the engine removed; each must be absent from the output. */
+  removedObjects: RemovedObject[] = []
 ): Promise<VerificationResult> {
   const pageViolations = new Map<number, string[]>();
   const globalViolations: string[] = [];
@@ -65,7 +79,7 @@ export async function verifyRedaction(
       }
       const marks = rawMarks.map((m) => insetRect(m, 0.5));
       const page = await doc.getPage(pageIndex + 1);
-      const scan = await scanPdfjsPage(page, env.lib.OPS);
+      const scan = await scanPdfjsPage(page, env.lib.OPS, { marks });
       checks.pages++;
 
       // Fail closed: content the oracle could not examine is never "clean".
@@ -151,6 +165,36 @@ export async function verifyRedaction(
       if (e instanceof WholePageFallback) add(pageIndex, `Rescan: ${e.reason}`);
       else add(pageIndex, `Rescan failed: ${(e as Error).message}`);
     }
+    // Bound but not drawn: the redacted-away original of a replaced image or form.
+    try {
+      const resources = lib.getPage(pageIndex).node.Resources();
+      for (const v of auditResourceUse(lib.context, pageContentBytes(lib, pageIndex), resources, 'Page resources')) add(pageIndex, v);
+    } catch (e) {
+      add(pageIndex, `Resource check failed: ${(e as Error).message}`);
+    }
+  }
+
+  // Removed objects must be gone from the file, not merely unlisted.
+  for (const r of removedObjects) {
+    if (lib.context.lookup(r.ref) !== undefined) globalViolations.push(`Removed ${r.kind} ${r.ref.toString()} is still present in the output`);
+  }
+  // Annotations of a marked page under a mark, however they are reached.
+  const markedPageRefs = new Map<string, Rect[]>();
+  for (const [pageIndex, rawMarks] of marksByPage) {
+    if (pageIndex < lib.getPageCount()) markedPageRefs.set(lib.getPage(pageIndex).ref.toString(), rawMarks.map((m) => insetRect(m, 0.5)));
+  }
+  for (const [ref, obj] of lib.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFDict)) continue;
+    const p = obj.get(PDFName.of('P'));
+    const marks = p instanceof PDFRef ? markedPageRefs.get(p.toString()) : undefined;
+    if (!marks || !getName(lib.context, dictGet(obj, 'Subtype'))) continue;
+    const r = numberArray(lib.context, dictGet(obj, 'Rect'));
+    if (!r || r.length !== 4) continue;
+    const rect: Rect = { x0: Math.min(r[0], r[2]), y0: Math.min(r[1], r[3]), x1: Math.max(r[0], r[2]), y1: Math.max(r[1], r[3]) };
+    if (marks.some((m) => intersects(rect, m))) globalViolations.push(`Annotation ${ref.toString()} of a marked page overlaps a mark`);
+  }
+  if (getDict(lib.context, lib.catalog.get(PDFName.of('AcroForm')))?.has(PDFName.of('XFA'))) {
+    globalViolations.push('AcroForm /XFA (an unredacted copy of the form and its values) is still present');
   }
 
   if (mustBeAbsent.length) {

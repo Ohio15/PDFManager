@@ -21,7 +21,10 @@
  *    image is replaced by a new object (see imageRedactor.ts).
  *  - Form XObjects: interpreted recursively with their own resources; a
  *    changed form is written as a new object under a new name, so other
- *    placements/pages keep the original.
+ *    placements/pages keep the original. The new form's resources are pruned
+ *    to what its rewritten content draws, and the engine prunes the page's
+ *    resources the same way, so a replaced original is no longer bound
+ *    anywhere on the redacted page.
  *  - Marked content: /ActualText, /Alt and /E properties around removed text
  *    are dropped (they would otherwise repeat the redacted string).
  *
@@ -45,6 +48,7 @@ import {
   intersectsAny,
   multiply,
   pointInAny,
+  rectArea,
   transformRect,
   unionRect,
 } from './geometry';
@@ -52,6 +56,7 @@ import { ImageEncoder, ImageRedactionUnsupported, Rgb, redactImageXObject, redac
 import { PdfjsEnv } from './pdfjsEnv';
 import { decodeStreamStrict, dictGet, getArray, getDict, getName, getNumber, getStream, numberArray, resolve } from './pdfObjects';
 import { ResourceScope } from './resourceScope';
+import { ResourceUsageUnknown, collectResourceUse } from './resourceUsage';
 
 const MAX_FORM_DEPTH = 12;
 
@@ -299,7 +304,11 @@ export async function redactContent(
           x1: testW * 0.9,
           y1: asc - height * 0.2,
         });
-        const remove = intersectsAny(test, marks);
+        // A degenerate box (zero font size, zero horizontal scale, singular
+        // CTM) has no area, so no overlap test can ever be true; the glyph is
+        // still extractable, so test its origin instead.
+        const degenerate = fs === 0 || rectArea(test) === 0;
+        const remove = degenerate ? pointInAny(applyToPoint(trm, 0, 0), marks) : intersectsAny(test, marks);
         if (remove) anyRemoved = true;
         const tx = (w * fs + gs.Tc + (g.isWordSpace ? gs.Tw : 0)) * gs.Th;
         const tjAdvance = fs !== 0 ? -((w * fs + gs.Tc + (g.isWordSpace ? gs.Tw : 0)) * 1000) / fs : 0;
@@ -682,6 +691,14 @@ export async function redactContent(
       newDict.delete(PDFName.of('Filter'));
       newDict.delete(PDFName.of('DecodeParms'));
       newDict.delete(PDFName.of('Length'));
+      // Drop the bindings the rewrite replaced (the original image/form the
+      // form drew before), so they are not reachable through the new form.
+      try {
+        formScope.pruneTo(collectResourceUse(rc.context, result.bytes ?? formData, formScope.finalDict()));
+      } catch (e) {
+        if (e instanceof ResourceUsageUnknown) throw new WholePageFallback(`Form XObject resources could not be pruned (${e.message})`);
+        throw e;
+      }
       const finalResources = formScope.finalDict();
       if (finalResources) newDict.set(PDFName.of('Resources'), finalResources);
       const newStream = rc.context.flateStream(result.bytes ?? formData, {});

@@ -30,12 +30,29 @@ import {
   PDFObjectCopier,
   degrees,
 } from 'pdf-lib';
+import { removeUnreachableObjects } from './pdfObjectGraph';
 
 // pdfData held in memory is always decrypted plaintext (decrypt-at-open), but load
 // with ignoreEncryption for parity with replacePage and robustness against any
 // residual encryption dict.
 async function load(pdfData: Uint8Array): Promise<PDFLib> {
   return PDFLib.load(pdfData, { ignoreEncryption: true });
+}
+
+/**
+ * The ONLY way this module serialises a document. pdf-lib's writer emits every
+ * object in the context whether reachable or not, so a page dropped with
+ * removePage (delete, replace, the order rebuild) would otherwise ship its page
+ * dictionary, content streams and images in the saved file, recoverable by any
+ * repair tool. Pending embeds are flushed first so nothing reserved-but-unwritten
+ * is judged before it exists; then everything the trailer cannot reach is
+ * deleted. Every page op routes through here so a new one cannot forget the GC;
+ * pageStructureGc.test.ts fails if a bare `.save(` call appears in this file.
+ */
+async function saveWithoutOrphans(doc: PDFLib): Promise<Uint8Array> {
+  await doc.flush();
+  removeUnreachableObjects(doc);
+  return new Uint8Array(await doc.save());
 }
 
 /** Remove the page at `zeroIndex`. Throws if it is the only page or out of range. */
@@ -68,7 +85,7 @@ export async function insertBlankPdfPage(
   const count = doc.getPageCount();
   const insertAt = Math.min(Math.max(afterZeroIndex + 1, 0), count);
   doc.insertPage(insertAt, [width, height]);
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 /**
@@ -92,9 +109,11 @@ export async function reorderPdfPage(
   if (from === to) return new Uint8Array(pdfData);
   const page = doc.getPage(from);
   pinInheritedAttributes(page);
+  // The same page object is re-inserted, so this pair orphans nothing; the
+  // save still goes through saveWithoutOrphans like every other op.
   doc.removePage(from);
   doc.insertPage(to, page);
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 /**
@@ -116,7 +135,7 @@ export async function setPdfPageRotation(
     throw new Error(`setPdfPageRotation: angle ${absoluteAngle} is not a multiple of 90`);
   }
   doc.getPage(zeroIndex).setRotation(degrees(norm));
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +617,7 @@ export async function applyPdfPageOrder(pdfData: Uint8Array, order: number[]): P
 
   for (let i = count - 1; i >= 0; i--) doc.removePage(i);
   sequence.forEach((p, i) => doc.insertPage(i, p));
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 /** Order that removes `zeroIndices`. Throws if that would remove every page. */
@@ -678,7 +697,7 @@ export async function rotatePdfPages(
     const page = doc.getPage(i);
     page.setRotation(degrees(normAngle(page.getRotation().angle + delta)));
   }
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 /** Read the geometry of every page (the renderer page model's source of truth). */
@@ -724,7 +743,7 @@ export async function setPdfPageCrop(
     boxes.push([page, box]);
   }
   for (const [page, box] of boxes) page.setCropBox(box.x, box.y, box.width, box.height);
-  return new Uint8Array(await doc.save());
+  return saveWithoutOrphans(doc);
 }
 
 /** Load a page source (another PDF) for copying, refusing encrypted input. */
@@ -849,7 +868,7 @@ export async function insertPdfPages(
   copied.forEach((p, k) => doc.insertPage(atIndex + k, p));
   adoptCopiedFields(doc, source, copied);
   const inserted = copied.map(pageGeometry);
-  return { bytes: new Uint8Array(await doc.save()), inserted };
+  return { bytes: await saveWithoutOrphans(doc), inserted };
 }
 
 /**
@@ -885,5 +904,5 @@ export async function replacePdfPage(
   doc.removePage(zeroIndex);
   doc.insertPage(zeroIndex, copiedPage);
   adoptCopiedFields(doc, source, [copiedPage]);
-  return { bytes: new Uint8Array(await doc.save()), geometry: pageGeometry(copiedPage) };
+  return { bytes: await saveWithoutOrphans(doc), geometry: pageGeometry(copiedPage) };
 }

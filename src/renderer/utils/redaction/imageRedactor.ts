@@ -5,8 +5,12 @@
  * filter and colour space: DCT, JPX, JBIG2, CCITT, Flate+predictors, Indexed,
  * ICC, CMYK, /Decode, /SMask, /Mask), the pixels under each mark are painted
  * with the redaction colour, and the result is written as a NEW image object.
- * The original object is left untouched for any other page that still uses it;
- * if nothing references it any more, the engine's garbage collection drops it.
+ * The original object is left untouched for any other page that still uses it.
+ * Garbage collection is reachability-based, so it drops the original only once
+ * nothing references it: the redactor binds the new image under a new name,
+ * and the engine then prunes the page (and rewritten form) resources to the
+ * names the rewritten content draws (ResourceScope.pruneTo), which unbinds the
+ * original. The verifier fails if any binding on a marked page is not drawn.
  *
  * Stencil masks (/ImageMask true) are 1-bit shapes painted with the fill
  * colour; they are decoded directly (uncompressed or Flate only) and the bits

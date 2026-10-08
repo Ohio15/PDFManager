@@ -11,7 +11,7 @@
  * positions match what pdf.js renders.
  */
 import type { PDFPageProxy } from 'pdfjs-dist';
-import { IDENTITY, Matrix, Point, Rect, applyToPoint, boundsOfPoints, multiply } from './geometry';
+import { IDENTITY, Matrix, Point, Rect, applyToPoint, boundsOfPoints, multiply, pointInAny } from './geometry';
 import { getPdfjsObject, PdfjsImageData } from './pdfjsEnv';
 
 export interface ScannedGlyph {
@@ -87,7 +87,17 @@ function cloneState(s: TextState): TextState {
   return { ...s, ctm: [...s.ctm] as Matrix, textMatrix: [...s.textMatrix] as Matrix };
 }
 
-export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, number>): Promise<PageScan> {
+export interface ScanOptions {
+  /**
+   * Redaction marks (user space). Zero-size text has no glyph box to test, so
+   * when marks are given a zero-size run whose glyph ORIGIN lies under a mark
+   * is reported as unexamined (the verifier then fails closed); without marks
+   * every zero-size run is reported.
+   */
+  marks?: Rect[];
+}
+
+export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, number>, options: ScanOptions = {}): Promise<PageScan> {
   // DISABLE (0): annotation appearances are checked separately via getAnnotations.
   const opList = await page.getOperatorList({ annotationMode: 0 } as never);
   const fontCache = new Map<string, PdfjsFont | null>();
@@ -131,7 +141,10 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
   const showGlyphs = (items: Array<PdfjsGlyph | number | null>) => {
     const font = st.font;
     const fontSize = st.fontSize;
-    if (fontSize === 0) return;
+    if (fontSize === 0) {
+      zeroSizeRun(items);
+      return;
+    }
     if (!font) {
       // Glyph positions are unknowable without the font; the run is unexamined.
       if (items.some((g) => g !== null && g !== undefined && typeof g !== 'number')) {
@@ -197,6 +210,31 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     }
     if (vertical) st.y -= x;
     else st.x += x * hScale;
+  };
+
+  // Zero-size text paints nothing but pdf.js, pdftotext and Acrobat still
+  // extract it. Glyph boxes collapse to the origin, so locate each origin
+  // (advances are zero; only Tc/Tw spacing moves the pen).
+  const zeroSizeRun = (items: Array<PdfjsGlyph | number | null>) => {
+    if (!items.some((g) => g !== null && g !== undefined && typeof g !== 'number')) return;
+    if (!options.marks) {
+      unexamined.push('Zero-size (invisible but extractable) text');
+      return;
+    }
+    const vertical = !!st.font?.vertical;
+    const hScale = st.textHScale * st.fontDirection;
+    const toUser = multiply(st.textMatrix, st.ctm);
+    let x = 0;
+    let underMark = false;
+    for (const g of items) {
+      if (g === null || g === undefined || typeof g === 'number') continue;
+      const origin = vertical ? applyToPoint(toUser, st.x, st.y - x) : applyToPoint(toUser, st.x + x * hScale, st.y + st.textRise);
+      if (pointInAny(origin, options.marks)) underMark = true;
+      x += ((g.isSpace ? st.wordSpacing : 0) + st.charSpacing) * (vertical ? -st.fontDirection : st.fontDirection);
+    }
+    if (vertical) st.y -= x;
+    else st.x += x * hScale;
+    if (underMark) unexamined.push('Zero-size (invisible but extractable) text under a mark');
   };
 
   const addImage = (kind: ScannedImage['kind'], ctm: Matrix, load: ScannedImage['load']) => {

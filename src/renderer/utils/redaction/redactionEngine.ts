@@ -15,12 +15,13 @@ import { PDFDocument as PDFLib, PDFName } from 'pdf-lib';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { IDENTITY, Rect, expandRect, fmt, intersects, unionRect } from './geometry';
 import { concat, emptyStats, latin1Bytes, redactContent, RedactionStats, RedactorContext, UncertainRegion, WholePageFallback } from './contentRedactor';
-import { collectGarbage, removeAnnotationsUnderMarks, scrubPageExtras, stripDocumentMetadata } from './documentScrub';
+import { collectGarbage, cutRemovedObjects, RemovedObject, removeAnnotationsUnderMarks, removeXfa, scrubPageExtras, stripDocumentMetadata } from './documentScrub';
 import { ImageEncoder, Rgb, registerRgbImage } from './imageRedactor';
 import { PdfjsEnv, openPdfjs } from './pdfjsEnv';
 import { rasterizeRegion } from './rasterizer';
 import { pageContentBytes, verifyRedaction, VerificationResult } from './redactionVerifier';
 import { ResourceScope } from './resourceScope';
+import { ResourceUsageUnknown, collectResourceUse } from './resourceUsage';
 
 export interface RedactionMarkInput {
   /** 0-based physical page index. */
@@ -115,13 +116,14 @@ async function runPass(
   opts: Required<Pick<ApplyRedactionOptions, 'fill' | 'stripMetadata' | 'rasterScale'>> & ApplyRedactionOptions,
   env: PdfjsEnv,
   originalPdfjs: () => Promise<PDFDocumentProxy>
-): Promise<{ bytes: Uint8Array; stats: RedactionStats; annotationsRemoved: number; rasterized: RasterizedArea[]; collected: number }> {
+): Promise<{ bytes: Uint8Array; stats: RedactionStats; annotationsRemoved: number; rasterized: RasterizedArea[]; collected: number; removed: RemovedObject[] }> {
   const pdfDoc = await PDFLib.load(original, { ignoreEncryption: true, updateMetadata: !opts.stripMetadata });
   const context = pdfDoc.context;
   const stats = emptyStats();
   const rasterized: RasterizedArea[] = [];
   let annotationsRemoved = 0;
   const fontCache = new Map();
+  const removed = new Map<string, RemovedObject>();
 
   for (const [pageIndex, marks] of byPage) {
     if (pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) throw new Error(`Redaction mark on missing page ${pageIndex + 1}`);
@@ -147,7 +149,17 @@ async function runPass(
           rasterized.push({ pageIndex, scope: 'region', reason: region.reason });
         }
         parts.push(latin1Bytes(boxesContent(marks, opts.fill)));
-        pageDict.set(PDFName.of('Contents'), context.register(context.flateStream(concat(parts, 0x0a))));
+        const finalContent = concat(parts, 0x0a);
+        // Replacing is add-a-new-binding + rewrite-the-Do; the original stays
+        // bound (and therefore reachable and written) until the page's
+        // resources are rebuilt from what the final content draws.
+        try {
+          scope.pruneTo(collectResourceUse(context, finalContent, scope.finalDict()));
+        } catch (e) {
+          if (e instanceof ResourceUsageUnknown) throw new WholePageFallback(`Page resources could not be pruned (${e.message})`);
+          throw e;
+        }
+        pageDict.set(PDFName.of('Contents'), context.register(context.flateStream(finalContent)));
         pageDict.set(PDFName.of('Resources'), scope.finalDict() ?? context.obj({}));
         for (const k of Object.keys(stats) as Array<keyof RedactionStats>) stats[k] += rc.stats[k];
       } catch (e) {
@@ -167,14 +179,20 @@ async function runPass(
       rasterized.push({ pageIndex, scope: 'page', reason: wholePageReason });
     }
 
-    annotationsRemoved += removeAnnotationsUnderMarks(pdfDoc, pageIndex, marks);
+    annotationsRemoved += removeAnnotationsUnderMarks(pdfDoc, pageIndex, marks, removed);
     scrubPageExtras(pageDict);
   }
 
+  // Removing an annotation from /Annots is one edge; cut every other inbound
+  // reference (structure tree, /IRT, /CO, /Parent, ...) so GC can drop it.
+  cutRemovedObjects(pdfDoc, removed);
+  // XFA is a parallel copy of the form (template text and every field value)
+  // that this engine does not rewrite; it cannot survive a redaction.
+  removeXfa(pdfDoc);
   if (opts.stripMetadata) stripDocumentMetadata(pdfDoc);
   const collected = collectGarbage(pdfDoc);
   const bytes = await pdfDoc.save({ updateFieldAppearances: false });
-  return { bytes, stats, annotationsRemoved, rasterized, collected };
+  return { bytes, stats, annotationsRemoved, rasterized, collected, removed: [...removed.values()] };
 }
 
 export async function applyRedactions(
@@ -194,13 +212,13 @@ export async function applyRedactions(
   try {
     const forced = new Set<number>();
     let pass = await runPass(pdfBytes, byPage, forced, opts, env, originalPdfjs);
-    let verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? []);
+    let verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? [], pass.removed);
 
     if (!verification.ok) {
       for (const p of verification.pageViolations.keys()) forced.add(p);
       if (forced.size > 0) {
         pass = await runPass(pdfBytes, byPage, forced, opts, env, originalPdfjs);
-        verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? []);
+        verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? [], pass.removed);
       }
     }
     if (!verification.ok) throw new RedactionVerificationError(verification);

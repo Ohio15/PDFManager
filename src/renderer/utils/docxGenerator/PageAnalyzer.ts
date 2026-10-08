@@ -19,6 +19,7 @@
 
 import pako from 'pako';
 import { PDFName, PDFNumber, PDFDict, PDFRawStream, PDFArray } from 'pdf-lib';
+import { inflateCapped, MAX_DECODED_STREAM_BYTES } from '../boundedDecode';
 import type {
   SceneElement,
   TextElement,
@@ -608,7 +609,8 @@ function handleFlateImage(
     // inflate will fail — fall back to using raw bytes directly.
     let decompressed: Uint8Array;
     try {
-      decompressed = pako.inflate(rawBytes);
+      // Bounded by the largest buffer a valid image of these dimensions needs.
+      decompressed = inflateCapped(rawBytes, Math.min(MAX_DECODED_STREAM_BYTES, height * (1 + width * numComponents) * 2 + 65536));
     } catch {
       // pdf-lib may return already-decompressed bytes for some PDF structures
       decompressed = rawBytes;
@@ -911,7 +913,7 @@ function tryApplySmask(
     let smaskPixels: Uint8Array;
     const smaskFilter = smaskDict.get(PDFName.of('Filter'));
     if (smaskFilter instanceof PDFName && smaskFilter.asString() === '/FlateDecode') {
-      smaskPixels = pako.inflate(smaskRaw);
+      smaskPixels = inflateCapped(smaskRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth) * 2 + 65536));
     } else {
       smaskPixels = smaskRaw;
     }
@@ -928,7 +930,7 @@ function tryApplySmask(
     const baseFilter = dict.get(PDFName.of('Filter'));
     let basePixels: Uint8Array;
     if (baseFilter instanceof PDFName && baseFilter.asString() === '/FlateDecode') {
-      basePixels = pako.inflate(baseRaw);
+      basePixels = inflateCapped(baseRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth * 4) * 2 + 65536));
     } else {
       basePixels = baseRaw;
     }

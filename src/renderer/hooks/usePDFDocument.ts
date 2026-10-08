@@ -8,10 +8,37 @@ import { buildFormFieldMapping, FormFieldMapping } from '../utils/formFieldSaver
 import { buildTextColorMap, matchTextColor, buildFilledRectMap, matchBackgroundColor } from '../utils/textColorExtractor';
 import { extractSourceAnnotations } from '../utils/annotationExtractor';
 import { applyEditsAndAnnotations } from '../utils/pdfSavePipeline';
-import { deletePdfPage, insertBlankPdfPage, reorderPdfPage, setPdfPageRotation } from '../utils/pageStructure';
+import {
+  insertBlankPdfPage,
+  reorderPdfPage,
+  applyPdfPageOrder,
+  orderWithout,
+  orderWithDuplicates,
+  orderWithMove,
+  rotatePdfPages,
+  setPdfPageCrop,
+  readPageGeometries,
+  insertPdfPages,
+  replacePdfPage,
+  CropMargins,
+} from '../utils/pageStructure';
+import {
+  reorderPageModel,
+  rotatePageModel,
+  cropPageModel,
+  pageModelFromGeometry,
+  normalizeIndices,
+  copyPositions,
+  positionsOf,
+} from '../utils/pageModelOps';
+import { preparePageSource } from '../utils/pageInsertSource';
+import { snapshotDocument, assertSnapshotCurrent, isSnapshotCurrent, assertRequestedTabActive } from '../utils/documentGuard';
 import { mapToStandardFontName, measureTextWidth, getTextHeight } from '../utils/standardFontMetrics';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import { decryptPdf, encryptPdf, hasEncryptDict as hasEncryptDictPrefix } from '../utils/pdfEncryption';
+import { useMarkupRedaction } from './useMarkupRedaction';
+import { bakeFormValues } from '../utils/documentTransforms';
+import { withPdfJsDocument } from '../utils/pdfjsReload';
 
 // Configure PDF.js worker - imported with ?url suffix for proper bundling
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -46,6 +73,20 @@ interface HistoryEntry {
   redo: () => void;
 }
 
+/** A byte-level transform of the whole document (form authoring, flatten, compress). */
+export interface DocumentTransformInput {
+  /** The document as committed when the transform starts (serialized with page ops). */
+  doc: PDFDocument;
+  /** doc.pdfData with the values typed into form widgets written in. Transform these. */
+  bakedBytes: Uint8Array;
+}
+
+export interface DocumentTransformOutput {
+  pdfData: Uint8Array;
+  /** Replacement page model; omit to keep doc.pages (geometry must be unchanged). */
+  pages?: PDFDocument['pages'];
+}
+
 interface TabState {
   document: PDFDocument | null;
   modified: boolean;
@@ -73,6 +114,8 @@ export function usePDFDocument() {
   // Form field state
   const [formFieldMappings, setFormFieldMappings] = useState<FormFieldMapping[]>([]);
   const annotationStorageRef = useRef<any>(null);
+  const formFieldMappingsRef = useRef<FormFieldMapping[]>([]);
+  formFieldMappingsRef.current = formFieldMappings;
 
   // Ref that always holds the latest state values (updated synchronously each render)
   const stateRef = useRef<{
@@ -115,11 +158,44 @@ export function usePDFDocument() {
     annotationStorageRef.current = storage;
   }, []);
 
+  // History is tracked through stateRef synchronously, like commitDocument:
+  // queued structural ops (and any caller holding an older closure) record
+  // entries before React re-renders, and a render-captured historyIndex would
+  // truncate earlier entries while still advancing the index past the end.
   const addToHistory = useCallback((entry: HistoryEntry) => {
-    setHistory((prev) => [...prev.slice(0, historyIndex + 1), entry]);
-    setHistoryIndex((prev) => prev + 1);
+    const idx = stateRef.current.historyIndex;
+    const next = [...stateRef.current.history.slice(0, idx + 1), entry];
+    stateRef.current.history = next;
+    stateRef.current.historyIndex = idx + 1;
+    stateRef.current.modified = true;
+    setHistory(next);
+    setHistoryIndex(idx + 1);
     setModified(true);
-  }, [historyIndex]);
+  }, []);
+
+  /**
+   * Make a tab (or nothing) active. stateRef is updated SYNCHRONOUSLY, like
+   * commitDocument: in-flight async ops check stateRef before committing
+   * (utils/documentGuard), and a switch that only reached React state would be
+   * invisible to them until the next render — long enough for an op started on
+   * tab A to commit its result into tab B. Every tab activation goes through here.
+   */
+  const activateTab = useCallback((tabId: string | null, state: TabState | null) => {
+    const doc = state?.document ?? null;
+    const mod = state?.modified ?? false;
+    const hist = state?.history ?? [];
+    const hIdx = state?.historyIndex ?? -1;
+    stateRef.current.document = doc;
+    stateRef.current.modified = mod;
+    stateRef.current.history = hist;
+    stateRef.current.historyIndex = hIdx;
+    stateRef.current.activeTabId = tabId;
+    setDocument(doc);
+    setModified(mod);
+    setHistory(hist);
+    setHistoryIndex(hIdx);
+    setActiveTabId(tabId);
+  }, []);
 
   // Save current active tab state to the cache
   const saveCurrentTabState = useCallback(() => {
@@ -144,14 +220,8 @@ export function usePDFDocument() {
 
     // Load target tab state
     const tabState = tabStatesRef.current.get(tabId);
-    if (tabState) {
-      setDocument(tabState.document);
-      setModified(tabState.modified);
-      setHistory(tabState.history);
-      setHistoryIndex(tabState.historyIndex);
-      setActiveTabId(tabId);
-    }
-  }, [saveCurrentTabState]);
+    if (tabState) activateTab(tabId, tabState);
+  }, [saveCurrentTabState, activateTab]);
 
   // Close a tab
   const closeTab = useCallback((tabId: string) => {
@@ -182,25 +252,15 @@ export function usePDFDocument() {
 
       if (nextTab) {
         const nextState = tabStatesRef.current.get(nextTab.id);
-        if (nextState) {
-          setDocument(nextState.document);
-          setModified(nextState.modified);
-          setHistory(nextState.history);
-          setHistoryIndex(nextState.historyIndex);
-          setActiveTabId(nextTab.id);
-        }
+        if (nextState) activateTab(nextTab.id, nextState);
       } else {
         // No more tabs - back to welcome screen
-        setDocument(null);
-        setModified(false);
-        setHistory([]);
-        setHistoryIndex(-1);
-        setActiveTabId(null);
+        activateTab(null, null);
       }
     }
 
     setTabs(newTabs);
-  }, []);
+  }, [activateTab]);
 
   // Clear in-memory plaintext material on app/window unload — passwords
   // always; pdfData only for protected docs (decrypted plaintext).
@@ -314,6 +374,9 @@ export function usePDFDocument() {
         Array.from({ length: pdfDoc.numPages }, async (_, i) => {
           const page = await pdfDoc.getPage(i + 1);
           const viewport = page.getViewport({ scale: 1 });
+          // Store text positions relative to the visible box's origin, the same
+          // frame the viewer and the save pipeline use (matters once cropped).
+          const [viewX1, viewY1] = viewport.viewBox;
 
           // Get text content and operator list in parallel
           const [textContent, operatorList] = await Promise.all([
@@ -367,8 +430,8 @@ export function usePDFDocument() {
                     id: `text-item-${i}-${itemCounter++}`,
                     str: word,
                     originalStr: word,
-                    x: currentX,
-                    y,
+                    x: currentX - viewX1,
+                    y: y + viewY1,
                     width: wordWidth,
                     height,
                     fontName: rawFontName,
@@ -424,29 +487,15 @@ export function usePDFDocument() {
       const tabId = generateTabId();
       const newTab: TabInfo = { id: tabId, fileName, filePath, modified: false };
 
-      setDocument(newDoc);
-      setModified(false);
-      setHistory([]);
-      setHistoryIndex(-1);
+      const newTabState: TabState = { document: newDoc, modified: false, history: [], historyIndex: -1 };
+      activateTab(tabId, newTabState);
       setTabs(prev => [...prev, newTab]);
-      setActiveTabId(tabId);
 
       // Cache the new tab state
-      tabStatesRef.current.set(tabId, {
-        document: newDoc,
-        modified: false,
-        history: [],
-        historyIndex: -1,
-      });
+      tabStatesRef.current.set(tabId, newTabState);
 
-      // Build form field mappings for the new document
-      try {
-        const mappings = await buildFormFieldMapping(pdfDoc);
-        setFormFieldMappings(mappings);
-      } catch (e) {
-        console.warn('Failed to build form field mappings:', e);
-        setFormFieldMappings([]);
-      }
+      // Form field mappings are rebuilt from pdfData by the effect below.
+      await pdfDoc.destroy();
     } catch (error) {
       console.error('Failed to open PDF:', error);
       throw error;
@@ -456,22 +505,66 @@ export function usePDFDocument() {
         openingFilesRef.current.delete(filePath);
       }
     }
-  }, [saveCurrentTabState, switchTab]);
+  }, [saveCurrentTabState, switchTab, activateTab]);
 
-  // Shared post-save logic: re-extract text items from the modified PDF
+  // Rebuild the pdf.js field mappings whenever the bytes change: open, tab
+  // switch, structural ops, form authoring, flatten, compress, undo/redo. The
+  // mappings key pdf.js annotation ids that only exist in those exact bytes.
+  const mappingRequestRef = useRef(0);
+  const currentPdfData = document?.pdfData;
+  useEffect(() => {
+    const requestId = ++mappingRequestRef.current;
+    if (!currentPdfData || currentPdfData.length === 0) {
+      setFormFieldMappings([]);
+      return;
+    }
+    withPdfJsDocument(currentPdfData, (pdf) => buildFormFieldMapping(pdf))
+      .then((mappings) => {
+        if (mappingRequestRef.current === requestId) setFormFieldMappings(mappings);
+      })
+      .catch((e) => {
+        console.warn('Failed to build form field mappings:', e);
+        if (mappingRequestRef.current === requestId) setFormFieldMappings([]);
+      });
+  }, [currentPdfData]);
+
+  // Shared post-save logic: re-extract text items from the modified PDF and
+  // commit the saved state. `savedFrom` is the document the save was built
+  // from; the write-back is applied only if it is STILL the current document.
+  // An undo, page op, edit or tab switch that landed while the save was in
+  // flight is newer than the save, so it wins: the write-back is dropped and
+  // the document stays modified (returns false). Previously the save's
+  // setDocument(prev => ...) silently overwrote such a change.
   const reExtractTextAfterSave = useCallback(async (
+    savedFrom: PDFDocument,
+    savedFromTab: string | null,
     modifiedPdfBytes: Uint8Array,
+    extra: Partial<PDFDocument>,
     newFilePath?: string | null,
     newFileName?: string
-  ) => {
+  ): Promise<boolean> => {
+    const snap = { doc: savedFrom, tabId: savedFromTab };
+    const commitIfUnchanged = (pages: PDFDocument['pages']): boolean => {
+      if (!isSnapshotCurrent(stateRef, snap)) return false;
+      commitDocument({
+        ...savedFrom,
+        ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
+        ...(newFileName ? { fileName: newFileName } : {}),
+        ...extra,
+        pdfData: modifiedPdfBytes,
+        pages,
+      });
+      return true;
+    };
     try {
       const dataCopyForPdfJs = new Uint8Array(modifiedPdfBytes);
       const pdfDocReload = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopyForPdfJs }).promise;
 
       const updatedPages = await Promise.all(
-        (document?.pages || []).map(async (page, i) => {
+        savedFrom.pages.map(async (page, i) => {
           const pdfPage = await pdfDocReload.getPage(i + 1);
           const viewport = pdfPage.getViewport({ scale: 1 });
+          const [viewX1, viewY1] = viewport.viewBox;
 
           const [textContent, operatorList] = await Promise.all([
             pdfPage.getTextContent(),
@@ -517,8 +610,8 @@ export function usePDFDocument() {
                     id: `text-item-${i}-${itemCounter++}`,
                     str: word,
                     originalStr: word,
-                    x: currentX,
-                    y,
+                    x: currentX - viewX1,
+                    y: y + viewY1,
                     width: wordWidth,
                     height,
                     fontName: rawFontName,
@@ -547,21 +640,11 @@ export function usePDFDocument() {
         })
       );
 
-      setDocument((prev) => {
-        if (!prev) return null;
-        return {
-          ...prev,
-          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
-          ...(newFileName ? { fileName: newFileName } : {}),
-          pdfData: modifiedPdfBytes,
-          pages: updatedPages,
-        };
-      });
+      return commitIfUnchanged(updatedPages);
     } catch (reloadError) {
       console.error('Error re-extracting text after save:', reloadError);
-      setDocument((prev) => {
-        if (!prev) return null;
-        const updatedPages = prev.pages.map(page => ({
+      {
+        const updatedPages = savedFrom.pages.map(page => ({
           ...page,
           textEdits: [],
           annotations: [], // Clear annotations written to content stream to prevent double-rendering
@@ -571,16 +654,10 @@ export function usePDFDocument() {
             isEdited: false,
           })),
         }));
-        return {
-          ...prev,
-          ...(newFilePath !== undefined ? { filePath: newFilePath } : {}),
-          ...(newFileName ? { fileName: newFileName } : {}),
-          pdfData: modifiedPdfBytes,
-          pages: updatedPages,
-        };
-      });
+        return commitIfUnchanged(updatedPages);
+      }
     }
-  }, [document]);
+  }, [commitDocument]);
 
   /** Apply pending encryption changes (or retain current encryption) to plaintext output bytes. */
   const applyOutputEncryption = useCallback(async (
@@ -624,6 +701,7 @@ export function usePDFDocument() {
 
   const saveFile = useCallback(async () => {
     if (!document) return;
+    const savedFromTab = stateRef.current.activeTabId;
 
     setLoading(true);
     try {
@@ -641,14 +719,12 @@ export function usePDFDocument() {
       if (result.success) {
         // Re-extract from the plaintext (not the encrypted output) so downstream
         // tools continue to operate on plaintext bytes in memory.
-        await reExtractTextAfterSave(editedPlaintext);
-        setDocument((prev) => prev ? {
-          ...prev,
+        const applied = await reExtractTextAfterSave(document, savedFromTab, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
-        } : null);
-        setModified(false);
+        });
+        if (applied) setModified(false);
       } else {
         throw new Error(result.error || 'Failed to save file');
       }
@@ -658,12 +734,13 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings, applyOutputEncryption]);
+  }, [document, formFieldMappings, applyOutputEncryption, reExtractTextAfterSave]);
 
   // Returns true only when the file was actually written (false on dialog
   // cancel), so callers can toast accurately instead of testing a void return.
   const saveFileAs = useCallback(async (): Promise<boolean> => {
     if (!document) return false;
+    const savedFromTab = stateRef.current.activeTabId;
 
     setLoading(true);
     try {
@@ -680,14 +757,12 @@ export function usePDFDocument() {
       const result = await window.electronAPI.saveFileDialog(base64, document.fileName);
       if (result.success && result.path) {
         const fileName = result.path.split(/[\\/]/).pop() || 'Untitled';
-        await reExtractTextAfterSave(editedPlaintext, result.path, fileName);
-        setDocument((prev) => prev ? {
-          ...prev,
+        const applied = await reExtractTextAfterSave(document, savedFromTab, editedPlaintext, {
           password: newPassword,
           encryptionMeta: newMeta,
           pendingEncryption: undefined,
-        } : null);
-        setModified(false);
+        }, result.path, fileName);
+        if (applied) setModified(false);
         return true;
       }
       return false;
@@ -697,7 +772,7 @@ export function usePDFDocument() {
     } finally {
       setLoading(false);
     }
-  }, [document, formFieldMappings, applyOutputEncryption]);
+  }, [document, formFieldMappings, applyOutputEncryption, reExtractTextAfterSave]);
 
   /** Set, change, or remove the document password. Applied on next save. */
   const setPendingEncryption = useCallback((pending: PDFDocument['pendingEncryption']) => {
@@ -1255,247 +1330,304 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     [document, addToHistory]
   );
 
+  /**
+   * Run one undoable structural page edit. It is serialized with every other
+   * structural op (runStructural), built from the LATEST committed document,
+   * and committed only if neither the document nor the active tab changed
+   * while it ran — otherwise a concurrent edit (annotation, undo, save, tab
+   * switch) would be silently overwritten by a rebuild of stale bytes.
+   * Resolves to the op's result (e.g. indices to select), or undefined when
+   * the op decided there was nothing to do.
+   */
+  const runPageEdit = useCallback(
+    <T,>(
+      type: string,
+      build: (doc: PDFDocument) => Promise<{ next: PDFDocument; result: T } | null>
+    ): Promise<T | undefined> => {
+      let result: T | undefined;
+      const requestedTab = stateRef.current.activeTabId;
+      return runStructural(async () => {
+        assertRequestedTabActive(stateRef, requestedTab);
+        const snap = snapshotDocument(stateRef);
+        if (!snap) return;
+        const doc = snap.doc;
+        const built = await build(doc);
+        if (!built) return;
+        assertSnapshotCurrent(stateRef, snap);
+        const nextDoc = built.next;
+        commitDocument(nextDoc);
+        addToHistory({
+          type,
+          undo: () => commitDocument(doc),
+          redo: () => commitDocument(nextDoc),
+        });
+        result = built.result;
+      }).then(() => result);
+    },
+    [runStructural, addToHistory, commitDocument]
+  );
+
+  /** Rebuild bytes AND model from one source-index order (see applyPdfPageOrder). */
+  const applyOrderEdit = useCallback(
+    (type: string, plan: (doc: PDFDocument) => number[] | null, select: (order: number[]) => number[]) =>
+      runPageEdit<number[]>(type, async (doc) => {
+        const order = plan(doc);
+        if (!order) return null;
+        const pdfData = await applyPdfPageOrder(doc.pdfData, order);
+        const pages = reorderPageModel(doc.pages, order);
+        return { next: { ...doc, pageCount: pages.length, pages, pdfData }, result: select(order) };
+      }),
+    [runPageEdit]
+  );
+
+  /** Delete pages (0-based). Rejects if that would delete every page. Resolves to the index to show next. */
+  const deletePages = useCallback(
+    (zeroIndices: number[]): Promise<number[] | undefined> =>
+      applyOrderEdit(
+        'deletePages',
+        (doc) => {
+          const targets = normalizeIndices(zeroIndices, doc.pages.length);
+          if (targets.length === 0) return null;
+          return orderWithout(doc.pages.length, targets);
+        },
+        (order) => [Math.min(Math.min(...zeroIndices), order.length - 1)]
+      ),
+    [applyOrderEdit]
+  );
+
+  // 1-based, no-op on a single-page document (unchanged public contract).
   const deletePage = useCallback(
     (pageIndex: number): Promise<void> =>
-      runStructural(async () => {
-        const doc = stateRef.current.document;
-        if (!doc || doc.pageCount <= 1) return;
-        const zeroIndex = pageIndex - 1;
-        if (zeroIndex < 0 || zeroIndex >= doc.pages.length) return;
-
-        // Rebuild bytes so pdfData stays aligned with the page model (the save
-        // pipeline resolves getPage(page.index) against these bytes).
-        const newPdfData = await deletePdfPage(doc.pdfData, zeroIndex);
-
-        const nextPages = doc.pages
-          .filter((_, i) => i !== zeroIndex)
-          .map((p, i) => ({ ...p, index: i }));
-        const prevDoc = doc;
-        const nextDoc: PDFDocument = { ...doc, pageCount: nextPages.length, pages: nextPages, pdfData: newPdfData };
-
-        commitDocument(nextDoc);
-        addToHistory({
-          type: 'deletePage',
-          undo: () => commitDocument(prevDoc),
-          redo: () => commitDocument(nextDoc),
-        });
-      }),
-    [runStructural, addToHistory, commitDocument]
+      applyOrderEdit(
+        'deletePage',
+        (doc) => {
+          const zeroIndex = pageIndex - 1;
+          if (doc.pageCount <= 1 || zeroIndex < 0 || zeroIndex >= doc.pages.length) return null;
+          return orderWithout(doc.pages.length, [zeroIndex]);
+        },
+        () => []
+      ).then(() => undefined),
+    [applyOrderEdit]
   );
 
+  /** Duplicate pages (0-based); each copy lands right after its original. Resolves to the copies' indices. */
+  const duplicatePages = useCallback(
+    (zeroIndices: number[]): Promise<number[] | undefined> =>
+      applyOrderEdit(
+        'duplicatePages',
+        (doc) => {
+          const targets = normalizeIndices(zeroIndices, doc.pages.length);
+          return targets.length ? orderWithDuplicates(doc.pages.length, targets) : null;
+        },
+        copyPositions
+      ),
+    [applyOrderEdit]
+  );
+
+  /**
+   * Move pages (0-based) into the gap `beforeIndex` (0..pageCount, original
+   * numbering). Resolves to the moved pages' new indices.
+   */
+  const movePages = useCallback(
+    (zeroIndices: number[], beforeIndex: number): Promise<number[] | undefined> => {
+      let moving: number[] = [];
+      return applyOrderEdit(
+        'movePages',
+        (doc) => {
+          moving = normalizeIndices(zeroIndices, doc.pages.length);
+          if (moving.length === 0) return null;
+          const order = orderWithMove(doc.pages.length, moving, beforeIndex);
+          return order.every((src, i) => src === i) ? null : order;
+        },
+        (order) => positionsOf(order, moving)
+      );
+    },
+    [applyOrderEdit]
+  );
+
+  /** Rotate pages (0-based) by a multiple of 90 degrees, as one undo step. */
+  const rotatePages = useCallback(
+    (zeroIndices: number[], delta: number): Promise<number[] | undefined> =>
+      runPageEdit<number[]>('rotatePages', async (doc) => {
+        const targets = normalizeIndices(zeroIndices, doc.pages.length);
+        if (targets.length === 0 || delta % 360 === 0) return null;
+        const pdfData = await rotatePdfPages(doc.pdfData, targets, delta);
+        const set = new Set(targets);
+        const pages = doc.pages.map((p, i) => (set.has(i) ? rotatePageModel(p, delta) : p));
+        return { next: { ...doc, pages, pdfData }, result: targets };
+      }),
+    [runPageEdit]
+  );
+
+  // 1-based page, relative angle (unchanged public contract).
   const rotatePage = useCallback(
     (pageIndex: number, angle: number): Promise<void> =>
-      runStructural(async () => {
-        const doc = stateRef.current.document;
-        if (!doc) return;
-        const zeroIndex = pageIndex - 1;
-        if (zeroIndex < 0 || zeroIndex >= doc.pages.length) return;
-
-        const prevRotation = doc.pages[zeroIndex].rotation;
-        const nextRotation = (((prevRotation + angle) % 360) + 360) % 360;
-
-        // Bake the absolute rotation into /Rotate so it round-trips on save and
-        // the viewer (which passes page.rotation to pdf.js as the absolute
-        // viewport rotation) stays in sync with the bytes.
-        const newPdfData = await setPdfPageRotation(doc.pdfData, zeroIndex, nextRotation);
-
-        const nextPages = [...doc.pages];
-        nextPages[zeroIndex] = { ...nextPages[zeroIndex], rotation: nextRotation };
-        const prevDoc = doc;
-        const nextDoc: PDFDocument = { ...doc, pages: nextPages, pdfData: newPdfData };
-
-        commitDocument(nextDoc);
-        addToHistory({
-          type: 'rotatePage',
-          undo: () => commitDocument(prevDoc),
-          redo: () => commitDocument(nextDoc),
-        });
-      }),
-    [runStructural, addToHistory, commitDocument]
+      rotatePages([pageIndex - 1], angle).then(() => undefined),
+    [rotatePages]
   );
 
+  /**
+   * Crop pages (0-based) by displayed-page margins off each MediaBox; null
+   * resets to the full MediaBox. Unsaved annotations and text positions are
+   * translated so they stay over the same content.
+   */
+  const cropPages = useCallback(
+    (zeroIndices: number[], margins: CropMargins | null): Promise<number[] | undefined> =>
+      runPageEdit<number[]>('cropPages', async (doc) => {
+        const targets = normalizeIndices(zeroIndices, doc.pages.length);
+        if (targets.length === 0) return null;
+        const before = await readPageGeometries(doc.pdfData);
+        const pdfData = await setPdfPageCrop(doc.pdfData, targets, margins);
+        const after = await readPageGeometries(pdfData);
+        const set = new Set(targets);
+        const pages = doc.pages.map((p, i) => (set.has(i) ? cropPageModel(p, before[i].box, after[i]) : p));
+        return { next: { ...doc, pages, pdfData }, result: targets };
+      }),
+    [runPageEdit]
+  );
+
+  /**
+   * Insert every page of another PDF at `index` (0..pageCount; clamped).
+   * Owner-only encrypted sources are decrypted; password-protected ones reject
+   * with EncryptedSourceError. Resolves to the inserted pages' indices. This is
+   * the entry point for external PDF drops onto the thumbnails.
+   */
+  const insertPdfPagesAt = useCallback(
+    async (index: number, bytes: Uint8Array): Promise<number[]> => {
+      const source = await preparePageSource(bytes);
+      const result = await runPageEdit<number[]>('insertPdfPages', async (doc) => {
+        const at = Math.min(Math.max(Math.trunc(index), 0), doc.pages.length);
+        const { bytes: pdfData, inserted } = await insertPdfPages(doc.pdfData, at, source);
+        const raw = [...doc.pages];
+        raw.splice(at, 0, ...inserted.map((g, k) => pageModelFromGeometry(g, at + k)));
+        const pages = raw.map((p, i) => ({ ...p, index: i }));
+        return {
+          next: { ...doc, pageCount: pages.length, pages, pdfData },
+          result: inserted.map((_, k) => at + k),
+        };
+      });
+      return result ?? [];
+    },
+    [runPageEdit]
+  );
+
+  // 1-based "insert after page N" (0 = front). Unchanged public contract.
   const insertBlankPage = useCallback(
     (afterPageIndex: number): Promise<void> =>
-      runStructural(async () => {
-        const doc = stateRef.current.document;
-        if (!doc) return;
-
+      runPageEdit<null>('insertBlankPage', async (doc) => {
         // Use the neighbouring page's dimensions as a template, or default A4.
         const templatePage = doc.pages[afterPageIndex - 1] || doc.pages[0];
         const width = templatePage?.width || 595;
         const height = templatePage?.height || 842;
-
-        // afterPageIndex is 1-based ("insert after page N"); the new page lands
-        // at 0-based array position afterPageIndex. Bake a real blank page into
-        // the bytes so the document stays saveable.
-        const newPdfData = await insertBlankPdfPage(doc.pdfData, afterPageIndex - 1, width, height);
-
-        const newPage = {
-          index: afterPageIndex,
+        const at = Math.min(Math.max(afterPageIndex, 0), doc.pages.length);
+        const pdfData = await insertBlankPdfPage(doc.pdfData, at - 1, width, height);
+        const raw = [...doc.pages];
+        raw.splice(at, 0, {
+          index: at,
           width,
           height,
           rotation: 0,
           annotations: [],
           textItems: [],
           textEdits: [],
-        };
-
-        const nextPagesRaw = [...doc.pages];
-        nextPagesRaw.splice(afterPageIndex, 0, newPage);
-        const nextPages = nextPagesRaw.map((p, i) => ({ ...p, index: i }));
-        const prevDoc = doc;
-        const nextDoc: PDFDocument = { ...doc, pageCount: nextPages.length, pages: nextPages, pdfData: newPdfData };
-
-        commitDocument(nextDoc);
-        addToHistory({
-          type: 'insertBlankPage',
-          undo: () => commitDocument(prevDoc),
-          redo: () => commitDocument(nextDoc),
         });
-      }),
-    [runStructural, addToHistory, commitDocument]
+        const pages = raw.map((p, i) => ({ ...p, index: i }));
+        return { next: { ...doc, pageCount: pages.length, pages, pdfData }, result: null };
+      }).then(() => undefined),
+    [runPageEdit]
   );
 
+  // 1-based page; replacement = first page of newPdfData. Now serialized with
+  // the other structural ops (it used to run outside the mutex and could
+  // clobber, or be clobbered by, a concurrent page op).
   const replacePage = useCallback(
-    async (pageIndex: number, newPdfData: Uint8Array) => {
-      if (!document) return;
-
-      const { PDFDocument: PDFLib } = await import('pdf-lib');
-
-      // Load both the current document and the replacement
-      const currentDoc = await PDFLib.load(document.pdfData, { ignoreEncryption: true });
-      const replacementDoc = await PDFLib.load(newPdfData, { ignoreEncryption: true });
-
-      if (replacementDoc.getPageCount() === 0) return;
-
-      // Get original page dimensions before removing it
-      const zeroIndex = pageIndex - 1; // pageIndex is 1-based
-      const originalPage = currentDoc.getPage(zeroIndex);
-      const originalSize = originalPage.getSize();
-
-      // Copy the first page from the replacement into the current document
-      const [copiedPage] = await currentDoc.copyPages(replacementDoc, [0]);
-
-      // Scale the replacement page to match the original page dimensions.
-      // Scanners often produce pages at different DPI/size than the original.
-      const replacementSize = copiedPage.getSize();
-      const scaleX = originalSize.width / replacementSize.width;
-      const scaleY = originalSize.height / replacementSize.height;
-
-      if (Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01) {
-        // Resize the page mediabox to match the original
-        copiedPage.setSize(originalSize.width, originalSize.height);
-
-        // Scale the page content to fit the new dimensions.
-        // Prepend a scale transform to the page's content stream.
-        copiedPage.scaleContent(scaleX, scaleY);
-      }
-
-      // Remove the old page and insert the scaled replacement
-      currentDoc.removePage(zeroIndex);
-      currentDoc.insertPage(zeroIndex, copiedPage);
-
-      // Save the modified PDF
-      const updatedPdfBytes = await currentDoc.save();
-      const updatedPdfData = new Uint8Array(updatedPdfBytes);
-
-      // Use original dimensions for the app's page model
-      const width = originalSize.width;
-      const height = originalSize.height;
-
-      const previousPages = [...document.pages];
-      const previousPdfData = document.pdfData;
-
-      setDocument((prev) => {
-        if (!prev) return null;
-        const newPages = [...prev.pages];
-        newPages[zeroIndex] = {
-          ...newPages[zeroIndex],
-          width,
-          height,
-          rotation: 0,
-          annotations: [],
-          textItems: [],
-          textEdits: [],
-          sourceAnnotations: [],
-        };
-        const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-        return { ...prev, pages: reindexed, pdfData: updatedPdfData };
-      });
-
-      setModified(true);
-
-      addToHistory({
-        type: 'replacePage',
-        undo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            return { ...prev, pages: previousPages, pdfData: previousPdfData };
-          });
-        },
-        redo: () => {
-          setDocument((prev) => {
-            if (!prev) return null;
-            const newPages = [...previousPages];
-            newPages[zeroIndex] = {
-              ...newPages[zeroIndex],
-              width,
-              height,
-              rotation: 0,
-              annotations: [],
-              textItems: [],
-              textEdits: [],
-              sourceAnnotations: [],
-            };
-            const reindexed = newPages.map((p, i) => ({ ...p, index: i }));
-            return { ...prev, pages: reindexed, pdfData: updatedPdfData };
-          });
-        },
+    async (pageIndex: number, newPdfData: Uint8Array): Promise<void> => {
+      const source = await preparePageSource(newPdfData);
+      await runPageEdit<null>('replacePage', async (doc) => {
+        const zeroIndex = pageIndex - 1;
+        if (zeroIndex < 0 || zeroIndex >= doc.pages.length) return null;
+        const { bytes: pdfData, geometry } = await replacePdfPage(doc.pdfData, zeroIndex, source);
+        const pages = [...doc.pages];
+        pages[zeroIndex] = pageModelFromGeometry(geometry, zeroIndex);
+        return { next: { ...doc, pages, pdfData }, result: null };
       });
     },
-    [document, addToHistory]
+    [runPageEdit]
   );
 
+  // 0-based splice semantics (unchanged public contract).
   const reorderPages = useCallback(
     (fromIndex: number, toIndex: number): Promise<void> =>
-      runStructural(async () => {
-        const doc = stateRef.current.document;
-        if (!doc) return;
-        if (fromIndex === toIndex) return;
-        if (fromIndex < 0 || fromIndex >= doc.pages.length) return;
-        if (toIndex < 0 || toIndex >= doc.pages.length) return;
+      runPageEdit<null>('reorderPages', async (doc) => {
+        if (fromIndex === toIndex) return null;
+        if (fromIndex < 0 || fromIndex >= doc.pages.length) return null;
+        if (toIndex < 0 || toIndex >= doc.pages.length) return null;
+        const pdfData = await reorderPdfPage(doc.pdfData, fromIndex, toIndex);
+        const raw = [...doc.pages];
+        const [moved] = raw.splice(fromIndex, 1);
+        raw.splice(toIndex, 0, moved);
+        const pages = raw.map((p, i) => ({ ...p, index: i }));
+        return { next: { ...doc, pages, pdfData }, result: null };
+      }).then(() => undefined),
+    [runPageEdit]
+  );
 
-        // Reorder the bytes with the same splice semantics as the model.
-        const newPdfData = await reorderPdfPage(doc.pdfData, fromIndex, toIndex);
-
-        const nextPagesRaw = [...doc.pages];
-        const [movedPage] = nextPagesRaw.splice(fromIndex, 1);
-        nextPagesRaw.splice(toIndex, 0, movedPage);
-        const nextPages = nextPagesRaw.map((p, i) => ({ ...p, index: i }));
-        const prevDoc = doc;
-        const nextDoc: PDFDocument = { ...doc, pages: nextPages, pdfData: newPdfData };
-
+  /**
+   * Commit a byte-level transform as one undoable step, serialized with the
+   * structural page ops. Live form values are baked first (see
+   * documentTransforms.ts); the baked bytes are the undo target so undo keeps
+   * the values typed before the transform. Resolves with the transform's
+   * output, or null when it declined (returned null) or no document is open.
+   */
+  const applyDocumentTransform = useCallback(
+    async <T extends DocumentTransformOutput>(
+      type: string,
+      transform: (input: DocumentTransformInput) => Promise<T | null>
+    ): Promise<T | null> => {
+      let result: T | null = null;
+      const requestedTab = stateRef.current.activeTabId;
+      await runStructural(async () => {
+        assertRequestedTabActive(stateRef, requestedTab);
+        const snap = snapshotDocument(stateRef);
+        if (!snap) return;
+        const doc = snap.doc;
+        const bakedBytes = await bakeFormValues(doc.pdfData, annotationStorageRef.current, formFieldMappingsRef.current);
+        const output = await transform({ doc, bakedBytes });
+        if (!output) return;
+        assertSnapshotCurrent(stateRef, snap);
+        const pages = output.pages ?? doc.pages;
+        const nextDoc: PDFDocument = { ...doc, pdfData: output.pdfData, pages, pageCount: pages.length };
+        const undoDoc: PDFDocument = bakedBytes === doc.pdfData ? doc : { ...doc, pdfData: bakedBytes };
         commitDocument(nextDoc);
         addToHistory({
-          type: 'reorderPages',
-          undo: () => commitDocument(prevDoc),
+          type,
+          undo: () => commitDocument(undoDoc),
           redo: () => commitDocument(nextDoc),
         });
-      }),
+        result = output;
+      });
+      return result;
+    },
     [runStructural, addToHistory, commitDocument]
   );
 
+  const markupRedaction = useMarkupRedaction({ stateRef, commitDocument, addToHistory, applyDocumentTransform });
+
   const undo = useCallback(() => {
-    if (!canUndo) return;
-    history[historyIndex].undo();
-    setHistoryIndex((prev) => prev - 1);
-  }, [canUndo, history, historyIndex]);
+    const { history: hist, historyIndex: idx } = stateRef.current;
+    if (idx < 0 || !hist[idx]) return;
+    hist[idx].undo();
+    stateRef.current.historyIndex = idx - 1;
+    setHistoryIndex(idx - 1);
+  }, []);
 
   const redo = useCallback(() => {
-    if (!canRedo) return;
-    history[historyIndex + 1].redo();
-    setHistoryIndex((prev) => prev + 1);
-  }, [canRedo, history, historyIndex]);
+    const { history: hist, historyIndex: idx } = stateRef.current;
+    if (idx + 1 >= hist.length) return;
+    hist[idx + 1].redo();
+    stateRef.current.historyIndex = idx + 1;
+    setHistoryIndex(idx + 1);
+  }, []);
 
   return {
     document,
@@ -1516,6 +1648,13 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     deletePage,
     reorderPages,
     rotatePage,
+    // Page tools (0-based index arrays)
+    deletePages,
+    duplicatePages,
+    movePages,
+    rotatePages,
+    cropPages,
+    insertPdfPagesAt,
     undo,
     redo,
     canUndo,
@@ -1534,6 +1673,10 @@ const markTextDeleted = useCallback(    (pageIndex: number, textItemId: string, 
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Text markup + redaction
+    ...markupRedaction,
+    // Byte-level transforms (form authoring, flatten, compress)
+    applyDocumentTransform,
   };
 }
 

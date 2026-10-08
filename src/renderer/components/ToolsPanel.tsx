@@ -13,6 +13,12 @@ import {
   ExternalLink,
   AlertCircle,
   FileType2,
+  Copy,
+  Crop,
+  FileInput,
+  Stamp,
+  Layers,
+  Minimize2,
 } from 'lucide-react';
 
 export type ToolsDocType = 'pdf' | 'staged' | 'none';
@@ -29,11 +35,19 @@ interface ToolsPanelProps {
   onExtractPages: () => void;
   onExtractImages: () => void;
   onRotateAll: () => void;
+  /** Page tools; act on the sidebar selection (or current page). Optional so older callers compile. */
+  onDuplicatePages?: () => void;
+  onCropPages?: () => void;
+  onInsertPdfPages?: () => void;
   onConvertToPdf: () => void;
   onConvertStagedToPdf: () => void;
   onConvertFromPdf: () => void;
   onConvertToDocx: () => void;
   onExportSvg: () => void;
+  onStampPages: () => void;
+  /** Finalize tools (shown for PDFs when provided). */
+  onFlatten?: () => void;
+  onCompress?: () => void;
   libreOfficeAvailable: boolean;
 }
 
@@ -56,11 +70,17 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
   onExtractPages,
   onExtractImages,
   onRotateAll,
+  onDuplicatePages,
+  onCropPages,
+  onInsertPdfPages,
   onConvertToPdf,
   onConvertStagedToPdf,
   onConvertFromPdf,
   onConvertToDocx,
   onExportSvg,
+  onStampPages,
+  onFlatten,
+  onCompress,
   libreOfficeAvailable,
 }) => {
   if (!visible) {
@@ -88,8 +108,14 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'extract', label: 'Extract Pages', icon: <FileOutput size={18} />, onClick: onExtractPages, description: 'Extract specific pages' },
         { id: 'images', label: 'Extract Images', icon: <ImageDown size={18} />, onClick: onExtractImages, description: 'Export embedded images' },
         { id: 'rotate', label: 'Rotate All Pages', icon: <RotateCw size={18} />, onClick: onRotateAll, description: 'Rotate all pages 90°' },
+        { id: 'stamp', label: 'Stamp Pages', icon: <Stamp size={18} />, onClick: onStampPages, description: 'Watermark, header/footer, page numbers, Bates numbering' },
       ],
     });
+    const pageTools: ToolDef[] = [];
+    if (onDuplicatePages) pageTools.push({ id: 'duplicate-pages', label: 'Duplicate Pages', icon: <Copy size={18} />, onClick: onDuplicatePages, description: 'Duplicate the selected pages' });
+    if (onCropPages) pageTools.push({ id: 'crop-pages', label: 'Crop Pages', icon: <Crop size={18} />, onClick: onCropPages, description: 'Crop the selected pages (sets the CropBox)' });
+    if (onInsertPdfPages) pageTools.push({ id: 'insert-pdf-pages', label: 'Insert Pages from PDF', icon: <FileInput size={18} />, onClick: onInsertPdfPages, description: 'Insert another PDF after the selected pages' });
+    if (pageTools.length > 0) sections.push({ title: 'Page Tools', tools: pageTools });
     sections.push({
       title: 'Convert From PDF',
       tools: [
@@ -98,6 +124,10 @@ const ToolsPanel: React.FC<ToolsPanelProps> = ({
         { id: 'to-svg', label: 'PDF to SVG', icon: <Code size={18} />, onClick: onExportSvg, description: 'Export PDF pages as SVG vector graphics' },
       ],
     });
+    const finalizeTools: ToolDef[] = [];
+    if (onFlatten) finalizeTools.push({ id: 'flatten', label: 'Flatten…', icon: <Layers size={18} />, onClick: onFlatten, description: 'Burn annotations and form fields into the page' });
+    if (onCompress) finalizeTools.push({ id: 'compress', label: 'Compress…', icon: <Minimize2 size={18} />, onClick: onCompress, description: 'Reduce file size (lossless, optional image downsampling)' });
+    if (finalizeTools.length > 0) sections.push({ title: 'Finalize', tools: finalizeTools });
   } else if (docType === 'staged') {
     sections.push({
       title: stagedName ? `Convert "${stagedName}"` : 'Convert',

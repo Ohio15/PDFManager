@@ -7,6 +7,8 @@ import { Tool } from '../App';
 import { FormFieldMapping } from '../utils/formFieldSaver';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
 import SignaturePad from './SignaturePad';
+import MarkupRedactionLayer, { isSelectionTool } from './MarkupRedactionLayer';
+import type { PdfRect, TextMarkupType } from '../types';
 
 interface TextEditDialogState {
   isOpen: boolean;
@@ -204,6 +206,10 @@ interface PDFViewerProps {
   onFormFieldsDetected?: (count: number) => void;
   onAnnotationStorageReady?: (storage: any) => void;
   formFieldMappings?: FormFieldMapping[];
+  onAddTextMarkup?: (pageIndex: number, type: TextMarkupType, quads: number[][], color: string, opacity: number, text: string) => void;
+  onAddRedactionMark?: (pageIndex: number, rects: PdfRect[], source: 'area' | 'text', text?: string) => void;
+  /** Extra layer rendered on top of each page (e.g. the form authoring overlay). */
+  renderPageOverlay?: (pageIndex: number, scale: number) => React.ReactNode;
 }
 
 export interface PDFViewerHandle {
@@ -236,6 +242,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
   onFormFieldsDetected,
   onAnnotationStorageReady,
   formFieldMappings,
+  onAddTextMarkup,
+  onAddRedactionMark,
+  renderPageOverlay,
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const editableTextRef = useRef<HTMLDivElement>(null);
@@ -250,6 +259,10 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   // AcroForm annotation layer state
   const annotationStorageRef = useRef<any>(null);
+  // renderAnnotationLayer is a stable callback; read the latest mappings via a
+  // ref (they are rebuilt whenever the bytes change, e.g. after form edits).
+  const formFieldMappingsRef = useRef(formFieldMappings);
+  formFieldMappingsRef.current = formFieldMappings;
   const annotationLayerDivsRef = useRef<Map<number, HTMLDivElement>>(new Map());
   const renderedAnnotLayersRef = useRef<Set<number>>(new Set());
   const [hasFormFields, setHasFormFields] = useState(false);
@@ -298,6 +311,11 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
 
   const scale = zoom / 100;
   scaleRef.current = scale;
+
+  const getPdfPage = useCallback(
+    (pageNum: number) => (pdfDocRef.current && pageNum <= pdfDocRef.current.numPages ? pdfDocRef.current.getPage(pageNum) : Promise.resolve(null)),
+    []
+  );
 
   // Notify parent when selection changes
   useEffect(() => {
@@ -489,8 +507,9 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       } as any);
 
       // Post-render: decorate required/readonly fields with data attributes for CSS targeting
-      if (formFieldMappings && formFieldMappings.length > 0) {
-        const pageMappings = formFieldMappings.filter(m => m.pageIndex === pageNum - 1);
+      const currentMappings = formFieldMappingsRef.current;
+      if (currentMappings && currentMappings.length > 0) {
+        const pageMappings = currentMappings.filter(m => m.pageIndex === pageNum - 1);
         for (const mapping of pageMappings) {
           const section = div.querySelector(`[data-annotation-id="${mapping.annotationId}"]`);
           if (!section) continue;
@@ -796,7 +815,8 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
         }
         onToolChange?.('select');
       }
-    } else if (currentTool === 'highlight') {
+    } else if (currentTool === 'highlight' && annotationStyle?.highlightMode !== 'text') {
+      // Select-to-highlight (highlightMode 'text') is handled by MarkupRedactionLayer.
       setHighlightStart({ pageNum, x, y });
       setHighlightPreview(null);
     } else if (currentTool === 'erase') {
@@ -1617,6 +1637,12 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
       );
     }
 
+    if (annotation.type === 'textMarkup' || annotation.type === 'redaction') {
+      // PDF-user-space geometry; drawn by MarkupRedactionLayer, which owns the
+      // viewport conversion for rotation and zoom.
+      return null;
+    }
+
     if (annotation.type === 'stamp') {
       const stampAnnotation = annotation as StampAnnotation;
       return (
@@ -1663,7 +1689,7 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
           <div
             key={pageNum}
             data-page={pageNum}
-            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''} ${currentTool === 'signature' ? 'signature-mode' : ''}`}
+            className={`pdf-page-container ${currentTool === 'highlight' ? 'highlight-mode' : ''} ${currentTool === 'erase' ? 'erase-mode' : ''} ${currentTool === 'text' ? 'text-mode' : ''} ${currentTool === 'draw' ? 'draw-mode' : ''} ${currentTool === 'shape' ? 'shape-mode' : ''} ${currentTool === 'note' ? 'note-mode' : ''} ${currentTool === 'stamp' ? 'stamp-mode' : ''} ${currentTool === 'signature' ? 'signature-mode' : ''} ${currentTool === 'markup' ? 'markup-mode' : ''} ${currentTool === 'redact' ? 'redact-mode' : ''} ${isSelectionTool(currentTool, annotationStyle) ? 'text-select-mode' : ''}`}
             style={{
               width: pageWidth,
               height: pageHeight,
@@ -1717,6 +1743,23 @@ const PDFViewer = forwardRef<PDFViewerHandle, PDFViewerProps>(({
             <div className="text-layer">
               {page?.textItems?.map((textItem) => renderTextItem(pageNum, textItem))}
             </div>
+            <MarkupRedactionLayer
+              pageNum={pageNum}
+              scale={scale}
+              rotation={page.rotation || 0}
+              tool={currentTool}
+              style={annotationStyle}
+              annotations={page.annotations}
+              docKey={pdfReadyCounter}
+              getPdfPage={getPdfPage}
+              selectedId={selectedAnnotation}
+              onSelect={setSelectedAnnotation}
+              onContextMenu={handleContextMenu}
+              onAddTextMarkup={onAddTextMarkup}
+              onAddRedactionMark={onAddRedactionMark}
+              onUpdateAnnotation={onUpdateAnnotation}
+            />
+            {renderPageOverlay?.(i, scale)}
             {/* Highlight preview while drawing */}
             {highlightStart && highlightStart.pageNum === pageNum && highlightPreview && (
               <div

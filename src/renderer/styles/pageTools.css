@@ -1,0 +1,191 @@
+/* Page tools (v2.14.11): thumbnail multi-select, drag-move indicators, crop dialog.
+   Colours come only from the theme variables in global.css, so light and dark
+   mode (:root.dark) both work without overrides here. */
+
+.page-thumbnail.selected {
+  border-color: var(--primary-color);
+  background: var(--primary-light);
+}
+
+.page-thumbnail.selected:not(.active) {
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--primary-glow);
+}
+
+.page-thumbnail .page-select-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--primary-color);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.page-thumbnail.drop-before::before,
+.page-thumbnail.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--primary-color);
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--primary-glow);
+  z-index: 2;
+}
+
+.page-thumbnail.drop-before::before { top: -1px; }
+.page-thumbnail.drop-after::after { bottom: -1px; }
+
+.sidebar-content.pages-content:focus { outline: none; }
+.sidebar-content.pages-content:focus-visible { box-shadow: inset 0 0 0 2px var(--primary-glow); }
+
+.page-context-menu .context-menu-header {
+  padding: 6px 12px 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.page-context-menu .context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-context-menu .context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.page-context-menu .context-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border-color);
+}
+
+/* Crop dialog */
+.crop-dialog {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.crop-preview-wrap {
+  flex: 0 0 auto;
+}
+
+.crop-preview {
+  position: relative;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-color);
+  user-select: none;
+  touch-action: none;
+}
+
+.crop-preview-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.crop-preview-loading {
+  width: 300px;
+  height: 380px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-color);
+}
+
+.crop-box {
+  position: absolute;
+  border: 2px solid var(--primary-color);
+  /* Dim everything outside the box. */
+  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.55);
+  cursor: move;
+}
+
+.crop-preview { overflow: hidden; }
+
+.crop-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--surface-color);
+  border: 2px solid var(--primary-color);
+  border-radius: 2px;
+}
+
+.crop-handle-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.crop-handle-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.crop-handle-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.crop-handle-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.crop-handle-n { left: calc(50% - 5px); top: -6px; cursor: ns-resize; }
+.crop-handle-s { left: calc(50% - 5px); bottom: -6px; cursor: ns-resize; }
+.crop-handle-w { top: calc(50% - 5px); left: -6px; cursor: ew-resize; }
+.crop-handle-e { top: calc(50% - 5px); right: -6px; cursor: ew-resize; }
+
+.crop-controls {
+  flex: 1 1 auto;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.crop-fieldset {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.crop-fieldset legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.crop-margin {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 48%;
+  margin: 2px 1%;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.crop-margin input,
+.crop-range-input {
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--background-color);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.crop-range-input {
+  margin-left: 8px;
+  width: 120px;
+}
+
+.crop-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 3px 0;
+}

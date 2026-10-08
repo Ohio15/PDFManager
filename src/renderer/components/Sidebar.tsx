@@ -1,8 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2, AlertCircle, Link, Eye } from 'lucide-react';
+import { FileText, Bookmark, ChevronRight, ChevronDown, MessageSquare, Type, Image, Highlighter, Pencil, Shapes, StickyNote, Stamp, Trash2, AlertCircle, Link, Eye, RotateCcw, RotateCw, Copy, Crop, FileOutput, FilePlus2, FileInput, Replace } from 'lucide-react';
 import { PDFDocument, Annotation, PDFSourceAnnotation } from '../types';
 import { PDFJS_DOCUMENT_OPTIONS } from '../utils/pdfjsConfig';
+import { dropGap, PageClickModifiers } from '../utils/pageSelectionModel';
+import { orderWithMove } from '../utils/pageStructure';
+import { claimExternalDrop, isExternalFileDrag } from '../hooks/useFileDrop';
+import type { DropResult } from '../../shared/ipc';
+import '../styles/pageTools.css';
+
+/** Drag payload type for moving pages within the sidebar (never set by external drags). */
+const PAGE_DRAG_MIME = 'application/x-pdfmanager-pages';
 
 export type SidebarTab = 'pages' | 'bookmarks' | 'annotations';
 
@@ -24,6 +32,23 @@ interface SidebarProps {
   onInsertBlankPage?: (afterPageIndex: number) => void;
   onReplacePage?: (pageIndex: number) => void;
   onDeletePage?: (pageIndex: number) => void;
+  // --- Page tools (all indices 0-based) ---
+  /** Explicitly selected pages. */
+  selectedPages?: number[];
+  /** Thumbnail click with modifiers; when set it replaces onPageSelect for clicks. */
+  onPageClick?: (index: number, mods: PageClickModifiers) => void;
+  onSelectAll?: () => void;
+  /** Move pages into gap `beforeIndex` (0..pageCount). Preferred over onReorderPages. */
+  onMovePages?: (indices: number[], beforeIndex: number) => void;
+  onRotatePages?: (indices: number[], delta: number) => void;
+  onDuplicatePages?: (indices: number[]) => void;
+  onDeletePages?: (indices: number[]) => void;
+  onExtractPages?: (indices: number[]) => void;
+  onCropPages?: (indices: number[]) => void;
+  /** Insert another PDF's pages into gap `beforeIndex`. */
+  onInsertPdfAt?: (beforeIndex: number) => void;
+  /** External (OS) PDFs dropped onto the thumbnails: insert into gap `beforeIndex`. */
+  onExternalPdfDrop?: (claim: Promise<DropResult>, beforeIndex: number) => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -37,13 +62,29 @@ const Sidebar: React.FC<SidebarProps> = ({
   onInsertBlankPage,
   onReplacePage,
   onDeletePage,
+  selectedPages,
+  onPageClick,
+  onSelectAll,
+  onMovePages,
+  onRotatePages,
+  onDuplicatePages,
+  onDeletePages,
+  onExtractPages,
+  onCropPages,
+  onInsertPdfAt,
+  onExternalPdfDrop,
 }) => {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [dropGapIndex, setDropGapIndex] = useState<number | null>(null);
+  const dragSetRef = useRef<number[] | null>(null);
+  const selectedSet = useMemo(() => new Set(selectedPages ?? []), [selectedPages]);
   const [activeTab, setActiveTab] = useState<SidebarTab>('pages');
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [sidebarWidth, setSidebarWidth] = useState(200);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  /** Insertion gap shown while an external PDF is dragged over the thumbnails. */
+  const [externalGap, setExternalGap] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [annotationFilter, setAnnotationFilter] = useState<string>('all');
   const [pageContextMenu, setPageContextMenu] = useState<{ isOpen: boolean; x: number; y: number; pageIndex: number }>({
@@ -81,20 +122,26 @@ const Sidebar: React.FC<SidebarProps> = ({
     return items;
   }, [document]);
 
-  // Generate thumbnails
+  // Generate thumbnails. They depend only on the bytes, and a newer run must
+  // win: without cancellation, a slow run for an older pdfData (e.g. the middle
+  // step of several quick rotations) could finish last and show stale pages.
+  const thumbnailPdfData = document?.pdfData;
   useEffect(() => {
-    if (!document) {
+    if (!thumbnailPdfData) {
       setThumbnails([]);
       return;
     }
+    let cancelled = false;
+    let pdfDoc: pdfjsLib.PDFDocumentProxy | null = null;
 
     const generateThumbnails = async () => {
       try {
-        const dataCopy = new Uint8Array(document.pdfData);
-        const pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
+        const dataCopy = new Uint8Array(thumbnailPdfData);
+        pdfDoc = await pdfjsLib.getDocument({ ...PDFJS_DOCUMENT_OPTIONS, data: dataCopy }).promise;
         const newThumbnails: string[] = [];
 
         for (let i = 1; i <= pdfDoc.numPages; i++) {
+          if (cancelled) return;
           const page = await pdfDoc.getPage(i);
           const viewport = page.getViewport({ scale: 0.2 });
 
@@ -111,14 +158,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           newThumbnails.push(canvas.toDataURL());
         }
 
-        setThumbnails(newThumbnails);
+        if (!cancelled) setThumbnails(newThumbnails);
       } catch (error) {
-        console.error('Failed to generate thumbnails:', error);
+        if (!cancelled) console.error('Failed to generate thumbnails:', error);
+      } finally {
+        pdfDoc?.destroy().catch(() => {});
       }
     };
 
     generateThumbnails();
-  }, [document]);
+    return () => { cancelled = true; };
+  }, [thumbnailPdfData]);
 
   // Extract bookmarks/outline from PDF
   useEffect(() => {
@@ -224,35 +274,105 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [pageContextMenu.isOpen]);
 
   // Page reorder drag handlers
+  /** Pages an action on `index` applies to: the selection if it contains it, else just that page. */
+  const targetsFor = useCallback((index: number): number[] => {
+    if (selectedSet.has(index) && selectedSet.size > 0) return [...selectedSet].sort((a, b) => a - b);
+    return [index];
+  }, [selectedSet]);
+
   const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
+    const moving = onMovePages ? targetsFor(index) : [index];
+    if (onPageClick && !selectedSet.has(index)) onPageClick(index, { ctrl: false, shift: false });
+    dragSetRef.current = moving;
     setDragIndex(index);
     e.dataTransfer.effectAllowed = 'move';
+    // A private MIME type marks an internal page move, so drags of external
+    // files over the thumbnails are never mistaken for one.
+    e.dataTransfer.setData(PAGE_DRAG_MIME, JSON.stringify(moving));
     e.dataTransfer.setData('text/plain', String(index));
-    const el = e.currentTarget as HTMLElement;
-    el.style.opacity = '0.5';
-  }, []);
+  }, [onMovePages, onPageClick, selectedSet, targetsFor]);
 
-  const handleDragEnd = useCallback((e: React.DragEvent) => {
-    const el = e.currentTarget as HTMLElement;
-    el.style.opacity = '1';
+  const handleDragEnd = useCallback(() => {
+    dragSetRef.current = null;
     setDragIndex(null);
     setDropIndex(null);
+    setDropGapIndex(null);
   }, []);
+
+  const isPageDrag = (e: React.DragEvent) => e.dataTransfer.types.includes(PAGE_DRAG_MIME);
 
   const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    // External OS file drags over a thumbnail insert their pages at that gap.
+    // They are not stopped: the app-wide target still sees the events, which
+    // keeps its overlay depth count balanced.
+    if (onExternalPdfDrop && isExternalFileDrag(e.dataTransfer)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      setExternalGap(dropGap(index, e.clientY < rect.top + rect.height / 2));
+      return;
+    }
+    // Otherwise only in-app page moves are handled here.
+    if (!isPageDrag(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setDropIndex(index);
-  }, []);
+    setDropGapIndex(dropGap(index, e.clientY < rect.top + rect.height / 2));
+  }, [onExternalPdfDrop]);
 
   const handleDrop = useCallback((e: React.DragEvent, toIndex: number) => {
+    if (onExternalPdfDrop && isExternalFileDrag(e.dataTransfer)) {
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const gap = dropGap(toIndex, e.clientY < rect.top + rect.height / 2);
+      setExternalGap(null);
+      // Claimed synchronously; the event still bubbles so the overlay resets.
+      onExternalPdfDrop(claimExternalDrop(e), gap);
+      return;
+    }
+    if (!isPageDrag(e)) return;
     e.preventDefault();
-    if (dragIndex !== null && dragIndex !== toIndex && onReorderPages) {
+    e.stopPropagation();
+    const moving = dragSetRef.current;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    let gap = dropGap(toIndex, e.clientY < rect.top + rect.height / 2);
+    const count = document?.pages.length ?? 0;
+    if (moving && !moving.includes(toIndex) && orderWithMove(count, moving, gap).every((src, i) => src === i)) {
+      // The half-based gap is the pages' current spot (e.g. page 1 dropped on the
+      // top half of page 2). Dropping onto a DIFFERENT page always means "put it
+      // there": past the target when dragging down, before it when dragging up.
+      gap = toIndex > moving[moving.length - 1] ? toIndex + 1 : toIndex;
+    }
+    if (moving && onMovePages) {
+      onMovePages(moving, gap);
+    } else if (dragIndex !== null && dragIndex !== toIndex && onReorderPages) {
       onReorderPages(dragIndex, toIndex);
     }
-    setDragIndex(null);
-    setDropIndex(null);
-  }, [dragIndex, onReorderPages]);
+    handleDragEnd();
+  }, [dragIndex, onMovePages, onReorderPages, handleDragEnd, document, onExternalPdfDrop]);
+
+  const handleThumbnailClick = useCallback((e: React.MouseEvent, index: number) => {
+    if (onPageClick) {
+      onPageClick(index, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey });
+    } else {
+      onPageSelect(index + 1);
+    }
+  }, [onPageClick, onPageSelect]);
+
+  const handlePagesKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && onSelectAll) {
+      e.preventDefault();
+      e.stopPropagation();
+      onSelectAll();
+    } else if (e.key === 'Delete' && onDeletePages && document) {
+      const targets = targetsFor(currentPage - 1);
+      e.preventDefault();
+      e.stopPropagation();
+      if (targets.length < document.pages.length) onDeletePages(targets);
+    }
+  }, [onSelectAll, onDeletePages, document, targetsFor, currentPage]);
 
   // Toggle outline item expansion
   const toggleOutlineItem = useCallback((path: number[]) => {
@@ -361,15 +481,35 @@ const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Pages Tab */}
       {activeTab === 'pages' && (
-        <div className="sidebar-content" ref={containerRef}>
-          {(document?.pages || []).map((page, index) => {
+        <div
+          className="sidebar-content pages-content"
+          ref={containerRef}
+          onDragLeave={(e) => {
+            // Leaving the thumbnail list (not just crossing into a child) clears the gap.
+            const next = e.relatedTarget as Node | null;
+            if (!next || !e.currentTarget.contains(next)) setExternalGap(null);
+          }}
+          tabIndex={0}
+          onKeyDown={handlePagesKeyDown}
+          aria-label="Page thumbnails"
+          aria-multiselectable={!!onPageClick}
+          role="listbox"
+        >
+          {(document?.pages || []).map((_page, index) => {
             const thumbnail = thumbnails[index];
+            const isSelected = selectedSet.has(index);
+            const showGap = dragIndex !== null && dropIndex === index && dropGapIndex !== null;
+            const extBefore = externalGap === index;
+            const extAfter = externalGap === index + 1 && index === (document?.pages.length ?? 0) - 1;
             return (
               <div
                 key={index}
-                className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${dropIndex === index && dragIndex !== index ? 'drop-target' : ''}`}
-                onClick={() => onPageSelect(index + 1)}
-                draggable={!!onReorderPages}
+                data-page-index={index}
+                role="option"
+                aria-selected={isSelected || currentPage === index + 1}
+                className={`page-thumbnail ${currentPage === index + 1 ? 'active' : ''} ${isSelected ? 'selected' : ''} ${dragIndex === index ? 'dragging-source' : ''} ${showGap && dropGapIndex === index ? 'drop-before' : ''} ${showGap && dropGapIndex === index + 1 ? 'drop-after' : ''} ${extBefore ? 'drop-before' : ''} ${extAfter ? 'drop-after' : ''}`}
+                onClick={(e) => handleThumbnailClick(e, index)}
+                draggable={!!(onMovePages || onReorderPages)}
                 onDragStart={(e) => handleDragStart(e, index)}
                 onDragEnd={handleDragEnd}
                 onDragOver={(e) => handleDragOver(e, index)}
@@ -377,25 +517,21 @@ const Sidebar: React.FC<SidebarProps> = ({
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
+                  // Right-clicking outside the selection retargets it to this page.
+                  if (onPageClick && !isSelected) onPageClick(index, { ctrl: false, shift: false });
                   setPageContextMenu({ isOpen: true, x: e.clientX, y: e.clientY, pageIndex: index + 1 });
                 }}
               >
                 {thumbnail ? (
-                  <img
-                    src={thumbnail}
-                    alt={`Page ${index + 1}`}
-                    style={{
-                      transform: page.rotation
-                        ? `rotate(${page.rotation}deg)`
-                        : undefined,
-                    }}
-                    draggable={false}
-                  />
+                  // The thumbnail is rendered by pdf.js from bytes that already
+                  // carry /Rotate, so it must not be rotated again with CSS.
+                  <img src={thumbnail} alt={`Page ${index + 1}`} draggable={false} />
                 ) : (
                   <div className="thumbnail-skeleton">
                     <div className="thumbnail-skeleton-shimmer" />
                   </div>
                 )}
+                {isSelected && selectedSet.size > 1 && <span className="page-select-badge">✓</span>}
                 <span className="page-number">{index + 1}</span>
               </div>
             );
@@ -528,58 +664,96 @@ const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Page Context Menu */}
-      {pageContextMenu.isOpen && (
-        <div
-          className="page-context-menu"
-          style={{ position: 'fixed', left: pageContextMenu.x, top: pageContextMenu.y, zIndex: 1000 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {onInsertBlankPage && (
-            <>
-              <button
-                className="context-menu-item"
-                onClick={() => {
-                  onInsertBlankPage(pageContextMenu.pageIndex - 1);
-                  setPageContextMenu(prev => ({ ...prev, isOpen: false }));
-                }}
-              >
-                Insert blank page before
+      {pageContextMenu.isOpen && (() => {
+        const clicked = pageContextMenu.pageIndex - 1;
+        const targets = targetsFor(clicked);
+        const many = targets.length > 1;
+        const label = many ? `${targets.length} pages` : 'page';
+        const total = document?.pages.length ?? 0;
+        const close = () => setPageContextMenu(prev => ({ ...prev, isOpen: false }));
+        const act = (fn: () => void) => () => { fn(); close(); };
+        const first = targets[0];
+        const last = targets[targets.length - 1];
+        return (
+          <div
+            className="page-context-menu"
+            role="menu"
+            style={{ position: 'fixed', left: pageContextMenu.x, top: pageContextMenu.y, zIndex: 1000 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {many && <div className="context-menu-header">{targets.length} pages selected</div>}
+            {onRotatePages && (
+              <>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onRotatePages(targets, -90))}>
+                  <RotateCcw size={13} /> Rotate {label} left
+                </button>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onRotatePages(targets, 90))}>
+                  <RotateCw size={13} /> Rotate {label} right
+                </button>
+              </>
+            )}
+            {onDuplicatePages && (
+              <button className="context-menu-item" role="menuitem" onClick={act(() => onDuplicatePages(targets))}>
+                <Copy size={13} /> Duplicate {label}
               </button>
-              <button
-                className="context-menu-item"
-                onClick={() => {
-                  onInsertBlankPage(pageContextMenu.pageIndex);
-                  setPageContextMenu(prev => ({ ...prev, isOpen: false }));
-                }}
-              >
-                Insert blank page after
+            )}
+            {onCropPages && (
+              <button className="context-menu-item" role="menuitem" onClick={act(() => onCropPages(targets))}>
+                <Crop size={13} /> Crop {label}…
               </button>
-            </>
-          )}
-          {onReplacePage && (
-            <button
-              className="context-menu-item"
-              onClick={() => {
-                onReplacePage(pageContextMenu.pageIndex);
-                setPageContextMenu(prev => ({ ...prev, isOpen: false }));
-              }}
-            >
-              Replace page...
-            </button>
-          )}
-          {onDeletePage && document && document.pageCount > 1 && (
-            <button
-              className="context-menu-item danger"
-              onClick={() => {
-                onDeletePage(pageContextMenu.pageIndex);
-                setPageContextMenu(prev => ({ ...prev, isOpen: false }));
-              }}
-            >
-              Delete page
-            </button>
-          )}
-        </div>
-      )}
+            )}
+            {onExtractPages && (
+              <button className="context-menu-item" role="menuitem" onClick={act(() => onExtractPages(targets))}>
+                <FileOutput size={13} /> Extract {label} to new PDF…
+              </button>
+            )}
+            <div className="context-menu-separator" />
+            {onInsertBlankPage && (
+              <>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onInsertBlankPage(first))}>
+                  <FilePlus2 size={13} /> Insert blank page before
+                </button>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onInsertBlankPage(last + 1))}>
+                  <FilePlus2 size={13} /> Insert blank page after
+                </button>
+              </>
+            )}
+            {onInsertPdfAt && (
+              <>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onInsertPdfAt(first))}>
+                  <FileInput size={13} /> Insert pages from PDF before…
+                </button>
+                <button className="context-menu-item" role="menuitem" onClick={act(() => onInsertPdfAt(last + 1))}>
+                  <FileInput size={13} /> Insert pages from PDF after…
+                </button>
+              </>
+            )}
+            {onReplacePage && !many && (
+              <button className="context-menu-item" role="menuitem" onClick={act(() => onReplacePage(pageContextMenu.pageIndex))}>
+                <Replace size={13} /> Replace page…
+              </button>
+            )}
+            {(onDeletePages || onDeletePage) && (
+              <>
+                <div className="context-menu-separator" />
+                <button
+                  className="context-menu-item danger"
+                  role="menuitem"
+                  disabled={targets.length >= total}
+                  title={targets.length >= total ? 'A document must keep at least one page' : undefined}
+                  onClick={act(() => {
+                    if (onDeletePages) onDeletePages(targets);
+                    else onDeletePage?.(pageContextMenu.pageIndex);
+                  })}
+                >
+                  <Trash2 size={13} /> Delete {label}
+                </button>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
 
       {/* Resize handle */}
       <div

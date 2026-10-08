@@ -1,6 +1,8 @@
 import React, { useState, useCallback } from 'react';
 import Modal from './Modal';
 import { Plus, Trash2, ArrowUp, ArrowDown, Loader2 } from 'lucide-react';
+import { useDropZone } from '../hooks/useFileDrop';
+import type { DropResult } from '../../shared/ipc';
 
 interface FileItem {
   path: string;
@@ -44,6 +46,42 @@ const MergePdfsDialog: React.FC<MergePdfsDialogProps> = ({
       setError('Failed to add files');
     }
   }, []);
+
+  // Trusted OS drops: the records are exactly-blessed files, so their bytes
+  // are read through the same path-confined read as the Add Files dialog.
+  const handleDroppedFiles = useCallback(async (claim: Promise<DropResult>, droppedCount: number) => {
+    try {
+      const result = await claim;
+      const pdfRecords = result.files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+      const added: FileItem[] = [];
+      let skipped = result.rejected + (result.files.length - pdfRecords.length);
+      for (const record of pdfRecords) {
+        const fileData = await window.electronAPI.readFileByPath(record.path);
+        if (fileData) {
+          added.push({ path: fileData.path, name: record.name, data: fileData.data });
+        } else {
+          skipped++;
+        }
+      }
+      if (added.length > 0) {
+        setFiles((prev) => {
+          const existingPaths = new Set(prev.map((f) => f.path));
+          return [...prev, ...added.filter((f) => !existingPaths.has(f.path))];
+        });
+      }
+      if (droppedCount > 0 && added.length === 0) {
+        setError('Only PDF files can be merged');
+      } else if (skipped > 0) {
+        setError(`${skipped} dropped file(s) skipped: only PDF files can be merged`);
+      } else {
+        setError(null);
+      }
+    } catch {
+      setError('Failed to add dropped files');
+    }
+  }, []);
+
+  const { isOver, bindings: dropBindings } = useDropZone(handleDroppedFiles, loading);
 
   const handleRemoveFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
@@ -93,17 +131,20 @@ const MergePdfsDialog: React.FC<MergePdfsDialogProps> = ({
   }, [onClose]);
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Merge PDFs" width="600px">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Merge PDFs" width="600px" dropZone={dropBindings}>
       <div className="merge-dialog">
         <p className="dialog-description">
-          Select PDF files to merge. Drag to reorder, then click Merge.
+          Add PDF files (or drop them here), order them, then click Merge.
         </p>
 
-        <div className="file-list-container">
+        <div
+          className={`file-list-container ${isOver ? 'drop-zone-active' : ''}`}
+          data-testid="merge-drop-zone"
+        >
           {files.length === 0 ? (
             <div className="file-list-empty">
               <p>No files added yet</p>
-              <p className="text-muted">Click "Add Files" to select PDFs</p>
+              <p className="text-muted">Click "Add Files" or drop PDFs here</p>
             </div>
           ) : (
             <div className="file-list">

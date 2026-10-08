@@ -26,15 +26,31 @@ import StagingScreen, { StagedDocument } from './components/StagingScreen';
 import SettingsDialog from './components/SettingsDialog';
 import OnboardingTour from './components/OnboardingTour';
 import FormDataPanel from './components/FormDataPanel';
+import StampingDialog from './components/StampingDialog';
+import RedactionToolbar from './components/RedactionToolbar';
+import FormDesignerPanel from './components/FormDesignerPanel';
+import FormFieldOverlay from './components/FormFieldOverlay';
+import FlattenDialog from './components/FlattenDialog';
+import CompressDialog from './components/CompressDialog';
+import { useFormDesigner } from './hooks/useFormDesigner';
+import { useFinalizeActions } from './hooks/useFinalizeActions';
+import type { FlattenScope } from './utils/flatten';
+import DropOverlay from './components/DropOverlay';
+import CropPagesDialog from './components/CropPagesDialog';
+import { usePageSelection } from './hooks/usePageSelection';
+import { formatPageRange } from './utils/pageSelectionModel';
+import type { CropMargins } from './utils/pageStructure';
 import { ToastContainer, useToast } from './components/Toast';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
 import { reEncryptIfProtected } from './utils/pdfEncryption';
 import { isPdf, isConvertibleToPdf } from './utils/supportedFormats';
+import { useAppFileDrop } from './hooks/useFileDrop';
 import '../shared/ipc';
+import type { DropResult } from '../shared/ipc';
 
-export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature';
+export type Tool = 'select' | 'text' | 'highlight' | 'image' | 'erase' | 'draw' | 'shape' | 'note' | 'stamp' | 'signature' | 'markup' | 'redact' | 'form';
 
 // Helper to convert Uint8Array to base64
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -74,6 +90,7 @@ const App: React.FC = () => {
   const [passwordIncorrect, setPasswordIncorrect] = useState(false);
   const [encryptionDialogOpen, setEncryptionDialogOpen] = useState(false);
   const [encryptionDialogTabId, setEncryptionDialogTabId] = useState<string | null>(null);
+  const [stampingDialogOpen, setStampingDialogOpen] = useState(false);
   const [pendingPasswordFile, setPendingPasswordFile] = useState<{ path: string; data: string; fileName?: string } | null>(null);
 
   // A non-PDF document opened for conversion (staged, not rendered).
@@ -117,11 +134,14 @@ const App: React.FC = () => {
     addShape,
     addStickyNote,
     addStamp,
+    addTextMarkup,
+    addRedactionMark,
+    markSearchResults,
+    applyRedactionMarks,
     insertBlankPage,
     replacePage,
     deletePage,
     reorderPages,
-    rotatePage,
     undo,
     redo,
     canUndo,
@@ -140,7 +160,45 @@ const App: React.FC = () => {
     setAnnotationStorage,
     // Encryption
     setPendingEncryption,
+    // Page tools
+    deletePages,
+    duplicatePages,
+    movePages,
+    rotatePages,
+    cropPages,
+    insertPdfPagesAt,
+    applyDocumentTransform,
   } = usePDFDocument();
+
+  // Thumbnail multi-selection (0-based); page tools act on pageSelection.effective.
+  const pageSelection = usePageSelection(document, activeTabId, currentPage, setCurrentPage);
+  const [cropDialogPages, setCropDialogPages] = useState<number[] | null>(null);
+
+  // Forms + Finalize: form authoring tool, flatten, compress
+  const [flattenDialog, setFlattenDialog] = useState<{ open: boolean; scope: FlattenScope }>({ open: false, scope: 'both' });
+  const [compressDialogOpen, setCompressDialogOpen] = useState(false);
+  const formDesigner = useFormDesigner({
+    pdfData: document?.pdfData,
+    active: currentTool === 'form' && !!document,
+    applyDocumentTransform,
+    onError: toast.error,
+  });
+  const { flatten, analyzeCompress, applyCompress } = useFinalizeActions(applyDocumentTransform);
+  const handleFlatten = useCallback(async (scope: FlattenScope) => {
+    const result = await flatten(scope);
+    if (!result) return;
+    const { report } = result;
+    const parts = [
+      report.widgetsFlattened ? `${report.widgetsFlattened} form widget${report.widgetsFlattened === 1 ? '' : 's'}` : '',
+      report.annotationsFlattened + result.pendingAnnotationsBurned
+        ? `${report.annotationsFlattened + result.pendingAnnotationsBurned} annotation${report.annotationsFlattened + result.pendingAnnotationsBurned === 1 ? '' : 's'}`
+        : '',
+    ].filter(Boolean);
+    toast.success(parts.length ? `Flattened ${parts.join(' and ')}` : 'Nothing to flatten');
+    const kept = report.annotationsWithoutAppearance;
+    if (kept > 0) toast.warning(`${kept} annotation${kept === 1 ? ' has' : 's have'} no appearance to burn in and ${kept === 1 ? 'was' : 'were'} kept`);
+    if (report.appearanceFailures > 0) toast.warning(`${report.appearanceFailures} field appearance${report.appearanceFailures === 1 ? '' : 's'} could not be regenerated; the stored appearance was used`);
+  }, [flatten, toast]);
 
   // Refresh the recent files list
   const refreshRecentFiles = useCallback(async () => {
@@ -464,47 +522,9 @@ const App: React.FC = () => {
     // Force re-render by toggling a state (the form fields will reload from PDF defaults)
   }, [toast]);
 
-  const handleFlattenForm = useCallback(async () => {
-    if (!document) return;
-    const confirmed = window.confirm(
-      'Flattening will convert all form fields to static content. This cannot be undone. Continue?'
-    );
-    if (!confirmed) return;
-
-    try {
-      const { PDFDocument: PDFLibDoc } = await import('pdf-lib');
-      const pdfDoc = await PDFLibDoc.load(document.pdfData);
-
-      // Save current form values first
-      if (annotationStorageRef.current && formFieldMappings.length > 0) {
-        const { saveFormFieldValues } = await import('./utils/formFieldSaver');
-        await saveFormFieldValues(pdfDoc, annotationStorageRef.current, formFieldMappings);
-      }
-
-      const form = pdfDoc.getForm();
-      form.flatten();
-
-      const flattenedPlaintext = await pdfDoc.save();
-      const flattenedBytes = await reEncryptIfProtected(new Uint8Array(flattenedPlaintext), document);
-      const base64 = uint8ArrayToBase64(flattenedBytes);
-
-      const result = await window.electronAPI.saveFileDialog(
-        base64,
-        document.fileName.replace(/\.pdf$/i, '_flattened.pdf')
-      );
-      if (result.success && result.path) {
-        toast.success('Form flattened successfully');
-        // Open the flattened file
-        const fileData = await window.electronAPI.readFileByPath(result.path);
-        if (fileData) {
-          await openFile(fileData.path, fileData.data);
-        }
-      }
-    } catch (error) {
-      console.error('Failed to flatten form:', error);
-      toast.error('Failed to flatten form');
-    }
-  }, [document, formFieldMappings, toast, openFile]);
+  const handleFlattenForm = useCallback(() => {
+    setFlattenDialog({ open: true, scope: 'forms' });
+  }, []);
 
   const handleImportFormData = useCallback(async () => {
     if (!annotationStorageRef.current || formFieldMappings.length === 0) {
@@ -550,48 +570,79 @@ const App: React.FC = () => {
     pdfViewerRef.current?.scrollToField(pageIndex, rect);
   }, []);
 
-  // A drop hands us the File (bytes), not a trusted path. Read the bytes in the
-  // renderer via FileReader — this works under path confinement (ENFORCE) with
-  // no main-process path read, and can't be abused: the renderer can only read
-  // Files the OS actually dropped. The path (if present) is display metadata
-  // only; a dropped file saves via Save As (its dir isn't blessed).
-  const handleFileDrop = useCallback(async (file: File) => {
-    const fileName = file.name;
-    const displayPath = (file as unknown as { path?: string }).path || fileName;
-    const readAsBase64 = (f: File) =>
-      new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(uint8ArrayToBase64(new Uint8Array(reader.result as ArrayBuffer)));
-        reader.onerror = () => reject(reader.error ?? new Error('Failed to read dropped file'));
-        reader.readAsArrayBuffer(f);
-      });
-
+  // External files dropped from the OS. The preload turns a TRUSTED drop into
+  // main-validated, exactly-blessed {path, name} records (see preload.ts), so
+  // a dropped PDF opens through the same path-based read as File -> Open and
+  // saves back in place; a dropped document can be converted in place.
+  const handleExternalDrop = useCallback(async (claim: Promise<DropResult>, droppedCount: number) => {
+    let result: DropResult;
     try {
-      if (isPdf(fileName)) {
-        const base64 = await readAsBase64(file);
-        setStagedDocument(null);
-        try {
-          await openFile(displayPath, base64);
-        } catch (error: any) {
-          if (!handlePasswordError(error, displayPath, base64)) {
-            toast.error('Failed to open file');
-          }
-        }
-      } else if (isConvertibleToPdf(fileName)) {
-        // Converting a document runs LibreOffice against a real on-disk path.
-        // A drop gives us only bytes (its filesystem location is untrusted and
-        // unblessed), so direct the user through File -> Open, which blesses the
-        // chosen directory and then converts. (Materializing dropped bytes into
-        // a temp dir was removed — it caused converted edits to be reaped on
-        // quit and handed the renderer an arbitrary-format LibreOffice input.)
-        toast.info(`Use File → Open to convert "${fileName}" to PDF`);
-      } else {
-        toast.error('Unsupported file type');
-      }
+      result = await claim;
     } catch {
-      toast.error('Failed to read dropped file');
+      toast.error('Failed to read dropped files');
+      return;
     }
-  }, [openFile, toast, handlePasswordError]);
+
+    if (result.files.length === 0) {
+      if (droppedCount > 0) {
+        toast.error(droppedCount === 1
+          ? 'That file cannot be opened. Drop a PDF or a Word, Excel or PowerPoint file.'
+          : 'None of the dropped files can be opened.');
+      }
+      return;
+    }
+
+    const pdfs = result.files.filter((f) => isPdf(f.path));
+    const documents = result.files.filter((f) => isConvertibleToPdf(f.path));
+    let failed = 0;
+    const needsPassword: Array<{ path: string; data: string }> = [];
+
+    // Open sequentially: each PDF gets its own tab and openFile's per-path
+    // de-duplication sees the tabs opened before it.
+    for (const file of pdfs) {
+      const fileData = await window.electronAPI.readFileByPath(file.path);
+      if (!fileData) {
+        failed++;
+        continue;
+      }
+      setStagedDocument(null);
+      try {
+        await openFile(fileData.path, fileData.data);
+      } catch (error: any) {
+        if (error?.message === 'PASSWORD_REQUIRED') {
+          needsPassword.push({ path: fileData.path, data: fileData.data });
+        } else {
+          failed++;
+        }
+      }
+    }
+
+    if (documents.length === 1 && pdfs.length === 0) {
+      // A lone document is staged exactly like File -> Open would stage it.
+      stageDocument(documents[0].path);
+    } else if (documents.length > 0) {
+      // Several documents (or documents alongside PDFs): queue them all in the
+      // converter rather than letting a staging screen hide the opened tabs.
+      setConvertToPdfInitialFiles(documents.map((f) => f.path));
+      setConvertDialogOpen(true);
+    }
+
+    // One password prompt at a time: prompt for the first, report the rest.
+    if (needsPassword.length > 0) {
+      const first = needsPassword[0];
+      handlePasswordError({ message: 'PASSWORD_REQUIRED' }, first.path, first.data);
+      if (needsPassword.length > 1) {
+        toast.warning(`${needsPassword.length - 1} more password-protected file(s) were not opened. Drop them again after this one.`);
+      }
+    }
+
+    const skipped = failed + result.rejected;
+    if (skipped > 0) {
+      toast.warning(`${skipped} dropped file${skipped === 1 ? ' was' : 's were'} skipped (unsupported or unreadable)`);
+    }
+  }, [openFile, toast, handlePasswordError, stageDocument]);
+
+  const fileDragActive = useAppFileDrop(handleExternalDrop);
 
   // What's currently open drives the contextual tools panel and main view.
   // Staged (non-PDF) documents take priority over an open PDF.
@@ -603,23 +654,33 @@ const App: React.FC = () => {
     switchTab(tabId);
   }, [switchTab]);
 
+  const pendingRedactionMarks = useMemo(
+    () => document?.pages.reduce((n, p) => n + p.annotations.filter((a) => a.type === 'redaction').length, 0) ?? 0,
+    [document]
+  );
+
   const handleSave = useCallback(async () => {
+    if (pendingRedactionMarks > 0) {
+      // Unapplied marks are saved as /Redact annotations; nothing is removed yet.
+      toast.warning(`${pendingRedactionMarks} redaction mark${pendingRedactionMarks === 1 ? ' is' : 's are'} not applied: the content under them is still in the file. Use Redact > Apply redactions to remove it.`);
+    }
     try {
       if (document?.filePath) {
         try {
           await saveFile();
           toast.success('Document saved successfully');
         } catch (error: any) {
-          // A document opened by drag-and-drop has a real but unblessed path, so
-          // an in-place save is denied by path confinement. Fall back to Save As
-          // (its dialog blesses the chosen directory) instead of just failing.
+          // A document whose path is no longer permitted (e.g. one restored from
+          // auto-recovery, whose original location was never blessed this
+          // session) is denied an in-place save by path confinement. Fall back
+          // to Save As (its dialog blesses the chosen directory) instead of
+          // failing. Trusted drops are exactly blessed and save in place.
           // Match the EXACT confinement sentinels — a loose 'not permitted'
           // substring would also swallow Node's EPERM ("operation not permitted",
           // e.g. a read-only/locked file), mis-routing a real error to Save As.
           const msg = typeof error?.message === 'string' ? error.message : '';
           const isConfinementDenial = msg === 'Path not permitted' || msg === 'File type not permitted';
           if (isConfinementDenial) {
-            // dropped file: no blessed path, save via dialog
             if (await saveFileAs()) toast.success('Document saved successfully');
           } else {
             throw error;
@@ -635,7 +696,7 @@ const App: React.FC = () => {
       toast.error('Failed to save document');
       console.error('Save error:', error);
     }
-  }, [document, saveFile, saveFileAs, toast]);
+  }, [document, saveFile, saveFileAs, toast, pendingRedactionMarks]);
 
   const handlePrint = useCallback(() => {
     if (document) {
@@ -717,22 +778,33 @@ const App: React.FC = () => {
     }
   }, [document, currentPage, addImage]);
 
+  /** Run a page tool, surfacing failures (encrypted source, concurrent edit, ...) as a toast. */
+  const runPageTool = useCallback(async <T,>(label: string, op: () => Promise<T>): Promise<T | undefined> => {
+    try {
+      return await op();
+    } catch (error) {
+      console.error(`${label} failed:`, error);
+      toast.error(`${label} failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return undefined;
+    }
+  }, [toast]);
+
+  // Toolbar/menu rotate acts on the thumbnail selection (or the current page).
   const handleRotatePage = useCallback(
     (clockwise: boolean) => {
-      if (document) {
-        rotatePage(currentPage, clockwise ? 90 : -90);
-      }
+      if (!document) return;
+      void runPageTool('Rotate', () => rotatePages(pageSelection.effective, clockwise ? 90 : -90));
     },
-    [document, currentPage, rotatePage]
+    [document, runPageTool, rotatePages, pageSelection.effective]
   );
 
-  const handleRotateAllPages = useCallback(() => {
+  // One structural op and one undo step (looping rotatePage queued N ops and N history entries).
+  const handleRotateAllPages = useCallback(async () => {
     if (!document) return;
-    for (let i = 1; i <= document.pageCount; i++) {
-      rotatePage(i, 90);
-    }
-    toast.success('All pages rotated');
-  }, [document, rotatePage, toast]);
+    const all = document.pages.map((_, i) => i);
+    const done = await runPageTool('Rotate all pages', () => rotatePages(all, 90));
+    if (done) toast.success('All pages rotated');
+  }, [document, runPageTool, rotatePages, toast]);
 
   const handleReplacePage = useCallback(async (pageIndex: number) => {
     if (!document) return;
@@ -881,6 +953,92 @@ const App: React.FC = () => {
       throw new Error(`Failed to extract pages: ${(error as Error).message}`);
     }
   }, [document, toast]);
+
+  // ---- Page tools (sidebar selection, context menu, tools panel) ----
+  const handleDeletePages = useCallback(async (indices: number[]) => {
+    if (!document) return;
+    if (indices.length >= document.pages.length) {
+      toast.error('A document must keep at least one page');
+      return;
+    }
+    const focus = await runPageTool('Delete pages', () => deletePages(indices));
+    if (focus) pageSelection.select(focus);
+  }, [document, runPageTool, deletePages, pageSelection, toast]);
+
+  const handleDuplicatePages = useCallback(async (indices: number[]) => {
+    const copies = await runPageTool('Duplicate pages', () => duplicatePages(indices));
+    if (copies && copies.length > 0) {
+      pageSelection.select(copies);
+      toast.success(`Duplicated ${copies.length} page${copies.length === 1 ? '' : 's'}`);
+    }
+  }, [runPageTool, duplicatePages, pageSelection, toast]);
+
+  const handleMovePages = useCallback(async (indices: number[], beforeIndex: number) => {
+    const moved = await runPageTool('Move pages', () => movePages(indices, beforeIndex));
+    if (moved && moved.length > 0) pageSelection.select(moved);
+  }, [runPageTool, movePages, pageSelection]);
+
+  const handleRotatePages = useCallback((indices: number[], delta: number) => {
+    void runPageTool('Rotate', () => rotatePages(indices, delta));
+  }, [runPageTool, rotatePages]);
+
+  // Reuses the Extract Pages flow (same copy, re-encryption and save dialog).
+  const handleExtractSelectedPages = useCallback((indices: number[]) => {
+    if (indices.length === 0) return;
+    void runPageTool('Extract pages', () => handleExtractPages(formatPageRange(indices)));
+  }, [runPageTool, handleExtractPages]);
+
+  const handleCropPages = useCallback(async (indices: number[], margins: CropMargins | null) => {
+    // Errors propagate to the dialog, which shows them inline.
+    await cropPages(indices, margins);
+    toast.success(margins ? `Cropped ${indices.length} page${indices.length === 1 ? '' : 's'}` : 'Crop removed');
+  }, [cropPages, toast]);
+
+  /** Pick a PDF and insert all of its pages into gap `beforeIndex` (0..pageCount). */
+  const handleInsertPdfAt = useCallback(async (beforeIndex: number) => {
+    if (!document) return;
+    await runPageTool('Insert pages', async () => {
+      const picked = await window.electronAPI.pickPdfFile();
+      if (!picked) return;
+      const raw = await window.electronAPI.readFileRaw(picked);
+      if (!raw) throw new Error('Could not read the selected file');
+      const inserted = await insertPdfPagesAt(beforeIndex, new Uint8Array(raw));
+      if (inserted.length > 0) {
+        pageSelection.select(inserted);
+        toast.success(`Inserted ${inserted.length} page${inserted.length === 1 ? '' : 's'}`);
+      }
+    });
+  }, [document, runPageTool, insertPdfPagesAt, pageSelection, toast]);
+
+  /**
+   * External PDFs dropped onto the sidebar thumbnails: insert every page of
+   * each, in drop order, into gap `beforeIndex`. The files come from the trusted
+   * drop claim (main-blessed), never from a renderer-supplied path.
+   */
+  const handleThumbnailPdfDrop = useCallback(async (claim: Promise<DropResult>, beforeIndex: number) => {
+    if (!document) return;
+    await runPageTool('Insert pages', async () => {
+      const result = await claim;
+      const pdfs = result.files.filter((f) => isPdf(f.path));
+      const skipped = result.rejected + (result.files.length - pdfs.length);
+      const allInserted: number[] = [];
+      let at = beforeIndex;
+      for (const file of pdfs) {
+        const raw = await window.electronAPI.readFileRaw(file.path);
+        if (!raw) throw new Error(`Could not read ${file.name}`);
+        const inserted = await insertPdfPagesAt(at, new Uint8Array(raw));
+        allInserted.push(...inserted);
+        at += inserted.length;
+      }
+      if (allInserted.length > 0) {
+        pageSelection.select(allInserted);
+        toast.success(`Inserted ${allInserted.length} page${allInserted.length === 1 ? '' : 's'}`);
+      }
+      if (skipped > 0) {
+        toast.warning(`${skipped} dropped file${skipped === 1 ? ' was' : 's were'} skipped: only PDFs can be inserted as pages`);
+      }
+    });
+  }, [document, runPageTool, insertPdfPagesAt, pageSelection, toast]);
 
   // Extract images handler
   const handleExtractImages = useCallback(async (outputDir: string): Promise<{ count: number; folder: string }> => {
@@ -1296,24 +1454,9 @@ const App: React.FC = () => {
     handleCloseTab,
   ]);
 
-  // Prevent default drag behavior
-  useEffect(() => {
-    const preventDefaultDrag = (e: DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-
-    window.document.addEventListener('dragover', preventDefaultDrag);
-    window.document.addEventListener('drop', preventDefaultDrag);
-
-    return () => {
-      window.document.removeEventListener('dragover', preventDefaultDrag);
-      window.document.removeEventListener('drop', preventDefaultDrag);
-    };
-  }, []);
-
   return (
     <div className="app-container">
+      <DropOverlay visible={fileDragActive} />
       <UpdateNotification />
       <Toolbar
         currentTool={currentTool}
@@ -1337,7 +1480,7 @@ const App: React.FC = () => {
         onRotateCW={() => handleRotatePage(true)}
         onRotateCCW={() => handleRotatePage(false)}
         onDeleteSelected={handleDeleteSelected}
-        onDeletePage={() => document && deletePage(currentPage)}
+        onDeletePage={() => document && handleDeletePages(pageSelection.effective)}
         onToggleSidebar={() => setSidebarVisible(prev => !prev)}
         sidebarVisible={sidebarVisible}
         pageCount={document?.pageCount}
@@ -1355,6 +1498,17 @@ const App: React.FC = () => {
         style={annotationStyle}
         onStyleChange={handleStyleChange}
       />
+
+      {currentTool === 'redact' && document && (
+        <RedactionToolbar
+          style={annotationStyle}
+          onStyleChange={handleStyleChange}
+          markCount={pendingRedactionMarks}
+          onMarkSearch={markSearchResults}
+          onApply={applyRedactionMarks}
+          notify={toast}
+        />
+      )}
 
       <SearchBar
         isOpen={searchBarOpen}
@@ -1378,6 +1532,17 @@ const App: React.FC = () => {
           currentPage={currentPage}
           onPageSelect={setCurrentPage}
           onReorderPages={reorderPages}
+          selectedPages={pageSelection.selected}
+          onPageClick={pageSelection.click}
+          onSelectAll={pageSelection.selectAll}
+          onMovePages={handleMovePages}
+          onRotatePages={handleRotatePages}
+          onDuplicatePages={handleDuplicatePages}
+          onDeletePages={handleDeletePages}
+          onExtractPages={handleExtractSelectedPages}
+          onCropPages={(indices) => setCropDialogPages(indices)}
+          onExternalPdfDrop={handleThumbnailPdfDrop}
+          onInsertPdfAt={handleInsertPdfAt}
           onDeleteAnnotation={deleteAnnotation}
           onSelectAnnotation={(id) => setSelectedAnnotationId(id)}
           onInsertBlankPage={insertBlankPage}
@@ -1420,6 +1585,16 @@ const App: React.FC = () => {
               onFormFieldsDetected={handleFormFieldsDetected}
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
+              onAddTextMarkup={addTextMarkup}
+              onAddRedactionMark={addRedactionMark}
+              renderPageOverlay={currentTool === 'form'
+                ? (pageIndex, scale) => <FormFieldOverlay pageIndex={pageIndex} scale={scale} designer={formDesigner} />
+                : undefined}
+            />
+            <FormDesignerPanel
+              visible={currentTool === 'form'}
+              designer={formDesigner}
+              onClose={() => handleToolChange('select')}
             />
             {formFieldCount > 0 && !formPanelVisible && (
               <div
@@ -1444,7 +1619,6 @@ const App: React.FC = () => {
               setConvertToDocxInitialMode('batch');
               setConvertToDocxDialogOpen(true);
             }}
-            onFileDropped={handleFileDrop}
             recentFiles={recentFiles}
             onOpenRecentFile={handleOpenRecentFile}
             onClearRecentFiles={handleClearRecentFiles}
@@ -1461,11 +1635,17 @@ const App: React.FC = () => {
           onExtractPages={() => setExtractPagesDialogOpen(true)}
           onExtractImages={() => setExtractImagesDialogOpen(true)}
           onRotateAll={handleRotateAllPages}
+          onDuplicatePages={() => handleDuplicatePages(pageSelection.effective)}
+          onCropPages={() => setCropDialogPages(pageSelection.effective)}
+          onInsertPdfPages={() => handleInsertPdfAt((pageSelection.effective[pageSelection.effective.length - 1] ?? -1) + 1)}
           onConvertToPdf={() => { setConvertToPdfInitialFiles(undefined); setConvertDialogOpen(true); }}
           onConvertStagedToPdf={handleConvertStagedToPdf}
           onConvertFromPdf={() => setConvertFromDialogOpen(true)}
           onConvertToDocx={() => { setConvertToDocxInitialMode('single'); setConvertToDocxDialogOpen(true); }}
           onExportSvg={handleExportSvg}
+          onStampPages={() => setStampingDialogOpen(true)}
+          onFlatten={() => setFlattenDialog({ open: true, scope: 'both' })}
+          onCompress={() => setCompressDialogOpen(true)}
           libreOfficeAvailable={libreOfficeAvailable}
         />
 
@@ -1493,6 +1673,33 @@ const App: React.FC = () => {
       <ToastContainer toasts={toast.toasts} onDismiss={toast.dismissToast} />
 
       {/* Dialogs */}
+      {document && cropDialogPages && (
+        <CropPagesDialog
+          isOpen
+          onClose={() => setCropDialogPages(null)}
+          document={document}
+          initialPages={cropDialogPages}
+          onApply={handleCropPages}
+        />
+      )}
+      <FlattenDialog
+        isOpen={flattenDialog.open}
+        onClose={() => setFlattenDialog((d) => ({ ...d, open: false }))}
+        pdfData={document?.pdfData}
+        pendingAnnotationCount={document?.pages.reduce((n, p) => n + p.annotations.length, 0) ?? 0}
+        initialScope={flattenDialog.scope}
+        onFlatten={handleFlatten}
+      />
+      <CompressDialog
+        isOpen={compressDialogOpen}
+        onClose={() => setCompressDialogOpen(false)}
+        onAnalyze={analyzeCompress}
+        onApply={async (analysis) => {
+          const applied = await applyCompress(analysis);
+          if (applied) toast.success('Compression applied — save to write the smaller file');
+          return applied;
+        }}
+      />
       <MergePdfsDialog
         isOpen={mergeDialogOpen}
         onClose={() => setMergeDialogOpen(false)}
@@ -1523,6 +1730,18 @@ const App: React.FC = () => {
             onExtract={handleExtractImages}
             fileName={document.fileName}
             filePath={document.filePath || ''}
+          />
+
+          <StampingDialog
+            isOpen={stampingDialogOpen}
+            onClose={() => setStampingDialogOpen(false)}
+            pdfData={document.pdfData}
+            pageCount={document.pageCount}
+            fileName={document.fileName}
+            currentPage={currentPage}
+            applyDocumentTransform={applyDocumentTransform}
+            pickImage={() => window.electronAPI.openImageDialog()}
+            onDone={(message) => toast.success(message)}
           />
         </>
       )}

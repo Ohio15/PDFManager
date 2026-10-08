@@ -28,6 +28,11 @@ export interface FormFieldMapping {
   maxLen: number | null;
   defaultValue: string;
   rect: [number, number, number, number] | null;
+  /**
+   * Radio buttons: the on-state name of this widget. pdf.js stores a radio
+   * selection as a per-widget boolean, so this is what identifies the option.
+   */
+  buttonValue?: string;
 }
 
 export interface FormFieldStats {
@@ -94,6 +99,7 @@ export async function buildFormFieldMapping(
         maxLen,
         defaultValue: typeof defaultValue === 'string' ? defaultValue : '',
         rect,
+        ...(fieldType === 'radio' && typeof annot.buttonValue === 'string' ? { buttonValue: annot.buttonValue } : {}),
       });
     }
   }
@@ -130,6 +136,8 @@ export async function saveFormFieldValues(
   }
 
   let didWrite = false;
+  // Radio groups the user touched → whether any widget ended up selected.
+  const radioTouched = new Map<string, boolean>();
 
   for (const [annotId, storedData] of Object.entries(allValues)) {
     const mapping = mappingById.get(annotId);
@@ -170,12 +178,28 @@ export async function saveFormFieldValues(
         case 'radio': {
           try {
             const field = form.getRadioGroup(mapping.fieldName);
-            if (field && typeof value === 'string' && value) {
+            if (!field) break;
+            if (typeof value === 'boolean') {
+              radioTouched.set(mapping.fieldName, (radioTouched.get(mapping.fieldName) ?? false) || value);
+            }
+            if (value === true && mapping.buttonValue) {
+              // pdf.js: { value: true } on the selected widget. Select by the
+              // widget's on-state, which is what /V must name.
+              const onValue = field.acroField
+                .getOnValues()
+                .find((name) => name.decodeText() === mapping.buttonValue);
+              if (onValue) {
+                field.acroField.setValue(onValue);
+                form.markFieldAsDirty(field.ref);
+                didWrite = true;
+              }
+            } else if (typeof value === 'string' && value) {
+              // Imported form data carries the option label.
               field.select(value);
               didWrite = true;
             }
-          } catch {
-            // Radio group might not exist
+          } catch (e) {
+            console.warn(`[FormFieldSaver] Failed to set radio "${mapping.fieldName}":`, e);
           }
           break;
         }
@@ -225,6 +249,20 @@ export async function saveFormFieldValues(
       }
     } catch (e) {
       console.warn(`[FormFieldSaver] Failed to set field "${mapping.fieldName}":`, e);
+    }
+  }
+
+  // Every widget of a touched group false → the user cleared the selection.
+  for (const [fieldName, anySelected] of radioTouched) {
+    if (anySelected) continue;
+    try {
+      const field = form.getRadioGroup(fieldName);
+      if (field.getSelected() !== undefined) {
+        field.clear();
+        didWrite = true;
+      }
+    } catch (e) {
+      console.warn(`[FormFieldSaver] Failed to clear radio "${fieldName}":`, e);
     }
   }
 

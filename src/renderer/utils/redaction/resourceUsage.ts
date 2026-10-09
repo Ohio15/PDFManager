@@ -29,7 +29,7 @@
  * content, excessive nesting) throws ResourceUsageUnknown: callers fail
  * closed (the engine rasterizes the page, the verifier reports a violation).
  */
-import { PDFContext, PDFDict, PDFName, PDFObject, PDFRef, PDFStream } from 'pdf-lib';
+import { PDFArray, PDFContext, PDFDict, PDFName, PDFNumber, PDFObject, PDFRef, PDFStream } from 'pdf-lib';
 import { ContentOp, Operand, parseContent } from './contentTokenizer';
 import { decodeStreamStrict, dictGet, getArray, getDict, getName, getNumber, getStream, resolve } from './pdfObjects';
 
@@ -228,56 +228,68 @@ function showsGlyphs(op: ContentOp): boolean {
   return op.operands.some(hasBytes);
 }
 
-const STANDARD_14 = new Set([
-  'Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique',
-  'Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic',
-  'Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique', 'Symbol', 'ZapfDingbats',
-]);
-const NEUTRAL_FONT_KEYS = new Set(['Type', 'Subtype', 'BaseFont', 'Encoding']);
-
 /**
- * A font dictionary that carries no data of its own: a standard-14 Type1
- * font with no descriptor, widths, ToUnicode or font program. Structural, so
- * it cannot be forged into carrying anything.
+ * Neutral stand-ins. A font only SELECTED by a `Tf` whose text was all
+ * removed, and a pattern only SELECTED by `scn` whose painting was all
+ * removed, stay bound (the operators remain valid) but to objects that carry
+ * nothing. The predicates below accept ONLY exactly what neutralFont() and
+ * neutralPattern() mint: the exact key set, each value a DIRECT scalar of the
+ * exact expected value, no indirect reference anywhere inside, no content. A
+ * dictionary from the input file passes only if it is byte-for-byte that
+ * stub, in which case it carries nothing either.
  */
-export function isNeutralFont(context: PDFContext, value: PDFObject | undefined): boolean {
-  const d = getDict(context, value);
-  if (!d) return false;
-  for (const [k] of d.entries()) if (!NEUTRAL_FONT_KEYS.has(k.decodeText())) return false;
-  const enc = d.get(PDFName.of('Encoding'));
-  return (
-    getName(context, dictGet(d, 'Subtype')) === 'Type1' &&
-    STANDARD_14.has(getName(context, dictGet(d, 'BaseFont')) ?? '') &&
-    (enc === undefined || enc instanceof PDFName)
-  );
-}
+const NEUTRAL_FONT_ENTRIES: ReadonlyArray<[string, string]> = [['Type', 'Font'], ['Subtype', 'Type1'], ['BaseFont', 'Helvetica']];
 
-/**
- * A tiling pattern that paints nothing and carries nothing: empty content,
- * no (or empty) resources. Structural, so it cannot be forged into carrying data.
- */
-export function isNeutralPattern(context: PDFContext, value: PDFObject | undefined): boolean {
-  const s = getStream(context, value);
-  if (!s || getNumber(context, dictGet(s.dict, 'PatternType')) !== 1) return false;
-  const res = getDict(context, dictGet(s.dict, 'Resources'));
-  if (res && res.entries().length > 0) return false;
-  try {
-    return decodeStreamStrict(s).every((b) => b === 0x20 || b === 0x0a || b === 0x0d || b === 0x09);
-  } catch {
-    return false;
-  }
-}
+const isName = (v: PDFObject | undefined, expected: string) => v instanceof PDFName && v.decodeText() === expected;
+const isNum = (v: PDFObject | undefined, expected: number) => v instanceof PDFNumber && v.asNumber() === expected;
 
-/** The data-free stand-in for a pattern that is selected but paints nothing. */
-export function neutralPattern(context: PDFContext): PDFRef {
-  return context.register(
-    context.stream('', { Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 1, 1], XStep: 1, YStep: 1, Resources: {} })
-  );
+/** Exactly the direct dictionary neutralFont() mints. An indirect reference is never neutral. */
+export function isNeutralFont(_context: PDFContext, value: PDFObject | undefined): boolean {
+  if (!(value instanceof PDFDict)) return false;
+  const entries = value.entries();
+  if (entries.length !== NEUTRAL_FONT_ENTRIES.length) return false;
+  return NEUTRAL_FONT_ENTRIES.every(([k, v]) => isName(value.get(PDFName.of(k)), v));
 }
 
 /** The data-free stand-in for a font that is selected but shows nothing. */
 export function neutralFont(context: PDFContext): PDFDict {
   return context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'Helvetica' });
+}
+
+/**
+ * Exactly the stream neutralPattern() mints: a reference to a tiling pattern
+ * stream with exactly these direct scalar entries (plus a direct /Length 0),
+ * an empty direct /Resources, no /Filter, and no content.
+ */
+export function isNeutralPattern(context: PDFContext, value: PDFObject | undefined): boolean {
+  if (!(value instanceof PDFRef)) return false;
+  const s = context.lookup(value);
+  if (!(s instanceof PDFStream)) return false;
+  const d = s.dict;
+  const allowed = new Set(['Type', 'PatternType', 'PaintType', 'TilingType', 'BBox', 'XStep', 'YStep', 'Resources', 'Length']);
+  for (const [k] of d.entries()) if (!allowed.has(k.decodeText())) return false;
+  const bbox = d.get(PDFName.of('BBox'));
+  const res = d.get(PDFName.of('Resources'));
+  const len = d.get(PDFName.of('Length'));
+  return (
+    isName(d.get(PDFName.of('Type')), 'Pattern') &&
+    isNum(d.get(PDFName.of('PatternType')), 1) &&
+    isNum(d.get(PDFName.of('PaintType')), 1) &&
+    isNum(d.get(PDFName.of('TilingType')), 1) &&
+    isNum(d.get(PDFName.of('XStep')), 1) &&
+    isNum(d.get(PDFName.of('YStep')), 1) &&
+    bbox instanceof PDFArray && bbox.size() === 4 && [0, 0, 1, 1].every((n, i) => isNum(bbox.get(i), n)) &&
+    res instanceof PDFDict && res.entries().length === 0 &&
+    (len === undefined || isNum(len, 0)) &&
+    s.getContents().length === 0
+  );
+}
+
+/** The data-free stand-in for a pattern that is selected but paints nothing. */
+export function neutralPattern(context: PDFContext): PDFRef {
+  return context.register(
+    context.stream(new Uint8Array(0), { Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 1, 1], XStep: 1, YStep: 1, Resources: {} })
+  );
 }
 
 /**

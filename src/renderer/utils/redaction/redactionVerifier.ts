@@ -45,7 +45,7 @@ import { PdfjsEnv, imageDataToRgba, openPdfjs } from './pdfjsEnv';
 import { scanPdfjsPage, UnexaminedReason } from './pdfjsScan';
 import { decodeStreamStrict, dictGet, getDict, getName, getNumber, numberArray, getStream } from './pdfObjects';
 import { auditResourceUse } from './resourceUsage';
-import { structTextForMcids, type RemovedObject } from './documentScrub';
+import { structTextForMcids, type RemovedObject, type StructNotExaminedReason } from './documentScrub';
 import { ResourceScope } from './resourceScope';
 import { concat } from './contentRedactor';
 import { foldForSearch } from './textSearch';
@@ -59,7 +59,25 @@ export type NotExaminedReason =
   | 'rescan-not-examined'
   | 'resource-usage-unknown'
   | 'stream-undecodable'
-  | 'content-unparseable';
+  | 'content-unparseable'
+  | StructNotExaminedReason
+  | 'depth-cap:string-scan'
+  | 'depth-cap:content-strings';
+
+/** Codes for things FOUND. Messages may describe content; codes never do. */
+export type ViolationCode =
+  | 'page-missing'
+  | 'glyph-under-mark'
+  | 'path-under-mark'
+  | 'image-under-mark'
+  | 'annotation-under-mark'
+  | 'term-extractable'
+  | 'rescan-finding'
+  | 'struct-text-under-mark'
+  | 'unused-binding'
+  | 'removed-object-present'
+  | 'xfa-present'
+  | 'term-in-document';
 
 export interface NotExaminedItem {
   /** 0-based page, or null for a document-level check. */
@@ -76,6 +94,8 @@ export interface VerificationResult {
   verdict: VerificationVerdict;
   /** Every failing message per page (found AND not examined); drives the raster escalation. */
   pageViolations: Map<number, string[]>;
+  /** The same failures as CODES (no content), in order; safe for reports and the UI. */
+  pageReasons: Map<number, string[]>;
   /** Document-level failures (found AND not examined). */
   globalViolations: string[];
   /** The checks that could not run, with named reasons. */
@@ -110,11 +130,25 @@ function pdfTextFromBytes(bytes: Uint8Array): string {
   return LATIN1.decode(bytes);
 }
 
-/** Every string operand (also inside arrays and dictionaries) of a parsed content stream. */
+/** Nesting limit for direct values in the term scans (deeper input is NOT EXAMINED). */
+const MAX_VALUE_DEPTH = 64;
+
+class DepthCapExceeded extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DepthCapExceeded';
+  }
+}
+
+/**
+ * Every string operand (also inside arrays and dictionaries) of a parsed
+ * content stream. Throws DepthCapExceeded rather than skip deeper operands.
+ */
 function contentStrings(data: Uint8Array): string[] {
   const out: string[] = [];
   const visit = (o: Operand | undefined, depth: number) => {
-    if (!o || depth > 32) return;
+    if (!o) return;
+    if (depth > MAX_VALUE_DEPTH) throw new DepthCapExceeded(`an operand nests deeper than ${MAX_VALUE_DEPTH} levels`);
     if (o.type === 'str') out.push(pdfTextFromBytes(o.bytes));
     else if (o.type === 'arr') for (const it of o.items) visit(it, depth + 1);
     else if (o.type === 'dict') for (const v of o.entries.values()) visit(v, depth + 1);
@@ -148,27 +182,31 @@ export async function verifyRedaction(
   removedObjects: RemovedObject[] = []
 ): Promise<VerificationResult> {
   const pageViolations = new Map<number, string[]>();
+  const pageReasons = new Map<number, string[]>();
   const globalViolations: string[] = [];
   const notExamined: NotExaminedItem[] = [];
   let found = 0;
   const checks = { glyphs: 0, paths: 0, images: 0, annotations: 0, pages: 0 };
-  const addPage = (p: number, msg: string) => {
+  const addPage = (p: number, msg: string, code: string) => {
     const list = pageViolations.get(p) ?? [];
     if (list.length < MAX_MESSAGES_PER_PAGE) list.push(msg);
     pageViolations.set(p, list);
+    const codes = pageReasons.get(p) ?? [];
+    if (!codes.includes(code)) codes.push(code);
+    pageReasons.set(p, codes);
   };
   /** Something was FOUND that must not be there. */
-  const violation = (p: number | null, msg: string) => {
+  const violation = (p: number | null, code: ViolationCode, msg: string) => {
     found++;
     if (p === null) globalViolations.push(msg);
-    else addPage(p, msg);
+    else addPage(p, msg, code);
   };
   /** A check could not run. */
   const unexamined = (p: number | null, reason: NotExaminedReason, detail: string) => {
     notExamined.push({ pageIndex: p, reason, detail });
     const msg = `Could not be verified [${reason}]: ${detail}`;
     if (p === null) globalViolations.push(msg);
-    else addPage(p, msg);
+    else addPage(p, msg, reason);
   };
   const fr = Math.round(fill.r * 255), fg = Math.round(fill.g * 255), fb = Math.round(fill.b * 255);
 
@@ -196,7 +234,7 @@ export async function verifyRedaction(
     try {
       for (const [pageIndex] of marksByPage) {
         if (pageIndex >= doc.numPages) {
-          violation(pageIndex, 'Page missing from output');
+          violation(pageIndex, 'page-missing', 'Page missing from output');
           continue;
         }
         const marks = coreMarks.get(pageIndex)!;
@@ -214,7 +252,7 @@ export async function verifyRedaction(
             const page = await doc.getPage(i);
             const tc = await page.getTextContent();
             const text = normalizeForSearch(tc.items.map((it) => ('str' in it ? it.str : '')).join(''));
-            for (const t of terms) if (text.includes(t)) violation(i - 1, `Search term still extractable from page ${i}`);
+            for (const t of terms) if (text.includes(t)) violation(i - 1, 'term-extractable', `Search term still extractable from page ${i}`);
           } catch (e) {
             unexamined(i - 1, 'pdfjs-error', `pdf.js could not extract the text of page ${i} (${(e as Error).message})`);
           }
@@ -241,7 +279,8 @@ export async function verifyRedaction(
 
     for (const g of scan.glyphs) {
       checks.glyphs++;
-      if (pointInAny(g.center, marks)) violation(pageIndex, `Text glyph "${g.unicode}" remains under a mark`);
+      // The message never names the glyph: it describes content under a mark.
+      if (pointInAny(g.center, marks)) violation(pageIndex, 'glyph-under-mark', 'A text glyph remains under a mark');
     }
     for (const path of scan.paths) {
       checks.paths++;
@@ -251,7 +290,7 @@ export async function verifyRedaction(
       const under = path.painted
         ? path.subpaths.some((sp) => polylineIntersectsAny(sp, marks))
         : path.subpaths.some((sp) => sp.some((p) => pointInAny(p, marks)));
-      if (under) violation(pageIndex, path.painted ? 'Vector path segments remain under a mark' : 'Vector path coordinates remain under a mark');
+      if (under) violation(pageIndex, 'path-under-mark', path.painted ? 'Vector path segments remain under a mark' : 'Vector path coordinates remain under a mark');
     }
     for (const img of scan.images) {
       if (!marks.some((m) => intersects(img.bounds, m))) continue;
@@ -280,14 +319,14 @@ export async function verifyRedaction(
           }
         }
       }
-      if (bad) violation(pageIndex, 'Image pixels under a mark are not redacted');
+      if (bad) violation(pageIndex, 'image-under-mark', 'Image pixels under a mark are not redacted');
     }
     const annots = (await page.getAnnotations()) as Array<{ rect?: number[]; subtype?: string }>;
     for (const a of annots) {
       if (!a.rect || a.rect.length !== 4) continue;
       checks.annotations++;
       const r: Rect = { x0: Math.min(a.rect[0], a.rect[2]), y0: Math.min(a.rect[1], a.rect[3]), x1: Math.max(a.rect[0], a.rect[2]), y1: Math.max(a.rect[1], a.rect[3]) };
-      if (marks.some((m) => intersects(r, m))) violation(pageIndex, `Annotation (${a.subtype ?? 'unknown'}) overlaps a mark`);
+      if (marks.some((m) => intersects(r, m))) violation(pageIndex, 'annotation-under-mark', `Annotation (${a.subtype ?? 'unknown'}) overlaps a mark`);
     }
     page.cleanup();
   }
@@ -305,7 +344,7 @@ export async function verifyRedaction(
     try {
       const data = pageContentBytes(lib, pageIndex);
       await redactContent(rc, data, new ResourceScope(lib.context, lib.getPage(pageIndex).node.Resources()), IDENTITY, []);
-      for (const f of rc.findings) violation(pageIndex, `Rescan: ${f}`);
+      for (const f of rc.findings) violation(pageIndex, 'rescan-finding', `Rescan: ${f}`);
       rescanned = true;
     } catch (e) {
       const why = e instanceof WholePageFallback ? e.reason : (e as Error).message;
@@ -315,9 +354,9 @@ export async function verifyRedaction(
     // nor content that no longer exists (it was removed or rasterized).
     if (rescanned) {
       const { touched, present } = rc.mcids!;
-      for (const hit of structTextForMcids(lib, lib.getPage(pageIndex).ref, (mcid) => touched.has(mcid) || !present.has(mcid), false)) {
-        violation(pageIndex, hit);
-      }
+      const struct = structTextForMcids(lib, lib.getPage(pageIndex).ref, (mcid) => touched.has(mcid) || !present.has(mcid), { apply: false });
+      for (const hit of struct.hits) violation(pageIndex, 'struct-text-under-mark', hit);
+      for (const n of struct.notExamined) unexamined(pageIndex, n.reason, n.detail);
     }
     // Bound but not used: the redacted-away original of a replaced image or
     // form, or a font / graphics state / property list only removed content used.
@@ -325,7 +364,7 @@ export async function verifyRedaction(
       const resources = lib.getPage(pageIndex).node.Resources();
       for (const f of auditResourceUse(lib.context, pageContentBytes(lib, pageIndex), resources, 'Page resources')) {
         if (f.kind === 'not-examined') unexamined(pageIndex, 'resource-usage-unknown', f.message);
-        else violation(pageIndex, f.message);
+        else violation(pageIndex, 'unused-binding', f.message);
       }
     } catch (e) {
       unexamined(pageIndex, 'resource-usage-unknown', `Resource check failed: ${(e as Error).message}`);
@@ -334,7 +373,7 @@ export async function verifyRedaction(
 
   // Removed objects must be gone from the file, not merely unlisted.
   for (const r of removedObjects) {
-    if (lib.context.lookup(r.ref) !== undefined) violation(null, `Removed ${r.kind} ${r.ref.toString()} is still present in the output`);
+    if (lib.context.lookup(r.ref) !== undefined) violation(null, 'removed-object-present', `Removed ${r.kind} ${r.ref.toString()} is still present in the output`);
   }
   // Annotations of a marked page under a mark, however they are reached.
   const markedPageRefs = new Map<string, Rect[]>();
@@ -349,16 +388,16 @@ export async function verifyRedaction(
     const r = numberArray(lib.context, dictGet(obj, 'Rect'));
     if (!r || r.length !== 4) continue;
     const rect: Rect = { x0: Math.min(r[0], r[2]), y0: Math.min(r[1], r[3]), x1: Math.max(r[0], r[2]), y1: Math.max(r[1], r[3]) };
-    if (marks.some((m) => intersects(rect, m))) violation(null, `Annotation ${ref.toString()} of a marked page overlaps a mark`);
+    if (marks.some((m) => intersects(rect, m))) violation(null, 'annotation-under-mark', `Annotation ${ref.toString()} of a marked page overlaps a mark`);
   }
   if (getDict(lib.context, lib.catalog.get(PDFName.of('AcroForm')))?.has(PDFName.of('XFA'))) {
-    violation(null, 'AcroForm /XFA (an unredacted copy of the form and its values) is still present');
+    violation(null, 'xfa-present', 'AcroForm /XFA (an unredacted copy of the form and its values) is still present');
   }
 
   if (mustBeAbsent.length) scanDocumentForTerms(lib, mustBeAbsent, violation, unexamined);
 
   const verdict: VerificationVerdict = found > 0 ? 'violations' : notExamined.length > 0 ? 'not-examined' : 'clean';
-  return { ok: verdict === 'clean', verdict, pageViolations, globalViolations, notExamined, checks };
+  return { ok: verdict === 'clean', verdict, pageViolations, pageReasons, globalViolations, notExamined, checks };
 }
 
 /**
@@ -373,7 +412,7 @@ export async function verifyRedaction(
 function scanDocumentForTerms(
   lib: PDFLib,
   mustBeAbsent: string[],
-  violation: (p: number | null, msg: string) => void,
+  violation: (p: number | null, code: ViolationCode, msg: string) => void,
   unexamined: (p: number | null, reason: NotExaminedReason, detail: string) => void
 ): void {
   const context = lib.context;
@@ -428,31 +467,46 @@ function scanDocumentForTerms(
             try {
               for (const s of contentStrings(data)) for (const n of contains(s)) hits.add(n);
             } catch (e) {
-              unexamined(null, 'content-unparseable', `Content stream ${where} could not be parsed to check its strings (${(e as Error).message})`);
+              if (e instanceof DepthCapExceeded) unexamined(null, 'depth-cap:content-strings', `Content stream ${where}: ${e.message}`);
+              else unexamined(null, 'content-unparseable', `Content stream ${where} could not be parsed to check its strings (${(e as Error).message})`);
             }
           }
-          for (const n of hits) violation(null, `Term "${n}" found in stream ${where}`);
+          for (const n of hits) violation(null, 'term-in-document', `Term "${n}" found in stream ${where}`);
         }
       }
     }
-    for (const n of scanStrings(obj, needles)) violation(null, `Term "${n}" in a string value of object ${where}`);
+    const strings = scanStrings(obj, needles);
+    for (const n of strings.found) violation(null, 'term-in-document', `Term "${n}" in a string value of object ${where}`);
+    if (strings.depthCapped) unexamined(null, 'depth-cap:string-scan', `Object ${where} nests direct values deeper than ${MAX_VALUE_DEPTH} levels`);
   }
 }
 
-/** Needles found in any string value under `obj` (dictionaries, arrays, stream dictionaries). */
-function scanStrings(obj: unknown, needles: string[], depth = 0, out = new Set<string>()): Set<string> {
-  if (depth > 8) return out;
-  if (obj instanceof PDFString || obj instanceof PDFHexString) {
-    const text = foldForSearch(obj.decodeText(), false);
-    for (const n of needles) if (text.includes(n)) out.add(n);
-  } else if (obj instanceof PDFDict) {
-    for (const [, v] of obj.entries()) scanStrings(v, needles, depth + 1, out);
-  } else if (obj instanceof PDFStream) {
-    scanStrings(obj.dict, needles, depth + 1, out);
-  } else if (obj instanceof PDFArray) {
-    for (let i = 0; i < obj.size(); i++) scanStrings(obj.get(i), needles, depth + 1, out);
-  }
-  return out;
+/**
+ * Needles found in any string value under `obj` (dictionaries, arrays, stream
+ * dictionaries; indirect references are separate objects, scanned on their
+ * own). Nesting beyond MAX_VALUE_DEPTH is reported, never treated as clean.
+ */
+function scanStrings(obj: unknown, needles: string[]): { found: Set<string>; depthCapped: boolean } {
+  const found = new Set<string>();
+  let depthCapped = false;
+  const visit = (o: unknown, depth: number) => {
+    if (depth > MAX_VALUE_DEPTH) {
+      depthCapped = true;
+      return;
+    }
+    if (o instanceof PDFString || o instanceof PDFHexString) {
+      const text = foldForSearch(o.decodeText(), false);
+      for (const n of needles) if (text.includes(n)) found.add(n);
+    } else if (o instanceof PDFDict) {
+      for (const [, v] of o.entries()) visit(v, depth + 1);
+    } else if (o instanceof PDFStream) {
+      visit(o.dict, depth + 1);
+    } else if (o instanceof PDFArray) {
+      for (let i = 0; i < o.size(); i++) visit(o.get(i), depth + 1);
+    }
+  };
+  visit(obj, 0);
+  return { found, depthCapped };
 }
 
 /** Concatenate a page's decoded content streams. Throws on undecodable content. */

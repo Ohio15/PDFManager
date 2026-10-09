@@ -41,6 +41,7 @@ import { usePageSelection } from './hooks/usePageSelection';
 import { formatPageRange } from './utils/pageSelectionModel';
 import type { CropMargins } from './utils/pageStructure';
 import { ToastContainer, useToast } from './components/Toast';
+import { MIN_MARK_SIZE } from './utils/redaction/geometry';
 import { PDFDocument, AnnotationStyle } from './types';
 import { usePDFDocument } from './hooks/usePDFDocument';
 import { PDFJS_DOCUMENT_OPTIONS } from './utils/pdfjsConfig';
@@ -184,6 +185,14 @@ const App: React.FC = () => {
     onError: toast.error,
   });
   const { flatten, analyzeCompress, applyCompress } = useFinalizeActions(applyDocumentTransform);
+  // A redaction box too small to verify is refused by the hook; say so.
+  const handleAddRedactionMark = useCallback(
+    (pageNum: number, rects: Parameters<typeof addRedactionMark>[1], source: Parameters<typeof addRedactionMark>[2], text?: string) => {
+      const { refused } = addRedactionMark(pageNum, rects, source, text);
+      if (refused > 0) toast.warning(`Redaction box too small (under ${MIN_MARK_SIZE} pt) - drag a larger box`);
+    },
+    [addRedactionMark, toast]
+  );
   const handleFlatten = useCallback(async (scope: FlattenScope) => {
     const result = await flatten(scope);
     if (!result) return;
@@ -1586,7 +1595,7 @@ const App: React.FC = () => {
               onAnnotationStorageReady={handleAnnotationStorageReady}
               formFieldMappings={formFieldMappings}
               onAddTextMarkup={addTextMarkup}
-              onAddRedactionMark={addRedactionMark}
+              onAddRedactionMark={handleAddRedactionMark}
               renderPageOverlay={currentTool === 'form'
                 ? (pageIndex, scale) => <FormFieldOverlay pageIndex={pageIndex} scale={scale} designer={formDesigner} />
                 : undefined}

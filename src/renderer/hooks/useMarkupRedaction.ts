@@ -28,7 +28,7 @@ import { getTextHeight, mapToStandardFontName, measureTextWidth } from '../utils
 import { applyRedactions, RedactionReport } from '../utils/redaction/redactionEngine';
 import { PdfjsEnv, openPdfjs } from '../utils/redaction/pdfjsEnv';
 import { findOccurrences, SearchOptions } from '../utils/redaction/textSearch';
-import { intersects, markTooSmall } from '../utils/redaction/geometry';
+import { intersects, markTooSmall, padToMinSize } from '../utils/redaction/geometry';
 import { snapshotDocument, isSameSourceBytes, StaleDocumentError } from '../utils/documentGuard';
 import { pageGeometry } from '../utils/pageStructure';
 import { AnnotationPageFrame, isUnderAnyMark } from '../utils/annotationBounds';
@@ -159,14 +159,22 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
     [commitAnnotations]
   );
 
+  /**
+   * Add a redaction mark. The engine refuses marks below MIN_MARK_SIZE (they
+   * cannot be verified). Boxes from a TEXT selection cover glyphs, so a tiny
+   * one is grown (never shrunk) to the minimum; an AREA box that small is
+   * refused. Returns the number of refused boxes so the caller can tell the
+   * user — a box is never dropped silently.
+   */
   const addRedactionMark = useCallback(
-    (pageIndex: number, rects: PdfRect[], source: RedactionMarkAnnotation['source'], text?: string) => {
-      // The engine refuses marks below MIN_MARK_SIZE (they cannot be verified);
-      // a drag that small is not a mark.
-      const valid = rects.filter((r) => !markTooSmall(r));
-      if (!valid.length) return;
+    (pageIndex: number, rects: PdfRect[], source: RedactionMarkAnnotation['source'], text?: string): { refused: number } => {
+      const sized = source === 'area' ? rects : rects.map((r) => padToMinSize(r));
+      const valid = sized.filter((r) => !markTooSmall(r));
+      const refused = rects.length - valid.length;
+      if (!valid.length) return { refused };
       const mark: RedactionMarkAnnotation = { id: newId('redact'), type: 'redaction', pageIndex, rects: valid, source, text };
       commitAnnotations('addRedactionMark', pageIndex, (a) => [...a, mark]);
+      return { refused };
     },
     [commitAnnotations]
   );

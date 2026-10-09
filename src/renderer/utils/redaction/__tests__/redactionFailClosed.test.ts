@@ -178,7 +178,7 @@ describe('Type3 text intersecting a mark fails as type3-font-under-mark', () => 
       expect(report.verification.ok).toBe(true);
       // Success only via a whole-page raster that names the reason.
       expect(report.rasterized).toEqual([expect.objectContaining({ pageIndex: 0, scope: 'page' })]);
-      expect(report.rasterized[0].reason).toContain('type3-font-under-mark');
+      expect(report.rasterized[0].reason).toMatch(/\(type3-font-under-mark\)$/);
       await expectAbsent(bytes, 'T3INKMARKERu4');
     }, 60_000);
   }
@@ -439,4 +439,139 @@ describe('document-level copies of a must-be-absent term fail the verdict', () =
     // NFKD decomposes; the fold of a precomposed and a decomposed é agree.
     expect(normalizeForSearch('café')).toBe(normalizeForSearch('café'));
   });
+});
+
+// ---------------------------------------------------------------------------
+// Security gate pass 1 (PR #30): fail-toward-allow shapes in the new code
+// ---------------------------------------------------------------------------
+describe('gate: depth caps report NOT EXAMINED, never clean (SC-10)', () => {
+  it('a 300-deep structure tree carrying /ActualText under a mark is not-examined, and Apply returns no bytes', async () => {
+    const doc = await PDFLib.create();
+    const page = doc.addPage([612, 792]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.node.set(PDFName.of('Resources'), doc.context.obj({ Font: { F1: font.ref } }));
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('/Span <</MCID 0>> BDC BT /F1 12 Tf 100 700 Td (DEEP) Tj ET EMC')));
+    const rootRef = doc.context.nextRef();
+    // Innermost element tags MCID 0 and repeats it; 300 ancestors above it.
+    let child = doc.context.register(doc.context.obj({ Type: 'StructElem', S: 'Span', Pg: page.ref, K: 0, ActualText: PDFHexString.fromText('DEEPACTUALf4') } as never));
+    for (let i = 0; i < 300; i++) child = doc.context.register(doc.context.obj({ Type: 'StructElem', S: 'Div', K: [child] } as never));
+    doc.context.assign(rootRef, doc.context.obj({ Type: 'StructTreeRoot', K: [child] }));
+    doc.catalog.set(PDFName.of('StructTreeRoot'), rootRef);
+    const src = await doc.save({ useObjectStreams: false });
+
+    const err = await applyRedactions(src, [{ pageIndex: 0, rects: [MARK] }], {}, env).then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(RedactionVerificationError);
+    const v = (err as RedactionVerificationError).verification;
+    expect(v.ok).toBe(false);
+    expect(v.notExamined.some((n) => n.reason === 'depth-cap:struct-tree')).toBe(true);
+  }, 60_000);
+
+  it('a term nested deeper than the string-scan cap is not-examined', async () => {
+    const doc = await PDFLib.create();
+    doc.addPage([612, 792]).node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(box(MARK))));
+    let v: unknown = PDFHexString.fromText('DEEPTERMk2');
+    for (let i = 0; i < 80; i++) v = doc.context.obj([v as never]);
+    doc.catalog.set(PDFName.of('DeepValue'), v as never);
+    const bytes = await doc.save({ useObjectStreams: false });
+    const res = await verifyRedaction(bytes, new Map([[0, [MARK]]]), BLACK, env, ['DEEPTERMk2']);
+    expect(res.ok).toBe(false);
+    expect(res.notExamined.some((n) => n.reason === 'depth-cap:string-scan')).toBe(true);
+  }, 60_000);
+});
+
+describe('gate: marked-content references into forms are examined or fail (SC-07)', () => {
+  it('an element tagging form content (MCR /Stm) under a mark: its /ActualText and the ORIGINAL form are gone from the saved file', async () => {
+    const doc = await PDFLib.create();
+    const page = doc.addPage([612, 792]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const form = doc.context.register(doc.context.stream('% ORIGFORMq1\n/Span <</MCID 0>> BDC BT /F1 12 Tf 100 700 Td (FORMTAGGED) Tj ET EMC', {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 612, 792], StructParents: 0, Resources: { Font: { F1: font.ref } },
+    } as never));
+    page.node.set(PDFName.of('Resources'), doc.context.obj({ Font: { F1: font.ref }, XObject: { Fm0: form } }));
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('/Fm0 Do BT /F1 12 Tf 72 400 Td (keep) Tj ET')));
+    const rootRef = doc.context.nextRef();
+    const mcr = doc.context.obj({ Type: 'MCR', MCID: 0, Stm: form, Pg: page.ref });
+    const el = doc.context.register(doc.context.obj({ Type: 'StructElem', S: 'Span', P: rootRef, Pg: page.ref, K: [mcr], ActualText: PDFHexString.fromText('STMACTUALv3') } as never));
+    doc.context.assign(rootRef, doc.context.obj({ Type: 'StructTreeRoot', K: [el] }));
+    doc.catalog.set(PDFName.of('StructTreeRoot'), rootRef);
+    const src = await doc.save({ useObjectStreams: false });
+    await expectPresent(src, 'ORIGFORMq1');
+    await expectPresent(src, utf16Hex('STMACTUALv3'));
+
+    const { bytes, report } = await applyRedactions(src, [{ pageIndex: 0, rects: [MARK] }], {}, env);
+    expect(report.verification.ok).toBe(true);
+    // Not examinable at glyph level: the page is a raster, reason by code.
+    expect(report.rasterized).toEqual([expect.objectContaining({ pageIndex: 0, scope: 'page' })]);
+    expect(report.rasterized[0].reason).toMatch(/\(struct-mcr-stm\)$/);
+    await expectAbsent(bytes, utf16Hex('STMACTUALv3'));
+    await expectAbsent(bytes, 'ORIGFORMq1');
+    const out = await PDFLib.load(bytes, { updateMetadata: false });
+    expect(out.context.lookup(form)).toBeUndefined();
+  }, 60_000);
+
+  it('the verifier reports an MCR /Stm on a marked page as struct-mcr-stm', async () => {
+    const doc = await PDFLib.create();
+    const page = doc.addPage([612, 792]);
+    const form = doc.context.register(doc.context.stream('', { Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 1, 1] } as never));
+    page.node.set(PDFName.of('Resources'), doc.context.obj({}));
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(box(MARK))));
+    const rootRef = doc.context.nextRef();
+    const el = doc.context.register(doc.context.obj({ Type: 'StructElem', S: 'Span', P: rootRef, Pg: page.ref, K: [doc.context.obj({ Type: 'MCR', MCID: 0, Stm: form })] } as never));
+    doc.context.assign(rootRef, doc.context.obj({ Type: 'StructTreeRoot', K: [el] }));
+    doc.catalog.set(PDFName.of('StructTreeRoot'), rootRef);
+    const v = await verifyRedaction(await doc.save({ useObjectStreams: false }), new Map([[0, [MARK]]]), BLACK, env);
+    expect(v.ok).toBe(false);
+    expect(v.notExamined.some((n) => n.reason === 'struct-mcr-stm')).toBe(true);
+  }, 60_000);
+});
+
+describe('gate: neutral stubs are exact, not forgeable (SC-13)', () => {
+  /** Raw 8x8 RGB image whose bytes spell the marker. */
+  const markerImage = (doc: PDFLib, marker: string) =>
+    doc.context.register(doc.context.stream(marker.repeat(20).slice(0, 192), { Type: 'XObject', Subtype: 'Image', Width: 8, Height: 8, ColorSpace: 'DeviceRGB', BitsPerComponent: 8 } as never));
+
+  it('a forged "neutral" pattern holding a reference to the original image does not keep it in the file', async () => {
+    const doc = await PDFLib.create();
+    const page = doc.addPage([612, 792]);
+    const im = markerImage(doc, 'FORGEDPATIMGx9');
+    const forged = doc.context.register(doc.context.stream(new Uint8Array(0), {
+      Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 1, 1], XStep: 1, YStep: 1, Resources: {}, Leak: im,
+    } as never));
+    page.node.set(PDFName.of('Resources'), doc.context.obj({ XObject: { Im0: im }, Pattern: { P0: forged } }));
+    // P0 is selected but never paints: the engine would keep a "neutral" stub.
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('q 200 0 0 200 100 100 cm /Im0 Do Q /Pattern cs /P0 scn')));
+    const src = await doc.save({ useObjectStreams: false });
+    const mark: Rect = { x0: 90, y0: 90, x1: 310, y1: 310 };
+    const { bytes, report } = await applyRedactions(src, [{ pageIndex: 0, rects: [mark] }], {}, env);
+    expect(report.verification.ok).toBe(true);
+    await expectAbsent(bytes, 'FORGEDPATIMGx9');
+    const out = await PDFLib.load(bytes, { updateMetadata: false });
+    expect(out.context.lookup(im)).toBeUndefined();
+    expect(out.context.lookup(forged)).toBeUndefined();
+  }, 60_000);
+
+  it('a forged "neutral" font whose /Type references the original image does not keep it in the file', async () => {
+    const doc = await PDFLib.create();
+    const page = doc.addPage([612, 792]);
+    const helv = await doc.embedFont(StandardFonts.Helvetica);
+    const im = markerImage(doc, 'FORGEDFONTIMGw5');
+    page.node.set(PDFName.of('Resources'), doc.context.obj({ Font: { F1: helv.ref, F2: { Type: im, Subtype: 'Type1', BaseFont: 'Helvetica' } } } as never));
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('BT /F2 12 Tf 100 700 Td (X) Tj ET BT /F1 12 Tf 72 400 Td (keep) Tj ET')));
+    const src = await doc.save({ useObjectStreams: false });
+    await expectPresent(src, 'FORGEDFONTIMGw5');
+    const { bytes, report } = await applyRedactions(src, [{ pageIndex: 0, rects: [MARK] }], {}, env);
+    expect(report.verification.ok).toBe(true);
+    await expectAbsent(bytes, 'FORGEDFONTIMGw5');
+    expect((await PDFLib.load(bytes, { updateMetadata: false })).context.lookup(im)).toBeUndefined();
+  }, 60_000);
+});
+
+describe('gate: violation messages never carry redacted content into reasons', () => {
+  it('a glyph under a mark is reported by code; no message names the glyph', async () => {
+    const bytes = await pdfWith(`BT /F1 12 Tf 100 700 Td (Q) Tj ET`);
+    const v = await verifyRedaction(bytes, new Map([[0, [MARK]]]), BLACK, env);
+    expect(v.ok).toBe(false);
+    expect(v.pageReasons.get(0)).toContain('glyph-under-mark');
+    for (const m of v.pageViolations.get(0)!) expect(m).not.toContain('"Q"');
+  }, 60_000);
 });

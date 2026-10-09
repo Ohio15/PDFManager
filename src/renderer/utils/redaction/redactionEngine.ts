@@ -132,10 +132,15 @@ function groupMarks(marks: RedactionMarkInput[]): Map<number, Rect[]> {
   return byPage;
 }
 
-/** Struct-tree scrub for a page whose content was rewritten in place. */
+/**
+ * Struct-tree scrub for a redacted page. Anything the walk cannot examine is
+ * left for the verifier, which reports it as NOT EXAMINED (so this page is
+ * redone as a raster, where `all` also drops MCRs into forms the raster no
+ * longer draws).
+ */
 function scrubStructForPage(pdfDoc: PDFLib, pageIndex: number, touched: Set<number> | 'all'): void {
   const ref = pdfDoc.getPage(pageIndex).ref;
-  structTextForMcids(pdfDoc, ref, touched === 'all' ? () => true : (mcid) => touched.has(mcid), true);
+  structTextForMcids(pdfDoc, ref, touched === 'all' ? () => true : (mcid) => touched.has(mcid), { apply: true, dropFormMcrs: touched === 'all' });
 }
 
 async function runPass(
@@ -253,7 +258,9 @@ export async function applyRedactions(
     if (!verification.ok) {
       // Only marked pages can be redone; a failure anywhere else (a
       // document-level copy, an unmarked page) stands and is reported.
-      for (const [p, v] of verification.pageViolations) if (byPage.has(p)) forced.set(p, v[0] ?? 'unknown');
+      // The raster reason is a CODE, never the violation message: messages
+      // describe what is under the mark and must not reach the report or UI.
+      for (const [p] of verification.pageViolations) if (byPage.has(p)) forced.set(p, verification.pageReasons.get(p)?.[0] ?? 'unverified');
       if (forced.size > 0) {
         pass = await runPass(pdfBytes, byPage, forced, opts, env, originalPdfjs);
         verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? [], pass.removed);

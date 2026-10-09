@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   size-guard:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     steps:
       # actions/checkout v4.1.7 — SHA-pinned, same ref as security-audit.yml
       # and dep-auto-apply.yml (mutable tags are a supply-chain vector).

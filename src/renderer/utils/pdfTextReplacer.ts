@@ -19,6 +19,7 @@ import {
   measureTextWidth,
   getKerningAdjustment,
 } from './standardFontMetrics';
+import { rethrowDecodeLimit } from './boundedDecode';
 
 /**
  * Enhanced PDF text replacement that handles multiple encoding scenarios
@@ -79,6 +80,8 @@ export async function replaceTextInPage(
     console.log('Content stream replacement failed, will use overlay fallback');
     return false;
   } catch (error) {
+    // A decode-limit overflow fails the save; it is not a missed match.
+    rethrowDecodeLimit(error);
     console.error('Error in replaceTextInPage:', error);
     return false;
   }

@@ -13,6 +13,7 @@ import {
   hexToString,
   stringToHex,
 } from './pdfStreamUtils';
+import { rethrowDecodeLimit } from './boundedDecode';
 
 /**
  * Blank out text in content stream by replacing with spaces.
@@ -85,6 +86,8 @@ export async function blankTextInContentStream(
 
     return blanked;
   } catch (error) {
+    // A decode-limit overflow fails the save; it is not a missed match.
+    rethrowDecodeLimit(error);
     console.error('[blankText] Error blanking text:', error);
     return false;
   }

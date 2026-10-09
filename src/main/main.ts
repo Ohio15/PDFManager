@@ -2,21 +2,22 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell, session } from 'elect
 import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile } from 'child_process';
 import Store from 'electron-store';
 import {
   isAllowedStoreWrite,
   isAllowedStoreRead,
-  isSafeConvertInput,
-  isSafeOutputDir,
   isAllowedExternalUrl,
   isAllowedSaveTarget,
   resolveRealPath,
   isPathWithinBlessed,
-  isOutputBesideBlessedInput,
   isTrustedDropSender,
   BlessedFileRegistry,
 } from './security';
+import { handleConvertToPdf } from './convertToPdf';
+import { pathConfinementMode, readEnv, shouldLoadDevServer, type EnvVarName } from './environment';
+
+/** Environment reads go through the packaged allow-list in environment.ts. */
+const env = (name: EnvVarName): string | undefined => readEnv(name, app.isPackaged);
 import { TRUSTED_DROP_CHANNEL } from '../shared/ipc';
 import type { DropResult } from '../shared/ipc';
 
@@ -60,13 +61,12 @@ let fileToOpenOnReady: string | null = null;
 // Renderer-supplied read/write paths are confined to directories the user has
 // chosen through a native dialog. Every dialog handler blesses the directory it
 // returns; guardPath() checks membership. ENFORCE by default.
-// PDFMANAGER_PATH_CONFINEMENT=warn is a temporary escape hatch if a legitimate
-// flow is found blocked at runtime. The canonicalization + membership logic
+// PDFMANAGER_PATH_CONFINEMENT=warn is a development-only escape hatch for a
+// legitimate flow found blocked; a packaged app ignores it (environment.ts). The canonicalization + membership logic
 // lives in security.ts (resolveRealPath / isPathWithinBlessed) so it can be
 // unit-tested; both fail CLOSED — a path that cannot be canonicalized is denied.
 type ConfinementMode = 'warn' | 'enforce';
-const PATH_CONFINEMENT_MODE: ConfinementMode =
-  process.env.PDFMANAGER_PATH_CONFINEMENT === 'warn' ? 'warn' : 'enforce';
+const PATH_CONFINEMENT_MODE: ConfinementMode = pathConfinementMode(app.isPackaged, env('PDFMANAGER_PATH_CONFINEMENT'));
 const blessedDirs = new Set<string>();
 
 function blessDirectory(dir: string | null | undefined): void {
@@ -138,11 +138,10 @@ autoUpdater.autoInstallOnAppQuit = true;
 
 // GitHub token for private repo access
 // This token needs 'repo' scope for private repos
-// Priority: 1) Environment variable, 2) Config file, 3) Hardcoded fallback
+// Priority: 1) Environment variable (unpackaged runs only), 2) Config file
 function getGitHubToken(): string {
-  // Check environment variables first
-  if (process.env.GH_TOKEN) return process.env.GH_TOKEN;
-  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+  const envToken = env('GH_TOKEN') || env('GITHUB_TOKEN');
+  if (envToken) return envToken;
 
   // Check for config file in app directory (for production)
   try {
@@ -274,10 +273,9 @@ function createWindow(): void {
   // An unpackaged run normally loads the Vite dev server. The e2e harness
   // (NODE_ENV=test) launches the BUILT dist and must load that build: with the
   // dev URL it renders a blank page, or worse another worktree's dev server
-  // on the same port.
-  const isDev =
-    process.env.NODE_ENV === 'development' ||
-    (!app.isPackaged && process.env.NODE_ENV !== 'test');
+  // on the same port. A packaged app always loads its own build: an inherited
+  // NODE_ENV must not point it at whatever listens on localhost:5200.
+  const isDev = shouldLoadDevServer(app.isPackaged, env('NODE_ENV'));
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5200');
@@ -1089,10 +1087,10 @@ function detectLibreOffice(): string | null {
 
   if (process.platform === 'win32') {
     const programDirs = [
-      process.env['ProgramFiles'] || 'C:\\Program Files',
-      process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
-      process.env['LOCALAPPDATA'],
-      process.env['APPDATA'],
+      env('ProgramFiles') || 'C:\\Program Files',
+      env('ProgramFiles(x86)') || 'C:\\Program Files (x86)',
+      env('LOCALAPPDATA'),
+      env('APPDATA'),
     ].filter(Boolean) as string[];
 
     const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24', 'LibreOffice 25'];
@@ -1143,7 +1141,7 @@ function detectLibreOffice(): string | null {
   } else if (process.platform === 'darwin') {
     const macPaths = [
       '/Applications/LibreOffice.app/Contents/MacOS/soffice',
-      path.join(process.env['HOME'] || '', 'Applications/LibreOffice.app/Contents/MacOS/soffice'),
+      path.join(env('HOME') || '', 'Applications/LibreOffice.app/Contents/MacOS/soffice'),
     ];
     for (const p of macPaths) {
       if (fs.existsSync(p)) {
@@ -1182,70 +1180,15 @@ ipcMain.handle('detect-libreoffice', () => {
   return detected;
 });
 
-ipcMain.handle('convert-to-pdf', async (_event, { inputPath, outputDir }) => {
-  // Validate renderer-supplied argv before handing them to execFile. inputPath
-  // must be an absolute path to a convertible document (an absolute path also
-  // can't be re-parsed as a LibreOffice option); outputDir must be absolute.
-  if (!isSafeConvertInput(inputPath)) {
-    return { success: false, error: 'Invalid input file for conversion' };
-  }
-  if (!isSafeOutputDir(outputDir)) {
-    return { success: false, error: 'Invalid output directory' };
-  }
-  if (!guardPath(inputPath, 'convert-to-pdf inputPath', 'read')) {
-    return { success: false, error: 'Input file not permitted' };
-  }
-  // The output dir must be a blessed directory, OR, for an exactly-blessed
-  // dropped input, the very directory that input sits in. In that case the only
-  // file written is the main-derived `<input name>.pdf` beside the input (the
-  // renderer cannot choose the name), and the directory itself is not blessed.
-  const outputBesideBlessedInput = isOutputBesideBlessedInput(outputDir, inputPath, {
+ipcMain.handle('convert-to-pdf', (_event, payload: unknown) =>
+  handleConvertToPdf(payload, {
+    guard: guardPath,
     isDirBlessed: isPathBlessed,
     isInputFileBlessed: (p) => blessedFiles.has(p, 'read'),
-  });
-  if (!outputBesideBlessedInput && !guardPath(outputDir, 'convert-to-pdf outputDir', 'dir')) {
-    return { success: false, error: 'Output directory not permitted' };
-  }
-
-  // libreOfficePath is main-detected only (never renderer-writable), so this is
-  // a trusted binary path.
-  const loPath = store.get('libreOfficePath') || detectLibreOffice();
-  if (!loPath) {
-    return { success: false, error: 'LibreOffice not found' };
-  }
-
-  return new Promise((resolve) => {
-    const args = [
-      '--headless',
-      '--invisible',
-      '--nodefault',
-      '--nolockcheck',
-      '--nologo',
-      '--norestore',
-      '--convert-to', 'pdf',
-      '--outdir', outputDir,
-      inputPath,
-    ];
-
-    execFile(loPath, args, { timeout: 120000 }, (error) => {
-      if (error) {
-        resolve({ success: false, error: error.message });
-      } else {
-        const baseName = path.basename(inputPath, path.extname(inputPath));
-        const outputPath = path.join(outputDir, `${baseName}.pdf`);
-        if (fs.existsSync(outputPath)) {
-          // A PDF written beside a dropped input is outside every blessed dir;
-          // bless that exact output so the opened result can save in place.
-          if (outputBesideBlessedInput) blessedFiles.addDerivedPdf(outputPath);
-          const fileData = fs.readFileSync(outputPath);
-          resolve({ success: true, path: outputPath, data: fileData.toString('base64') });
-        } else {
-          resolve({ success: false, error: 'Output file not created' });
-        }
-      }
-    });
-  });
-});
+    blessDerivedPdf: (p) => blessedFiles.addDerivedPdf(p),
+    converterPath: () => store.get('libreOfficePath') || detectLibreOffice(),
+  })
+);
 
 // Document conversion file dialog
 ipcMain.handle('open-documents-dialog', async () => {

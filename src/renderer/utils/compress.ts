@@ -39,7 +39,15 @@ import {
 } from 'pdf-lib';
 import * as pako from 'pako';
 import { removeUnreachableObjects, rewriteReferences } from './pdfObjectGraph';
-import { decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES as MAX_INFLATE_BYTES } from './boundedDecode';
+import {
+  DecodeLimitError,
+  decodeBudgetForStream,
+  decodeRawStreamBounded,
+  inflateCapped,
+  MAX_DECODED_STREAM_BYTES as MAX_INFLATE_BYTES,
+  rethrowDecodeLimit,
+  rethrowDocumentDecodeLimit,
+} from './boundedDecode';
 
 export interface LossyOptions {
   /** Downsample images whose effective resolution exceeds this. */
@@ -107,6 +115,8 @@ const MAX_FORM_DEPTH = 12;
  * work: a form that invokes the next form N times per level costs N^depth.
  */
 const MAX_FORM_INVOCATIONS = 5000;
+/** Largest decoded content stream kept in the per-scan decode cache. */
+const MAX_CACHED_CONTENT_BYTES = 4 * 1024 * 1024;
 const DPI_TOLERANCE = 1.05;
 const MIN_STREAM_FOR_DEFLATE = 64;
 /** Longest operator/name we decode; longer runs are binary noise, not syntax. */
@@ -186,11 +196,17 @@ function lookupByDecodedName(dict: PDFDict | undefined, name: string): PDFObject
   return undefined;
 }
 
+/**
+ * Decoded content of a page or Form XObject, or null when it cannot be decoded
+ * (unsupported filter, corrupt data). A decode-limit overflow propagates and
+ * fails the compress: placements would otherwise be silently incomplete.
+ */
 function decodeContent(stream: PDFObject | undefined): Uint8Array | null {
   if (!(stream instanceof PDFRawStream)) return null;
   try {
     return decodeRawStreamBounded(stream);
-  } catch {
+  } catch (e) {
+    rethrowDecodeLimit(e);
     return null;
   }
 }
@@ -334,6 +350,19 @@ function scanImagePlacements(doc: PDFDocument): Map<string, number> {
   const minDpi = new Map<string, number>();
   let formInvocations = 0;
   let exhausted = false;
+  // A stream painted from many pages or forms is decoded once per scan, so a
+  // shared Form XObject costs its decode once, not once per use. Only small
+  // results are kept, so the cache never holds more than a few streams' worth
+  // of memory; a large stream re-decodes and is charged to the document's
+  // decode budget each time, which bounds that work instead.
+  const decodedCache = new Map<PDFObject, Uint8Array | null>();
+  const decodeOnce = (stream: PDFObject | undefined): Uint8Array | null => {
+    if (!stream) return null;
+    if (decodedCache.has(stream)) return decodedCache.get(stream) ?? null;
+    const decoded = decodeContent(stream);
+    if (!decoded || decoded.length <= MAX_CACHED_CONTENT_BYTES) decodedCache.set(stream, decoded);
+    return decoded;
+  };
 
   const walk = (data: Uint8Array, resources: PDFDict | undefined, ctm: Matrix, depth: number, visiting: Set<string>) => {
     if (exhausted) return;
@@ -359,7 +388,7 @@ function scanImagePlacements(doc: PDFDocument): Map<string, number> {
           exhausted = true;
           return;
         }
-        const decoded = decodeContent(stream);
+        const decoded = decodeOnce(stream);
         if (!decoded) return;
         const formResources = stream.dict.lookupMaybe(PDFName.of('Resources'), PDFDict) ?? resources;
         const formMatrix = readMatrix(stream.dict.lookupMaybe(PDFName.of('Matrix'), PDFArray));
@@ -386,13 +415,15 @@ function scanImagePlacements(doc: PDFDocument): Map<string, number> {
     const parts: Uint8Array[] = [];
     let complete = true;
     for (const s of streams) {
-      const decoded = decodeContent(s);
+      const decoded = decodeOnce(s);
       if (!decoded) { complete = false; break; }
       parts.push(decoded);
     }
     // A page whose content we cannot fully decode gives no trustworthy sizes.
     if (!complete) continue;
     const total = parts.reduce((n, p) => n + p.length + 1, 0);
+    // /Contents may list one stream many times; the joined page is one stream's worth of content.
+    if (total > MAX_INFLATE_BYTES) throw new DecodeLimitError('stream', MAX_INFLATE_BYTES);
     const joined = new Uint8Array(total);
     let offset = 0;
     for (const p of parts) {
@@ -538,8 +569,10 @@ function decodeFlateImageToRgba(
   try {
     // Row data plus one predictor byte per row is all a valid image can need.
     const expected = height * (width * components + 1);
-    inflated = inflateCapped(stream.contents, Math.min(MAX_INFLATE_BYTES, expected + 64 * 1024));
-  } catch {
+    inflated = inflateCapped(stream.contents, Math.min(MAX_INFLATE_BYTES, expected + 64 * 1024), decodeBudgetForStream(stream));
+  } catch (e) {
+    // One oversized image is left untouched; a spent document budget stops the compress.
+    rethrowDocumentDecodeLimit(e);
     return 'corrupt or oversized Flate data';
   }
   const parmsObj = stream.dict.lookup(PDFName.of('DecodeParms'));
@@ -799,8 +832,11 @@ function recompressStreams(doc: PDFDocument): number {
       setFilter = true;
     } else if (filters.length === 1 && filters[0] === 'FlateDecode') {
       try {
-        candidate = pako.deflate(inflateCapped(obj.contents, MAX_INFLATE_BYTES), { level: 9 });
-      } catch {
+        candidate = pako.deflate(inflateCapped(obj.contents, MAX_INFLATE_BYTES, decodeBudgetForStream(obj)), { level: 9 });
+      } catch (e) {
+        // A stream too large to recompress stays byte-identical; a spent
+        // document budget stops the compress.
+        rethrowDocumentDecodeLimit(e);
         continue;
       }
     } else {

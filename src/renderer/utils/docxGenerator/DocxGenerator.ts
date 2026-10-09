@@ -47,6 +47,7 @@ import {
 } from './OoxmlParts';
 import { createHyperlinkCollector } from './OoxmlUtils';
 import { generatePositionedDocumentXml } from './PositionedOoxmlParts';
+import { rethrowDecodeLimit } from '../boundedDecode';
 
 // Ensure pdfjs worker is configured
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -420,7 +421,9 @@ export async function generateDocx(
   let pdfLibDoc: PDFDocument | null = null;
   try {
     pdfLibDoc = await PDFDocument.load(pdfData, { ignoreEncryption: true });
-  } catch {
+  } catch (e) {
+    // A decode-limit overflow while loading fails the conversion.
+    rethrowDecodeLimit(e);
     // pdf-lib loading failed — image extraction from streams won't be available
   }
 

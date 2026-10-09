@@ -4,7 +4,8 @@ import {
   FontInfo,
   fontCache,
   getContentStreams,
-  decodeStream,
+  decodeContentForEdit,
+  rethrowEditFailure,
   updateStream,
   buildFontCache,
   escapePDFString,
@@ -47,7 +48,7 @@ export async function blankTextInContentStream(
     let blanked = false;
 
     for (const stream of contentStreams) {
-      const contentBytes = decodeStream(stream);
+      const contentBytes = decodeContentForEdit(stream, pageIndex, originalText);
       if (!contentBytes) continue;
 
       let contentStr = new TextDecoder('latin1').decode(contentBytes);
@@ -85,6 +86,8 @@ export async function blankTextInContentStream(
 
     return blanked;
   } catch (error) {
+    // An overflow or unexaminable content fails the save; it is not a missed match.
+    rethrowEditFailure(error);
     console.error('[blankText] Error blanking text:', error);
     return false;
   }

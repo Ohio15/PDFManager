@@ -40,7 +40,7 @@ concurrency:
 jobs:
   detect:
     name: Detect ecosystems
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     outputs:
       has_npm: ${{ steps.detect.outputs.has_npm }}
       has_go: ${{ steps.detect.outputs.has_go }}
@@ -102,7 +102,7 @@ jobs:
     name: npm audit (${{ matrix.dir }})
     needs: detect
     if: needs.detect.outputs.has_npm == 'true'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     strategy:
       fail-fast: false
       matrix:
@@ -172,7 +172,7 @@ jobs:
     name: govulncheck (${{ matrix.dir }})
     needs: detect
     if: needs.detect.outputs.has_go == 'true'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +213,7 @@ jobs:
     name: pip-audit (${{ matrix.dir }})
     needs: detect
     if: needs.detect.outputs.has_python == 'true'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     strategy:
       fail-fast: false
       matrix:
@@ -271,7 +271,7 @@ jobs:
     name: Audit summary (always runs)
     if: always()
     needs: [detect, npm-audit, go-vulncheck, pip-audit]
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest  # literal: reachable from pull_request (never route PR jobs through a variable)
     steps:
       - shell: bash
         # Every value through env, never `${{ }}` inside run: the *_DIRS lists

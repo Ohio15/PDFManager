@@ -30,13 +30,14 @@ import {
   PDFObjectCopier,
   degrees,
 } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 import { removeUnreachableObjects } from './pdfObjectGraph';
 
 // pdfData held in memory is always decrypted plaintext (decrypt-at-open), but load
 // with ignoreEncryption for parity with replacePage and robustness against any
 // residual encryption dict.
 async function load(pdfData: Uint8Array): Promise<PDFLib> {
-  return PDFLib.load(pdfData, { ignoreEncryption: true });
+  return loadPdf(pdfData, { ignoreEncryption: true });
 }
 
 /**
@@ -750,7 +751,7 @@ export async function setPdfPageCrop(
 async function loadSource(sourceBytes: Uint8Array): Promise<PDFLib> {
   let source: PDFLib;
   try {
-    source = await PDFLib.load(sourceBytes, { ignoreEncryption: true });
+    source = await loadPdf(sourceBytes, { ignoreEncryption: true });
   } catch (e) {
     throw new Error(`The selected file is not a readable PDF (${(e as Error).message})`);
   }

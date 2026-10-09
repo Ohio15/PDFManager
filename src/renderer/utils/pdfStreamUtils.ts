@@ -15,7 +15,8 @@ import {
   PDFRef,
 } from 'pdf-lib';
 import * as pako from 'pako';
-import { decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES } from './boundedDecode';
+import { decodeRawStreamBounded, rethrowDecodeLimit } from './boundedDecode';
+import { decodeStreamStrict } from './redaction/pdfObjects';
 
 export interface FontInfo {
   name: string;
@@ -53,23 +54,70 @@ export function getContentStreams(context: any, contentsRef: any): PDFStream[] {
 }
 
 /**
- * Decode a content stream
+ * Decode a content stream through its full filter chain, bounded.
+ *
+ * Returns null when the stream cannot be decoded (unsupported filter, corrupt
+ * data, or a stream pdf-lib built in memory), so callers skip it. A decode
+ * that exceeds the per-stream cap or the document budget throws
+ * DecodeLimitError, which must fail the operation: callers edit and re-encode
+ * what this returns, so it never hands back still-encoded bytes.
  */
 export function decodeStream(stream: PDFStream): Uint8Array | null {
+  if (!(stream instanceof PDFRawStream)) return null;
   try {
-    // Bounded: the stream comes from an untrusted PDF (Flate bomb defence).
-    return decodeRawStreamBounded(stream as PDFRawStream);
+    return decodeRawStreamBounded(stream);
   } catch (e) {
-    const rawStream = stream as any;
-    if (rawStream.contents) {
-      try {
-        return inflateCapped(rawStream.contents, MAX_DECODED_STREAM_BYTES);
-      } catch {
-        return rawStream.contents;
-      }
-    }
+    rethrowDecodeLimit(e);
     return null;
   }
+}
+
+/**
+ * A text edit (delete or replace) could not examine a page's content: a
+ * content stream is encoded in a way PDF Manager cannot decode, so the text
+ * may be in it and would survive the edit. The save fails with this message
+ * rather than treating the text as "not found" and covering it with an
+ * overlay that leaves it extractable.
+ */
+export class ContentNotExaminedError extends Error {
+  readonly pageIndex: number;
+  readonly text: string;
+
+  constructor(pageIndex: number, text: string, cause: unknown) {
+    const shown = text.length > 40 ? `${text.slice(0, 40)}...` : text;
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `The text "${shown}" on page ${pageIndex + 1} could not be examined: the page has content PDF Manager cannot decode (${reason}). ` +
+        'The edit was not applied and the document was not saved.'
+    );
+    this.name = 'ContentNotExaminedError';
+    this.pageIndex = pageIndex;
+    this.text = text;
+  }
+}
+
+/**
+ * Decoded bytes of a page content stream that a text edit must examine.
+ * A stream parsed from the file is decoded strictly: if it cannot be decoded
+ * the edit cannot know whether the text is in it, so this throws
+ * ContentNotExaminedError (a decode-limit overflow throws DecodeLimitError).
+ * Returns null only for a stream pdf-lib built in memory during this save
+ * (app-generated overlay content, never file content), which edits skip.
+ */
+export function decodeContentForEdit(stream: PDFStream, pageIndex: number, text: string): Uint8Array | null {
+  if (!(stream instanceof PDFRawStream)) return null;
+  try {
+    return decodeStreamStrict(stream);
+  } catch (e) {
+    rethrowDecodeLimit(e);
+    throw new ContentNotExaminedError(pageIndex, text, e);
+  }
+}
+
+/** Rethrows failures that must fail a text edit instead of reading as "no match". */
+export function rethrowEditFailure(e: unknown): void {
+  rethrowDecodeLimit(e);
+  if (e instanceof ContentNotExaminedError) throw e;
 }
 
 /**
@@ -86,6 +134,9 @@ export function updateStream(stream: PDFStream, contentStr: string, pdfDoc: PDFD
   const streamDict = stream.dict;
   streamDict.set(PDFName.of('Length'), pdfDoc.context.obj(compressed.length));
   streamDict.set(PDFName.of('Filter'), PDFName.of('FlateDecode'));
+  // The new contents are plain Flate; parameters of the old chain (e.g. a
+  // /Predictor) no longer describe them.
+  streamDict.delete(PDFName.of('DecodeParms'));
 
   (stream as any).contents = compressed;
 }
@@ -188,6 +239,7 @@ export function extractFontInfo(pdfDoc: PDFDocument, fontRef: any): FontInfo | n
       isCIDFont
     };
   } catch (e) {
+    rethrowDecodeLimit(e);
     console.error('Error extracting font info:', e);
     return null;
   }
@@ -273,6 +325,7 @@ export function parseToUnicodeCMap(pdfDoc: PDFDocument, toUnicodeRef: any): Map<
 
     return mapping.size > 0 ? mapping : null;
   } catch (e) {
+    rethrowDecodeLimit(e);
     console.error('Error parsing ToUnicode CMap:', e);
     return null;
   }

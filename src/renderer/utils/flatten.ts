@@ -24,6 +24,7 @@ import {
   PDFObject,
   PDFPage,
 } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 import { removeUnreachableObjects } from './pdfObjectGraph';
 
 export type FlattenScope = 'annotations' | 'forms' | 'both';
@@ -244,7 +245,7 @@ export async function flattenPdf(
   bytes: Uint8Array,
   options: FlattenOptions
 ): Promise<{ bytes: Uint8Array; report: FlattenReport }> {
-  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  const doc = await loadPdf(bytes, { updateMetadata: false });
   const report = emptyReport();
   const includeForms = options.scope !== 'annotations';
   const includeAnnots = options.scope !== 'forms';
@@ -350,7 +351,7 @@ export async function flattenPdf(
 
 /** Count what a flatten would touch, for the confirmation dialog. */
 export async function countFlattenTargets(bytes: Uint8Array): Promise<{ widgets: number; annotations: number }> {
-  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  const doc = await loadPdf(bytes, { updateMetadata: false });
   let widgets = 0;
   let annotations = 0;
   for (const page of doc.getPages()) {

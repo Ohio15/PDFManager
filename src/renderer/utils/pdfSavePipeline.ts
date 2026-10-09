@@ -30,6 +30,7 @@ import {
   PDFHexString,
   PDFString,
 } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 
 import type {
   PDFPage,
@@ -74,7 +75,7 @@ export async function applyEditsAndAnnotations(
 ): Promise<Uint8Array> {
   const { pdfData, pages, annotationStorage, formFieldMappings, onSaveValidationWarning } = input;
 
-  const pdfDoc = await PDFLib.load(pdfData);
+  const pdfDoc = await loadPdf(pdfData);
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const helveticaRef = getFontRef(pdfDoc, helvetica);
 

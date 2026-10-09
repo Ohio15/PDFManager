@@ -18,8 +18,11 @@
  */
 
 import pako from 'pako';
-import { PDFName, PDFNumber, PDFDict, PDFRawStream, PDFArray } from 'pdf-lib';
-import { inflateCapped, MAX_DECODED_STREAM_BYTES } from '../boundedDecode';
+import { PDFName, PDFNumber, PDFDict, PDFRawStream, PDFArray, PDFHexString, PDFString } from 'pdf-lib';
+import { decodeBudgetFor, decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES, rethrowDocumentDecodeLimit } from '../boundedDecode';
+
+/** Largest Indexed colour-space lookup table: 256 entries x 4 components. */
+const MAX_PALETTE_BYTES = 256 * 4;
 import type {
   SceneElement,
   TextElement,
@@ -560,18 +563,15 @@ function handleFlateImage(
             if (lookupObj) {
               const lookup = context.lookup(lookupObj);
               if (lookup instanceof PDFRawStream) {
-                indexedPalette = lookup.getContents();
+                // The lookup stream is usually Flate-encoded; decode it (a
+                // palette is at most 256 entries x 4 components).
+                indexedPalette = decodeRawStreamBounded(lookup, MAX_PALETTE_BYTES);
               } else if (lookup && typeof (lookup as any).getContents === 'function') {
                 // Another stream type
                 indexedPalette = (lookup as any).getContents();
-              } else if (lookup && typeof (lookup as any).asString === 'function') {
-                // PDFHexString or PDFString — convert to bytes
-                const str = (lookup as any).asString() as string;
-                const bytes = new Uint8Array(str.length);
-                for (let h = 0; h < str.length; h++) {
-                  bytes[h] = str.charCodeAt(h) & 0xFF;
-                }
-                indexedPalette = bytes;
+              } else if (lookup instanceof PDFHexString || lookup instanceof PDFString) {
+                // The string's bytes are the palette (asString() would give hex digits).
+                indexedPalette = lookup.asBytes();
               } else if (lookup instanceof Uint8Array) {
                 indexedPalette = lookup;
               }
@@ -579,7 +579,11 @@ function handleFlateImage(
           }
         }
       }
-    } catch { /* palette extraction failed — will fall through to pdfjs fallback */ }
+    } catch (e) {
+      // A spent document budget stops the conversion; otherwise palette
+      // extraction failed and this falls through to the pdfjs fallback.
+      rethrowDocumentDecodeLimit(e);
+    }
     if (!indexedPalette) return null; // Can't decode Indexed without palette
   }
 
@@ -605,16 +609,17 @@ function handleFlateImage(
   // The "fast path" (wrapping compressed bytes directly as IDAT) is unreliable
   // because pdf-lib getContents() may return data in a format incompatible with PNG IDAT.
   try {
-    // Try decompression first; if getContents() returned already-decompressed data,
-    // inflate will fail — fall back to using raw bytes directly.
+    // getContents() on a parsed stream is the still-encoded Flate data, so a
+    // failed or oversized inflate means the image cannot be extracted; the
+    // encoded bytes are never used as pixels.
     let decompressed: Uint8Array;
     try {
       // Bounded by the largest buffer a valid image of these dimensions needs.
-      decompressed = inflateCapped(rawBytes, Math.min(MAX_DECODED_STREAM_BYTES, height * (1 + width * numComponents) * 2 + 65536));
-    } catch {
-      // pdf-lib may return already-decompressed bytes for some PDF structures
-      decompressed = rawBytes;
-      console.log(`[handleFlateImage] inflate failed — treating rawBytes as already decompressed`);
+      decompressed = inflateCapped(rawBytes, Math.min(MAX_DECODED_STREAM_BYTES, height * (1 + width * numComponents) * 2 + 65536), decodeBudgetFor(context));
+    } catch (e) {
+      rethrowDocumentDecodeLimit(e);
+      console.log(`[handleFlateImage] inflate failed or oversized — image skipped`);
+      return null;
     }
     const expectedRawSize = height * (1 + width * numComponents); // with predictor filter bytes
     const expectedPlainSize = width * height * numComponents; // without predictor filter bytes
@@ -709,6 +714,7 @@ function handleFlateImage(
     }
     return result;
   } catch (e) {
+    rethrowDocumentDecodeLimit(e);
     console.error(`[handleFlateImage] Error:`, e);
     return null;
   }
@@ -841,7 +847,8 @@ function extractImageData(
 
     // Unsupported filter (CCITTFaxDecode, JBIG2Decode, JPXDecode, etc.)
     return null;
-  } catch {
+  } catch (e) {
+    rethrowDocumentDecodeLimit(e);
     return null;
   }
 }
@@ -913,9 +920,12 @@ function tryApplySmask(
     let smaskPixels: Uint8Array;
     const smaskFilter = smaskDict.get(PDFName.of('Filter'));
     if (smaskFilter instanceof PDFName && smaskFilter.asString() === '/FlateDecode') {
-      smaskPixels = inflateCapped(smaskRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth) * 2 + 65536));
-    } else {
+      smaskPixels = inflateCapped(smaskRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth) * 2 + 65536), decodeBudgetFor(context));
+    } else if (smaskFilter === undefined) {
       smaskPixels = smaskRaw;
+    } else {
+      // Any other filter: the bytes are still encoded and are not pixels.
+      return null;
     }
 
     if (smaskPixels.length < intrinsicWidth * intrinsicHeight) {
@@ -930,9 +940,11 @@ function tryApplySmask(
     const baseFilter = dict.get(PDFName.of('Filter'));
     let basePixels: Uint8Array;
     if (baseFilter instanceof PDFName && baseFilter.asString() === '/FlateDecode') {
-      basePixels = inflateCapped(baseRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth * 4) * 2 + 65536));
-    } else {
+      basePixels = inflateCapped(baseRaw, Math.min(MAX_DECODED_STREAM_BYTES, intrinsicHeight * (1 + intrinsicWidth * 4) * 2 + 65536), decodeBudgetFor(context));
+    } else if (baseFilter === undefined) {
       basePixels = baseRaw;
+    } else {
+      return null;
     }
 
     // Determine base pixel format
@@ -992,6 +1004,7 @@ function tryApplySmask(
     console.log(`[PageAnalyzer] SMask applied: ${intrinsicWidth}x${intrinsicHeight}, base ${numComponents}-component + alpha`);
     return wrapRgbaAsPng(rgba, intrinsicWidth, intrinsicHeight);
   } catch (e) {
+    rethrowDocumentDecodeLimit(e);
     console.warn(`[PageAnalyzer] SMask extraction failed for ${resourceName}:`, e);
     return null;
   }
@@ -2125,6 +2138,7 @@ export const _testExports = {
   classifyImage,
   isBoldFont,
   isItalicFont,
+  extractImageData,
 };
 
 /**

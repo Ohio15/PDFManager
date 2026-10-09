@@ -4,7 +4,8 @@ import {
   FontInfo,
   fontCache,
   getContentStreams,
-  decodeStream,
+  decodeContentForEdit,
+  rethrowEditFailure,
   updateStream,
   buildFontCache,
   escapePDFString,
@@ -79,6 +80,8 @@ export async function replaceTextInPage(
     console.log('Content stream replacement failed, will use overlay fallback');
     return false;
   } catch (error) {
+    // An overflow or unexaminable content fails the save; it is not a missed match.
+    rethrowEditFailure(error);
     console.error('Error in replaceTextInPage:', error);
     return false;
   }
@@ -129,7 +132,7 @@ async function tryCIDFontReplacement(
   let replaced = false;
 
   for (const stream of contentStreams) {
-    const contentBytes = decodeStream(stream);
+    const contentBytes = decodeContentForEdit(stream, pageIndex, originalText);
     if (!contentBytes) continue;
 
     let contentStr = new TextDecoder('latin1').decode(contentBytes);
@@ -371,7 +374,7 @@ async function tryContentStreamReplacement(
   let replaced = false;
 
   for (const stream of contentStreams) {
-    const contentBytes = decodeStream(stream);
+    const contentBytes = decodeContentForEdit(stream, pageIndex, originalText);
     if (!contentBytes) continue;
 
     let contentStr = new TextDecoder('latin1').decode(contentBytes);
@@ -435,7 +438,7 @@ async function tryFuzzyContentStreamReplacement(
   let replaced = false;
 
   for (const stream of contentStreams) {
-    const contentBytes = decodeStream(stream);
+    const contentBytes = decodeContentForEdit(stream, pageIndex, originalText);
     if (!contentBytes) continue;
 
     let contentStr = new TextDecoder('latin1').decode(contentBytes);

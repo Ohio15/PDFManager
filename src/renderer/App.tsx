@@ -1,5 +1,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { PDFDocument as PDFLib } from 'pdf-lib';
+import { loadPdf } from './utils/boundedDecode';
+import { saveFailureMessage } from './utils/saveErrors';
 import Toolbar, { ZoomMode } from './components/Toolbar';
 import Sidebar from './components/Sidebar';
 import PDFViewer, { PDFViewerHandle } from './components/PDFViewer';
@@ -693,7 +695,7 @@ const App: React.FC = () => {
         }
       }
     } catch (error: any) {
-      toast.error('Failed to save document');
+      toast.error(saveFailureMessage(error));
       console.error('Save error:', error);
     }
   }, [document, saveFile, saveFileAs, toast, pendingRedactionMarks]);
@@ -863,7 +865,7 @@ const App: React.FC = () => {
 
       for (const file of files) {
         const pdfBytes = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
-        const pdf = await PDFLib.load(pdfBytes);
+        const pdf = await loadPdf(pdfBytes);
         const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
         pages.forEach(page => mergedPdf.addPage(page));
       }
@@ -890,7 +892,7 @@ const App: React.FC = () => {
     if (!document) return;
 
     try {
-      const sourcePdf = await PDFLib.load(document.pdfData);
+      const sourcePdf = await loadPdf(document.pdfData);
       const baseName = document.fileName.replace('.pdf', '');
 
       for (let i = 0; i < sourcePdf.getPageCount(); i++) {
@@ -936,7 +938,7 @@ const App: React.FC = () => {
 
       const uniquePages = [...new Set(pages)].sort((a, b) => a - b);
 
-      const sourcePdf = await PDFLib.load(document.pdfData);
+      const sourcePdf = await loadPdf(document.pdfData);
       const newPdf = await PDFLib.create();
       const copiedPages = await newPdf.copyPages(sourcePdf, uniquePages);
       copiedPages.forEach(page => newPdf.addPage(page));
@@ -1201,7 +1203,7 @@ const App: React.FC = () => {
       'save-as': () => {
         saveFileAs()
           .then((ok) => { if (ok) toast.success('Document saved successfully'); })
-          .catch(() => toast.error('Failed to save document'));
+          .catch((error) => toast.error(saveFailureMessage(error)));
       },
       print: handlePrint,
       undo: undo,
@@ -1405,7 +1407,7 @@ const App: React.FC = () => {
         switch (e.key.toLowerCase()) {
           case 's':
             e.preventDefault();
-            saveFileAs().catch(() => toast.error('Failed to save document'));
+            saveFileAs().catch((error) => toast.error(saveFailureMessage(error)));
             break;
           case 'l':
             e.preventDefault();

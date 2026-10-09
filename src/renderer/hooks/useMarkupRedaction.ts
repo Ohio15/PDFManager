@@ -9,7 +9,7 @@
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { PDFDocument as PDFLib } from 'pdf-lib';
+import { loadPdf } from '../utils/boundedDecode';
 import type {
   Annotation,
   PDFDocument,
@@ -254,7 +254,7 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
         // Page frames (visible box + /Rotate) read from the redacted bytes with
         // the same helper the save pipeline uses, so pending-annotation
         // footprints are computed where they will actually be written.
-        const geometryDoc = await PDFLib.load(bytes);
+        const geometryDoc = await loadPdf(bytes);
         const proxy = await openPdfjs(pdfjsEnv, bytes);
         const pages: PDFPage[] = [];
         try {

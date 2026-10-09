@@ -25,8 +25,13 @@
  *    to what its rewritten content draws, and the engine prunes the page's
  *    resources the same way, so a replaced original is no longer bound
  *    anywhere on the redacted page.
- *  - Marked content: /ActualText, /Alt and /E properties around removed text
- *    are dropped (they would otherwise repeat the redacted string).
+ *  - Marked content: /ActualText, /Alt and /E properties of every sequence
+ *    whose content (text, path, image, inline image, or a form drawn inside
+ *    it) intersects a mark are dropped, whether or not anything was removed
+ *    (they would otherwise repeat or describe what is under the mark). Named
+ *    property lists are rewritten inline keeping only the MCID, so the
+ *    /Properties entry is no longer referenced and is pruned. Page-level
+ *    MCIDs of touched sequences are reported for the structure-tree scrub.
  *
  * Anything it cannot reason about (Type3 or undecodable fonts, unparseable
  * streams, clipping paths that cross a mark, pattern fills over a mark) is
@@ -46,8 +51,11 @@ import {
   expandRect,
   fmt,
   intersectsAny,
+  flattenCubic,
+  insetRect,
   multiply,
   pointInAny,
+  polylineIntersectsAny,
   rectArea,
   transformRect,
   unionRect,
@@ -108,7 +116,17 @@ export interface RedactorContext {
   dryRun: boolean;
   /** Dry-run findings (glyphs/paths that would be removed). */
   findings: string[];
+  /**
+   * Page-level marked-content identifiers (page content only, not forms):
+   * `touched` — sequences with any content intersecting a mark (their
+   * structure elements must not repeat that content as /ActualText, /Alt or
+   * /E); `present` — every MCID the page content still carries.
+   */
+  mcids?: { touched: Set<number>; present: Set<number> };
 }
+
+/** Marked-content properties that repeat or describe the content they wrap. */
+const TEXT_PROPERTY_KEYS = ['ActualText', 'Alt', 'E'] as const;
 
 interface GState {
   ctm: Matrix;
@@ -126,7 +144,10 @@ interface GState {
 
 interface Subpath {
   opIndices: number[];
+  /** Vertices as written (end and control points), user space. */
   points: Point[];
+  /** The subpath as a polyline (curves flattened, closed when closed), user space. */
+  poly: Point[];
 }
 
 interface MarkedContentEntry {
@@ -134,6 +155,13 @@ interface MarkedContentEntry {
   tag: string;
   inlineProps?: Map<string, Operand>;
   namedProps?: string;
+  /** MCID from the inline dictionary or the named /Properties entry. */
+  mcid?: number;
+  /** The properties carry /ActualText, /Alt or /E. */
+  textProps: boolean;
+  /** Some content inside this sequence intersects a mark. */
+  touched: boolean;
+  /** The BDC must be rewritten without its text properties. */
   scrub: boolean;
 }
 
@@ -183,7 +211,13 @@ export async function redactContent(
   data: Uint8Array,
   scope: ResourceScope,
   baseCtm: Matrix,
-  formStack: PDFObject[]
+  formStack: PDFObject[],
+  /**
+   * Called when content of this stream touches a mark. A form XObject drawn
+   * inside the caller's marked-content sequence (`BDC ... /Fm Do EMC`) must
+   * mark the CALLER's sequences too, or their /ActualText survives.
+   */
+  onTouched?: () => void
 ): Promise<ContentResult> {
   let ops: ContentOp[];
   try {
@@ -231,14 +265,35 @@ export async function redactContent(
     return !!arr && getName(rc.context, arr.get(0)) === 'Pattern';
   };
 
-  const markScrubForRemovedText = () => {
+  /**
+   * Content inside every open marked-content sequence intersects a mark,
+   * whether or not anything is removed: /ActualText, /Alt and /E on those
+   * sequences repeat or describe what is under the mark, so they go. Called
+   * for every content kind (text, paths, images, inline images, forms).
+   */
+  const markTouched = () => {
     for (const entry of mcStack) {
-      if (entry.namedProps) {
-        entry.scrub = true;
-      } else if (entry.inlineProps && (entry.inlineProps.has('ActualText') || entry.inlineProps.has('Alt') || entry.inlineProps.has('E'))) {
-        entry.scrub = true;
-      }
+      entry.touched = true;
+      if (entry.textProps) entry.scrub = true;
     }
+    onTouched?.();
+  };
+
+  const isPageContent = formStack.length === 0;
+  const closeMarkedContent = (entry: MarkedContentEntry) => {
+    if (isPageContent && entry.mcid !== undefined && rc.mcids) {
+      rc.mcids.present.add(entry.mcid);
+      if (entry.touched) rc.mcids.touched.add(entry.mcid);
+    }
+    if (!entry.scrub) return;
+    if (rc.dryRun) {
+      rc.findings.push('Marked content over a mark still carries /ActualText, /Alt or /E');
+      return;
+    }
+    const replacement =
+      entry.mcid !== undefined ? `${encodeName(entry.tag)} <</MCID ${fmt(entry.mcid)}>> BDC` : `${encodeName(entry.tag)} BMC`;
+    edits.set(entry.opIndex, latin1Bytes(replacement));
+    rc.stats.markedContentScrubbed++;
   };
 
   const textOp = (opIndex: number, op: ContentOp) => {
@@ -277,6 +332,7 @@ export async function redactContent(
     }
     const pieces: Piece[] = [];
     let anyRemoved = false;
+    let anyTouched = false;
     let opBounds: Rect | null = null;
     let unknownWidths = false;
 
@@ -310,6 +366,7 @@ export async function redactContent(
         const degenerate = fs === 0 || rectArea(test) === 0;
         const remove = degenerate ? pointInAny(applyToPoint(trm, 0, 0), marks) : intersectsAny(test, marks);
         if (remove) anyRemoved = true;
+        if (remove || (degenerate ? remove : intersectsAny(full, marks))) anyTouched = true;
         const tx = (w * fs + gs.Tc + (g.isWordSpace ? gs.Tw : 0)) * gs.Th;
         const tjAdvance = fs !== 0 ? -((w * fs + gs.Tc + (g.isWordSpace ? gs.Tw : 0)) * 1000) / fs : 0;
         pieces.push({ kind: 'glyph', bytes: el.bytes.subarray(g.start, g.start + g.len), remove, tjAdvance });
@@ -318,6 +375,9 @@ export async function redactContent(
     }
 
     if (!opBounds) return;
+    // Any glyph box over a mark touches the enclosing marked content, even
+    // when the (shrunk) removal box keeps the glyph.
+    if (anyTouched) markTouched();
 
     if (!font.reliable || unknownWidths) {
       // Positions are not trustworthy enough for per-glyph surgery. If the op
@@ -337,7 +397,7 @@ export async function redactContent(
         rc.uncertain.push({ rect: expandRect(opBounds, em * 0.25), reason: 'Type3 font text' });
         rc.stats.glyphsRemoved += pieces.filter((p) => p.kind === 'glyph').length;
         rc.stats.textOpsRewritten++;
-        markScrubForRemovedText();
+        markTouched();
         return;
       }
       if (rc.dryRun) {
@@ -358,7 +418,7 @@ export async function redactContent(
       edits.set(opIndex, latin1Bytes(prefix.trim()));
       rc.stats.glyphsRemoved += removedCount;
       rc.stats.textOpsRewritten++;
-      markScrubForRemovedText();
+      markTouched();
       return;
     }
 
@@ -396,7 +456,7 @@ export async function redactContent(
     edits.set(opIndex, latin1Bytes(`${prefix}[${parts.join(' ')}] TJ`));
     rc.stats.glyphsRemoved += removedCount;
     rc.stats.textOpsRewritten++;
-    markScrubForRemovedText();
+    markTouched();
   };
 
   const finishPath = (paintIndex: number, paintOp: string) => {
@@ -416,18 +476,28 @@ export async function redactContent(
     const strokeScale = Math.hypot(gs.ctm[0], gs.ctm[1]) || 1;
     const paintedBounds = STROKE_OPS.has(paintOp) ? expandRect(pathBounds, (gs.lineWidth * strokeScale) / 2 + 0.5) : pathBounds;
 
+    // A PAINTED subpath touches a mark when any of its segments (curves
+    // flattened) enters it: a stroke or curve can cross a mark with every
+    // vertex outside. A path that is only a clip (`n`) paints nothing, so
+    // only its coordinates count.
+    const painted = paintOp !== 'n';
+    // Same 0.001 pt tolerance as the vertex test: the redaction boxes this
+    // engine paints sit exactly on mark edges (after 4-decimal formatting).
+    const segmentMarks = marks.map((m) => insetRect(m, 0.001));
     const classes = subpaths.map((s) => {
       let inside = 0;
       for (const p of s.points) if (pointInAny(p, marks, 0.001)) inside++;
-      return { inside, outside: s.points.length - inside };
+      const touches = inside > 0 || (painted && polylineIntersectsAny(s.poly, segmentMarks));
+      return { touches, allInside: inside === s.points.length };
     });
-    const anyInside = classes.some((c) => c.inside > 0);
-    const straddles = classes.some((c) => c.inside > 0 && c.outside > 0);
+    const anyInside = classes.some((c) => c.touches);
+    const straddles = classes.some((c) => c.touches && !c.allInside);
 
     if (!anyInside) {
       // No coordinate of this path is hidden by a mark; only a pattern fill
       // could still carry content into the marked area.
       if (usesPattern && paintOp !== 'n' && intersectsAny(paintedBounds, marks)) {
+        markTouched();
         if (rc.dryRun) {
           rc.findings.push('Pattern-filled path over a mark');
         } else {
@@ -442,15 +512,16 @@ export async function redactContent(
       return;
     }
 
+    markTouched();
     if (rc.dryRun) {
-      rc.findings.push('Vector path with points under a mark');
+      rc.findings.push('Vector path under a mark');
       resetPath();
       return;
     }
 
     if (!straddles) {
       // Every affected subpath lies entirely under marks: drop just those.
-      const keep = subpaths.filter((_, i) => classes[i].inside === 0);
+      const keep = subpaths.filter((_, i) => !classes[i].touches);
       for (const i of pathOpIndices) edits.set(i, new Uint8Array(0));
       const rebuilt: Uint8Array[] = [];
       for (const s of keep) for (const i of s.opIndices) rebuilt.push(sliceOp(data, ops[i]));
@@ -556,27 +627,36 @@ export async function redactContent(
         break;
 
       // Path construction
-      case 'm':
-        subpaths.push({ opIndices: [i], points: [applyToPoint(gs.ctm, num(o[0]), num(o[1]))] });
+      case 'm': {
+        const p = applyToPoint(gs.ctm, num(o[0]), num(o[1]));
+        subpaths.push({ opIndices: [i], points: [p], poly: [p] });
         pathOpIndices.push(i);
         break;
+      }
       case 'l': case 'c': case 'v': case 'y': case 'h': {
-        if (subpaths.length === 0) subpaths.push({ opIndices: [], points: [] });
+        if (subpaths.length === 0) subpaths.push({ opIndices: [], points: [], poly: [] });
         const sp = subpaths[subpaths.length - 1];
         sp.opIndices.push(i);
-        for (let k = 0; k + 1 < o.length; k += 2) sp.points.push(applyToPoint(gs.ctm, num(o[k]), num(o[k + 1])));
+        const pts: Point[] = [];
+        for (let k = 0; k + 1 < o.length; k += 2) pts.push(applyToPoint(gs.ctm, num(o[k]), num(o[k + 1])));
+        sp.points.push(...pts);
+        const from = sp.poly.length ? sp.poly[sp.poly.length - 1] : pts[0];
+        if (op.op === 'l' && pts.length >= 1) sp.poly.push(pts[0]);
+        else if (op.op === 'c' && pts.length >= 3 && from) sp.poly.push(...flattenCubic(from, pts[0], pts[1], pts[2]));
+        else if (op.op === 'v' && pts.length >= 2 && from) sp.poly.push(...flattenCubic(from, from, pts[0], pts[1]));
+        else if (op.op === 'y' && pts.length >= 2 && from) sp.poly.push(...flattenCubic(from, pts[0], pts[1], pts[1]));
+        else if (op.op === 'h' && sp.poly.length) sp.poly.push(sp.poly[0]);
+        else sp.poly.push(...pts);
         pathOpIndices.push(i);
         break;
       }
       case 're': {
         const x = num(o[0]), y = num(o[1]), w = num(o[2]), h = num(o[3]);
-        subpaths.push({
-          opIndices: [i],
-          points: [
-            applyToPoint(gs.ctm, x, y), applyToPoint(gs.ctm, x + w, y),
-            applyToPoint(gs.ctm, x + w, y + h), applyToPoint(gs.ctm, x, y + h),
-          ],
-        });
+        const corners = [
+          applyToPoint(gs.ctm, x, y), applyToPoint(gs.ctm, x + w, y),
+          applyToPoint(gs.ctm, x + w, y + h), applyToPoint(gs.ctm, x, y + h),
+        ];
+        subpaths.push({ opIndices: [i], points: corners, poly: [...corners, corners[0]] });
         pathOpIndices.push(i);
         break;
       }
@@ -585,25 +665,29 @@ export async function redactContent(
         break;
 
       case 'BDC': case 'BMC': {
-        const entry: MarkedContentEntry = { opIndex: i, tag: nameOf(o[0]) ?? 'Span', scrub: false };
+        const entry: MarkedContentEntry = { opIndex: i, tag: nameOf(o[0]) ?? 'Span', textProps: false, touched: false, scrub: false };
         if (op.op === 'BDC') {
-          if (o[1]?.type === 'dict') entry.inlineProps = o[1].entries;
-          else if (o[1]?.type === 'name') entry.namedProps = o[1].value;
+          if (o[1]?.type === 'dict') {
+            entry.inlineProps = o[1].entries;
+            const mcid = o[1].entries.get('MCID');
+            if (mcid?.type === 'num') entry.mcid = mcid.value;
+            entry.textProps = TEXT_PROPERTY_KEYS.some((k) => o[1]?.type === 'dict' && o[1].entries.has(k));
+          } else if (o[1]?.type === 'name') {
+            // A named property list lives in /Properties; it may be an
+            // optional-content group (/OC), which must never be rewritten.
+            entry.namedProps = o[1].value;
+            const props = getDict(rc.context, scope.lookup('Properties', o[1].value));
+            const mcid = getNumber(rc.context, dictGet(props, 'MCID'));
+            if (mcid !== undefined) entry.mcid = mcid;
+            entry.textProps = !!props && TEXT_PROPERTY_KEYS.some((k) => props.has(PDFName.of(k)));
+          }
         }
         mcStack.push(entry);
         break;
       }
       case 'EMC': {
         const entry = mcStack.pop();
-        if (entry?.scrub && !rc.dryRun) {
-          const mcid = entry.inlineProps?.get('MCID');
-          const replacement =
-            mcid && mcid.type === 'num'
-              ? `${encodeName(entry.tag)} <</MCID ${fmt(mcid.value)}>> BDC`
-              : `${encodeName(entry.tag)} BMC`;
-          edits.set(entry.opIndex, latin1Bytes(replacement));
-          rc.stats.markedContentScrubbed++;
-        }
+        if (entry) closeMarkedContent(entry);
         break;
       }
 
@@ -638,6 +722,7 @@ export async function redactContent(
     if (subtype === 'Image') {
       const bounds = transformRect(gs.ctm, { x0: 0, y0: 0, x1: 1, y1: 1 });
       if (!intersectsAny(bounds, marks)) return;
+      markTouched();
       if (rc.dryRun) return; // images are verified by the pdf.js pixel check
       try {
         const result = await redactImageXObject(rc.pdfDoc, stream, gs.ctm, marks, rc.fill, rc.env, rc.encoder);
@@ -673,6 +758,7 @@ export async function redactContent(
       try {
         formData = decodeStreamStrict(stream);
       } catch (e) {
+        markTouched();
         if (rc.dryRun) {
           rc.findings.push('Undecodable form XObject over a mark');
           return;
@@ -684,7 +770,7 @@ export async function redactContent(
       const ownResources = getDict(rc.context, dictGet(stream.dict, 'Resources'));
       // Forms without /Resources inherit the enclosing scope's resources.
       const formScope = new ResourceScope(rc.context, ownResources ?? scope.finalDict());
-      const result = await redactContent(rc, formData, formScope, formCtm, [...formStack, identity]);
+      const result = await redactContent(rc, formData, formScope, formCtm, [...formStack, identity], markTouched);
       if (rc.dryRun || (!result.bytes && !formScope.modified)) return;
 
       const newDict = stream.dict.clone(rc.context);
@@ -713,6 +799,7 @@ export async function redactContent(
   async function inlineImage(opIndex: number, op: ContentOp): Promise<void> {
     const bounds = transformRect(gs.ctm, { x0: 0, y0: 0, x1: 1, y1: 1 });
     if (!intersectsAny(bounds, marks)) return;
+    markTouched();
     if (rc.dryRun) return;
     const dict = op.inlineDict ?? new Map<string, Operand>();
     const im = dict.get('IM') ?? dict.get('ImageMask');
@@ -734,6 +821,10 @@ export async function redactContent(
       rc.uncertain.push({ rect: bounds, reason });
     }
   }
+
+  // Sequences left open at the end of the stream (unbalanced BDC) are closed
+  // the same way, so their properties are scrubbed and their MCIDs counted.
+  while (mcStack.length) closeMarkedContent(mcStack.pop()!);
 
   if (edits.size === 0) return { bytes: null };
 

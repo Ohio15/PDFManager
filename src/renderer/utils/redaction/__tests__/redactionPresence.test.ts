@@ -23,6 +23,7 @@ import {
   decodePDFRawStream,
 } from 'pdf-lib';
 import { applyRedactions } from '../redactionEngine';
+import { isNeutralPattern } from '../resourceUsage';
 import { openPdfjs, PdfjsEnv } from '../pdfjsEnv';
 import { scanPdfjsPage } from '../pdfjsScan';
 import { verifyRedaction } from '../redactionVerifier';
@@ -215,7 +216,10 @@ describe('replaced image / form XObjects are absent from the saved file', () => 
     await expectAbsent(bytes, MARKER);
     const out = await PDFLib.load(bytes, { updateMetadata: false });
     expect(out.context.lookup(pattern)).toBeUndefined();
-    expect(out.getPage(0).node.Resources()?.get(PDFName.of('Pattern'))).toBeUndefined();
+    // /P0 is still selected by `scn` (the page stays valid) but bound to a
+    // data-free empty tiling pattern, not the original.
+    const patterns = out.getPage(0).node.Resources()!.lookup(PDFName.of('Pattern'), PDFDict);
+    expect(isNeutralPattern(out.context, patterns.get(PDFName.of('P0')))).toBe(true);
   }, 60_000);
 });
 
@@ -405,7 +409,7 @@ describe('zero-size text under a mark', () => {
     const pdf = await openPdfjs(env, await zeroSizePdf());
     const page = await pdf.getPage(1);
     const under = await scanPdfjsPage(page, env.lib.OPS, { marks: [MARK] });
-    expect(under.unexamined).toContain('Zero-size (invisible but extractable) text under a mark');
+    expect(under.unexamined).toContainEqual({ reason: 'zero-size-text', detail: 'Zero-size (invisible but extractable) text under a mark' });
     const elsewhere = await scanPdfjsPage(page, env.lib.OPS, { marks: [{ x0: 300, y0: 300, x1: 400, y1: 400 }] });
     expect(elsewhere.unexamined).toEqual([]);
     await pdf.destroy();

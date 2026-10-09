@@ -7,7 +7,7 @@
  * line) are joined with a virtual space so "Jane Doe" matches across them.
  */
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { Rect, unionRect } from './geometry';
+import { Rect, padToMinSize, unionRect } from './geometry';
 import { PdfjsEnv } from './pdfjsEnv';
 import { scanPdfjsPage, ScannedGlyph } from './pdfjsScan';
 
@@ -190,7 +190,9 @@ export async function findOccurrences(
     const { glyphs } = await scanPdfjsPage(page, env.lib.OPS);
     page.cleanup();
     for (const m of searchGlyphs(glyphs, term, options)) {
-      results.push({ pageIndex: p - 1, text: m.text, rects: m.rects });
+      // Hits on tiny or zero-size text produce boxes below the engine's
+      // minimum mark size; grow them (never shrink) so they stay redactable.
+      results.push({ pageIndex: p - 1, text: m.text, rects: m.rects.map((r) => padToMinSize(r)) });
     }
   }
   return results;

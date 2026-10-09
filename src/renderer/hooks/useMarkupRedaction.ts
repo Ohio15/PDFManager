@@ -28,7 +28,7 @@ import { getTextHeight, mapToStandardFontName, measureTextWidth } from '../utils
 import { applyRedactions, RedactionReport } from '../utils/redaction/redactionEngine';
 import { PdfjsEnv, openPdfjs } from '../utils/redaction/pdfjsEnv';
 import { findOccurrences, SearchOptions } from '../utils/redaction/textSearch';
-import { intersects } from '../utils/redaction/geometry';
+import { intersects, markTooSmall } from '../utils/redaction/geometry';
 import { snapshotDocument, isSameSourceBytes, StaleDocumentError } from '../utils/documentGuard';
 import { pageGeometry } from '../utils/pageStructure';
 import { AnnotationPageFrame, isUnderAnyMark } from '../utils/annotationBounds';
@@ -161,7 +161,9 @@ export function useMarkupRedaction({ stateRef, commitDocument, addToHistory, app
 
   const addRedactionMark = useCallback(
     (pageIndex: number, rects: PdfRect[], source: RedactionMarkAnnotation['source'], text?: string) => {
-      const valid = rects.filter((r) => r.x1 - r.x0 > 0.5 && r.y1 - r.y0 > 0.5);
+      // The engine refuses marks below MIN_MARK_SIZE (they cannot be verified);
+      // a drag that small is not a mark.
+      const valid = rects.filter((r) => !markTooSmall(r));
       if (!valid.length) return;
       const mark: RedactionMarkAnnotation = { id: newId('redact'), type: 'redaction', pageIndex, rects: valid, source, text };
       commitAnnotations('addRedactionMark', pageIndex, (a) => [...a, mark]);

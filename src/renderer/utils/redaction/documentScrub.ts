@@ -323,6 +323,85 @@ export function removeXfa(pdfDoc: PDFLib): boolean {
   return had;
 }
 
+/** Structure-element keys that repeat or describe the content the element tags. */
+const STRUCT_TEXT_KEYS = ['ActualText', 'Alt', 'E'] as const;
+const MAX_STRUCT_DEPTH = 256;
+
+/**
+ * Structure elements (and their ancestors) that tag page-level marked content
+ * of `pageRef` whose MCID satisfies `matches`, and that carry /ActualText,
+ * /Alt or /E. Those strings are a document-level copy of the tagged content:
+ * when the content is under a mark they must go even though the MCID (and the
+ * element) stay. With `apply` the keys are deleted; either way the affected
+ * elements are returned (as "ref" or "direct" descriptions) so the verifier
+ * can fail on any that remain.
+ *
+ * Scope: page content only. Marked-content references into a form XObject
+ * (MCR /Stm) are not followed; form content is rewritten as a new object and
+ * its own marked-content properties are scrubbed in the stream.
+ */
+export function structTextForMcids(pdfDoc: PDFLib, pageRef: PDFRef, matches: (mcid: number) => boolean, apply: boolean): string[] {
+  const context = pdfDoc.context;
+  const root = getDict(context, pdfDoc.catalog.get(PDFName.of('StructTreeRoot')));
+  if (!root) return [];
+  const hits: string[] = [];
+  const done = new Set<PDFDict>();
+  const visited = new Set<PDFDict>();
+  const pageKey = pageRef.toString();
+
+  const isPage = (v: PDFObject | undefined) => v instanceof PDFRef && v.toString() === pageKey;
+
+  const scrub = (chain: Array<{ dict: PDFDict; where: string }>) => {
+    for (const { dict, where } of chain) {
+      if (done.has(dict)) continue;
+      done.add(dict);
+      const present = STRUCT_TEXT_KEYS.filter((k) => dict.has(PDFName.of(k)));
+      if (!present.length) continue;
+      hits.push(`Structure element ${where} carries /${present.join(', /')} for content under a mark`);
+      if (apply) for (const k of present) dict.delete(PDFName.of(k));
+    }
+  };
+
+  const walk = (entry: PDFObject | undefined, inheritedPage: PDFObject | undefined, chain: Array<{ dict: PDFDict; where: string }>, depth: number) => {
+    if (depth > MAX_STRUCT_DEPTH || entry === undefined) return;
+    const dict = getDict(context, entry);
+    if (!dict) return;
+    if (getName(context, dictGet(dict, 'Type')) === 'MCR') {
+      // Marked-content reference: its own /Pg overrides the element's.
+      if (dict.has(PDFName.of('Stm'))) return;
+      const mcid = getNumber(context, dictGet(dict, 'MCID'));
+      const pg = dict.get(PDFName.of('Pg')) ?? inheritedPage;
+      if (mcid !== undefined && isPage(pg) && matches(mcid)) scrub(chain);
+      return;
+    }
+    if (getName(context, dictGet(dict, 'Type')) === 'OBJR') return;
+    if (visited.has(dict)) return;
+    visited.add(dict);
+    const pg = dict.get(PDFName.of('Pg')) ?? inheritedPage;
+    const here = [...chain, { dict, where: entry instanceof PDFRef ? entry.toString() : '(direct)' }];
+    const k = dict.get(PDFName.of('K'));
+    const kids: PDFObject[] = [];
+    const resolvedK = resolve(context, k);
+    if (resolvedK instanceof PDFArray) for (let i = 0; i < resolvedK.size(); i++) kids.push(resolvedK.get(i));
+    else if (k !== undefined) kids.push(k);
+    for (const kid of kids) {
+      const n = resolve(context, kid);
+      if (n instanceof PDFNumber) {
+        if (isPage(pg) && matches(n.asNumber())) scrub(here);
+      } else {
+        walk(kid, pg, here, depth + 1);
+      }
+    }
+  };
+
+  // The root itself is not an element; walk its kids with an empty chain.
+  const rootK = root.get(PDFName.of('K'));
+  const rootKids = resolve(context, rootK);
+  if (rootKids instanceof PDFArray) for (let i = 0; i < rootKids.size(); i++) walk(rootKids.get(i), undefined, [], 0);
+  else walk(rootK, undefined, [], 0);
+  return hits;
+}
+
 /** Delete data on a page that can hold an unredacted rendering or application copy of it. */
 export function scrubPageExtras(pageDict: PDFDict): void {
   pageDict.delete(PDFName.of('Thumb'));

@@ -13,9 +13,18 @@
  */
 import { PDFDocument as PDFLib, PDFName } from 'pdf-lib';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { IDENTITY, Rect, expandRect, fmt, intersects, unionRect } from './geometry';
+import { IDENTITY, MIN_MARK_SIZE, Rect, expandRect, fmt, intersects, markTooSmall, unionRect } from './geometry';
 import { concat, emptyStats, latin1Bytes, redactContent, RedactionStats, RedactorContext, UncertainRegion, WholePageFallback } from './contentRedactor';
-import { collectGarbage, cutRemovedObjects, RemovedObject, removeAnnotationsUnderMarks, removeXfa, scrubPageExtras, stripDocumentMetadata } from './documentScrub';
+import {
+  collectGarbage,
+  cutRemovedObjects,
+  RemovedObject,
+  removeAnnotationsUnderMarks,
+  removeXfa,
+  scrubPageExtras,
+  stripDocumentMetadata,
+  structTextForMcids,
+} from './documentScrub';
 import { ImageEncoder, Rgb, registerRgbImage } from './imageRedactor';
 import { PdfjsEnv, openPdfjs } from './pdfjsEnv';
 import { rasterizeRegion } from './rasterizer';
@@ -53,7 +62,6 @@ export interface RedactionReport {
   rasterized: RasterizedArea[];
   metadataStripped: boolean;
   objectsCollected: number;
-  residualLocations: string[];
   verification: VerificationResult;
 }
 
@@ -99,20 +107,46 @@ function mergeRegions(regions: UncertainRegion[]): UncertainRegion[] {
   return out;
 }
 
+export class RedactionMarkTooSmallError extends Error {
+  constructor(public readonly pageIndex: number, public readonly rect: Rect) {
+    super(
+      `A redaction mark on page ${pageIndex + 1} is ${fmt(rect.x1 - rect.x0)} x ${fmt(rect.y1 - rect.y0)} pt; ` +
+        `marks must be at least ${MIN_MARK_SIZE} pt in each direction to be verifiable. The document was NOT changed.`
+    );
+    this.name = 'RedactionMarkTooSmallError';
+  }
+}
+
+/**
+ * Group marks by page. A mark below MIN_MARK_SIZE is REFUSED, never dropped
+ * or applied: the verifier cannot test anything inside it, so it would pass
+ * every check without examining the content under it.
+ */
 function groupMarks(marks: RedactionMarkInput[]): Map<number, Rect[]> {
   const byPage = new Map<number, Rect[]>();
   for (const m of marks) {
-    const rects = m.rects.filter((r) => r.x1 - r.x0 > 0.01 && r.y1 - r.y0 > 0.01);
-    if (!rects.length) continue;
-    byPage.set(m.pageIndex, [...(byPage.get(m.pageIndex) ?? []), ...rects]);
+    for (const r of m.rects) if (markTooSmall(r)) throw new RedactionMarkTooSmallError(m.pageIndex, r);
+    if (!m.rects.length) continue;
+    byPage.set(m.pageIndex, [...(byPage.get(m.pageIndex) ?? []), ...m.rects]);
   }
   return byPage;
+}
+
+/**
+ * Struct-tree scrub for a redacted page. Anything the walk cannot examine is
+ * left for the verifier, which reports it as NOT EXAMINED (so this page is
+ * redone as a raster, where `all` also drops MCRs into forms the raster no
+ * longer draws).
+ */
+function scrubStructForPage(pdfDoc: PDFLib, pageIndex: number, touched: Set<number> | 'all'): void {
+  const ref = pdfDoc.getPage(pageIndex).ref;
+  structTextForMcids(pdfDoc, ref, touched === 'all' ? () => true : (mcid) => touched.has(mcid), { apply: true, dropFormMcrs: touched === 'all' });
 }
 
 async function runPass(
   original: Uint8Array,
   byPage: Map<number, Rect[]>,
-  forceRaster: Set<number>,
+  forceRaster: Map<number, string>,
   opts: Required<Pick<ApplyRedactionOptions, 'fill' | 'stripMetadata' | 'rasterScale'>> & ApplyRedactionOptions,
   env: PdfjsEnv,
   originalPdfjs: () => Promise<PDFDocumentProxy>
@@ -128,12 +162,14 @@ async function runPass(
   for (const [pageIndex, marks] of byPage) {
     if (pageIndex < 0 || pageIndex >= pdfDoc.getPageCount()) throw new Error(`Redaction mark on missing page ${pageIndex + 1}`);
     const pageDict = pdfDoc.getPage(pageIndex).node;
-    let wholePageReason: string | null = forceRaster.has(pageIndex) ? 'Glyph-level removal could not be verified on this page' : null;
+    const forcedBecause = forceRaster.get(pageIndex);
+    let wholePageReason: string | null = forcedBecause !== undefined ? `Glyph-level removal could not be verified on this page (${forcedBecause})` : null;
 
     if (!wholePageReason) {
       const rc: RedactorContext = {
         pdfDoc, context, marks, fill: opts.fill, env, encoder: opts.encoder, fontCache,
         stats: emptyStats(), uncertain: [], dryRun: false, findings: [],
+        mcids: { touched: new Set(), present: new Set() },
       };
       try {
         const data = pageContentBytes(pdfDoc, pageIndex);
@@ -161,6 +197,8 @@ async function runPass(
         }
         pageDict.set(PDFName.of('Contents'), context.register(context.flateStream(finalContent)));
         pageDict.set(PDFName.of('Resources'), scope.finalDict() ?? context.obj({}));
+        // Structure elements must not repeat what is now under a mark.
+        scrubStructForPage(pdfDoc, pageIndex, rc.mcids!.touched);
         for (const k of Object.keys(stats) as Array<keyof RedactionStats>) stats[k] += rc.stats[k];
       } catch (e) {
         if (!(e instanceof WholePageFallback)) throw e;
@@ -176,6 +214,9 @@ async function runPass(
       const content = `q ${fmt(r.x1 - r.x0)} 0 0 ${fmt(r.y1 - r.y0)} ${fmt(r.x0)} ${fmt(r.y0)} cm /RdxPage1 Do Q\n${boxesContent(marks, opts.fill)}`;
       pageDict.set(PDFName.of('Contents'), context.register(context.flateStream(content)));
       pageDict.set(PDFName.of('Resources'), context.obj({ XObject: { RdxPage1: ref } }));
+      // The page's marked content is gone; which of it was under a mark is no
+      // longer knowable, so no structure element of this page keeps its text.
+      scrubStructForPage(pdfDoc, pageIndex, 'all');
       rasterized.push({ pageIndex, scope: 'page', reason: wholePageReason });
     }
 
@@ -210,12 +251,16 @@ export async function applyRedactions(
   const originalPdfjs = async () => (pdfjsDoc ??= await openPdfjs(env, pdfBytes));
 
   try {
-    const forced = new Set<number>();
+    const forced = new Map<number, string>();
     let pass = await runPass(pdfBytes, byPage, forced, opts, env, originalPdfjs);
     let verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? [], pass.removed);
 
     if (!verification.ok) {
-      for (const p of verification.pageViolations.keys()) forced.add(p);
+      // Only marked pages can be redone; a failure anywhere else (a
+      // document-level copy, an unmarked page) stands and is reported.
+      // The raster reason is a CODE, never the violation message: messages
+      // describe what is under the mark and must not reach the report or UI.
+      for (const [p] of verification.pageViolations) if (byPage.has(p)) forced.set(p, verification.pageReasons.get(p)?.[0] ?? 'unverified');
       if (forced.size > 0) {
         pass = await runPass(pdfBytes, byPage, forced, opts, env, originalPdfjs);
         verification = await verifyRedaction(pass.bytes, byPage, opts.fill, env, opts.mustBeAbsent ?? [], pass.removed);
@@ -232,7 +277,6 @@ export async function applyRedactions(
         rasterized: pass.rasterized,
         metadataStripped: opts.stripMetadata,
         objectsCollected: pass.collected,
-        residualLocations: verification.residualLocations,
         verification,
       },
     };

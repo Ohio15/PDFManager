@@ -11,7 +11,7 @@ import { applyRedactions, RedactionMarkInput } from '../redactionEngine';
 import { findOccurrences } from '../textSearch';
 import { openPdfjs, PdfjsEnv, imageDataToRgba } from '../pdfjsEnv';
 import { scanPdfjsPage } from '../pdfjsScan';
-import { Rect, applyToPoint, pointInRect, insetRect } from '../geometry';
+import { Rect, applyToPoint, pointInRect, insetRect, polylineIntersectsAny } from '../geometry';
 import { parseContent } from '../contentTokenizer';
 
 const env: PdfjsEnv = { lib: pdfjs as unknown as PdfjsEnv['lib'] };
@@ -100,7 +100,7 @@ describe('redaction on real fixtures', () => {
     const mark: Rect = { x0: 100, y0: 600, x1: 300, y1: 700 };
     const before = await scanPdfjsPage(await (await openPdfjs(env, src)).getPage(1), env.lib.OPS);
     const inner = insetRect(mark, 0.5);
-    expect(before.paths.some((p) => p.points.some((pt) => pointInRect(pt, inner)))).toBe(true);
+    expect(before.paths.some((p) => p.subpaths.some((sp) => sp.some((pt) => pointInRect(pt, inner))))).toBe(true);
 
     const { bytes, report } = await applyRedactions(src, [{ pageIndex: 0, rects: [mark] }], {}, env);
     expect(report.verification.ok).toBe(true);
@@ -110,7 +110,8 @@ describe('redaction on real fixtures', () => {
     const outDoc = await openPdfjs(env, bytes);
     const page = await outDoc.getPage(1);
     const after = await scanPdfjsPage(page, env.lib.OPS);
-    expect(after.paths.some((p) => p.points.some((pt) => pointInRect(pt, inner)))).toBe(false);
+    expect(after.paths.some((p) => p.painted && p.subpaths.some((sp) => polylineIntersectsAny(sp, [inner])))).toBe(false);
+    expect(after.paths.some((p) => p.subpaths.some((sp) => sp.some((pt) => pointInRect(pt, inner))))).toBe(false);
     // Paths away from the mark are untouched.
     expect(after.paths.length).toBeGreaterThan(100);
 

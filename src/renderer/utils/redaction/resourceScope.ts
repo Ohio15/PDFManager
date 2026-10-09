@@ -10,11 +10,12 @@
  * Adding is not enough to REPLACE: an original left bound under its old name
  * stays reachable and is written to the output. After the owner's content is
  * rewritten, pruneTo() rebuilds the prunable sub-dictionaries (/XObject,
- * /Pattern) from the names that content actually draws.
+ * /Pattern, /Font, /ExtGState, /Properties) from the names that content
+ * actually uses.
  */
 import { PDFContext, PDFDict, PDFName, PDFObject, PDFRef } from 'pdf-lib';
 import { getDict } from './pdfObjects';
-import { PRUNABLE_CATEGORIES, PrunableCategory } from './resourceUsage';
+import { PRUNABLE_CATEGORIES, PrunableCategory, ResourceUse, bindingUse, neutralFont, neutralPattern } from './resourceUsage';
 
 export type ResourceCategory = 'Font' | 'XObject' | 'ColorSpace' | 'Properties' | 'ExtGState' | 'Pattern' | 'Shading';
 
@@ -51,18 +52,18 @@ export class ResourceScope {
   }
 
   /**
-   * Keep only the /XObject and /Pattern bindings named in `used` (copy-on-write:
+   * Keep only the prunable bindings named in `used` (copy-on-write:
    * the original dictionaries are never mutated). Does nothing when every
    * binding is used.
    */
-  pruneTo(used: Record<PrunableCategory, Set<string>>): void {
+  pruneTo(use: ResourceUse): void {
     const source = this.clone ?? this.original;
     if (!source) return;
     const subOf = (category: PrunableCategory): PDFDict | undefined =>
       category === 'XObject' && this.xobjectClone ? this.xobjectClone : getDict(this.context, source.get(PDFName.of(category)));
     const needsPrune = PRUNABLE_CATEGORIES.some((category) => {
       const sub = subOf(category);
-      return !!sub && sub.entries().some(([key]) => !used[category].has(key.decodeText()));
+      return !!sub && sub.entries().some(([key, value]) => bindingUse(this.context, category, key.decodeText(), value, use) !== 'keep');
     });
     if (!needsPrune) return;
     if (!this.clone) this.clone = source.clone(this.context);
@@ -70,7 +71,13 @@ export class ResourceScope {
       const sub = subOf(category);
       if (!sub) continue;
       const kept = this.context.obj({});
-      for (const [key, value] of sub.entries()) if (used[category].has(key.decodeText())) kept.set(key, value);
+      for (const [key, value] of sub.entries()) {
+        const verdict = bindingUse(this.context, category, key.decodeText(), value, use);
+        // A font only selected by a `Tf` whose text was all removed: keep the
+        // name (the Tf and its size stay valid), drop the font's data.
+        if (verdict === 'keep') kept.set(key, value);
+        else if (verdict === 'neutralise') kept.set(key, category === 'Pattern' ? neutralPattern(this.context) : neutralFont(this.context));
+      }
       if (kept.entries().length === 0) {
         this.clone.delete(PDFName.of(category));
         if (category === 'XObject') this.xobjectClone = null;

@@ -10,10 +10,17 @@
  * rewritten content uses (ResourceScope.pruneTo) and to have the verifier fail
  * on any binding no content op uses (auditResourceUse).
  *
- * "Used" is computed for the categories that can carry page content and are
- * pruned by the engine: /XObject (bound by `Do`) and /Pattern (bound by
- * `scn`/`SCN`, used only when a painting operator runs while it is the
- * current colour). Content that resolves names against the SAME dictionary
+ * "Used" is computed for the categories that can carry page content or a
+ * copy of it and are pruned by the engine: /XObject (bound by `Do`),
+ * /Pattern (bound by `scn`/`SCN`, used only when a painting operator runs
+ * while it is the current colour), /Font (used when a show operator with
+ * glyph bytes runs while it is the current font: a font only SELECTED by a
+ * `Tf` whose text was all removed still carries the glyph program and
+ * ToUnicode of that text, so it is rebound to a data-free standard-14 stub
+ * that keeps the `Tf` and its size valid),
+ * /ExtGState (bound by `gs`: soft-mask groups are content) and /Properties
+ * (bound by `BDC`/`DP`: property lists carry /ActualText, /Alt and /E).
+ * Content that resolves names against the SAME dictionary
  * is followed: Form XObjects without their own /Resources and Type3 fonts
  * without their own /Resources inherit the enclosing resources. Content with
  * its own resources is returned as a child scope for the verifier to audit.
@@ -22,12 +29,12 @@
  * content, excessive nesting) throws ResourceUsageUnknown: callers fail
  * closed (the engine rasterizes the page, the verifier reports a violation).
  */
-import { PDFContext, PDFDict, PDFName, PDFObject, PDFRef, PDFStream } from 'pdf-lib';
-import { ContentOp, parseContent } from './contentTokenizer';
+import { PDFArray, PDFContext, PDFDict, PDFName, PDFNumber, PDFObject, PDFRef, PDFStream } from 'pdf-lib';
+import { ContentOp, Operand, parseContent } from './contentTokenizer';
 import { decodeStreamStrict, dictGet, getArray, getDict, getName, getNumber, getStream, resolve } from './pdfObjects';
 
-export type PrunableCategory = 'XObject' | 'Pattern';
-export const PRUNABLE_CATEGORIES: readonly PrunableCategory[] = ['XObject', 'Pattern'];
+export type PrunableCategory = 'XObject' | 'Pattern' | 'Font' | 'ExtGState' | 'Properties';
+export const PRUNABLE_CATEGORIES: readonly PrunableCategory[] = ['XObject', 'Pattern', 'Font', 'ExtGState', 'Properties'];
 
 /** Same bound as the redactor's form recursion. */
 const MAX_DEPTH = 12;
@@ -51,6 +58,14 @@ export interface ChildScope {
 export interface ResourceUse {
   XObject: Set<string>;
   Pattern: Set<string>;
+  /** Patterns selected by `scn`/`SCN` (whether or not anything paints with them). */
+  PatternSelected: Set<string>;
+  /** Fonts that show at least one glyph. */
+  Font: Set<string>;
+  /** Fonts selected by `Tf` (whether or not they show anything). */
+  FontSelected: Set<string>;
+  ExtGState: Set<string>;
+  Properties: Set<string>;
   children: ChildScope[];
 }
 
@@ -79,7 +94,7 @@ function decodeOrThrow(stream: PDFStream, what: string): Uint8Array {
  * draws, plus the child scopes it reaches that carry their own resources.
  */
 export function collectResourceUse(context: PDFContext, content: Uint8Array, resources: PDFDict | undefined): ResourceUse {
-  const use: ResourceUse = { XObject: new Set(), Pattern: new Set(), children: [] };
+  const use: ResourceUse = { XObject: new Set(), Pattern: new Set(), PatternSelected: new Set(), Font: new Set(), FontSelected: new Set(), ExtGState: new Set(), Properties: new Set(), children: [] };
   const visitedInherited = new Set<PDFObject>();
   const childIds = new Set<PDFObject>();
 
@@ -108,10 +123,12 @@ export function collectResourceUse(context: PDFContext, content: Uint8Array, res
     }
     if (visitedInherited.has(identity)) return;
     visitedInherited.add(identity);
-    for (const s of streams) walk(decodeOrThrow(s, 'Type3 glyph procedure'), depth + 1);
+    for (const s of streams) walk(decodeOrThrow(s, 'Type3 glyph procedure'), depth + 1, undefined);
   };
 
-  const walk = (data: Uint8Array, depth: number): void => {
+  // `inheritedFont`: the font current where inherited content (a form with no
+  // own /Resources) is drawn; text in it may show glyphs without its own Tf.
+  const walk = (data: Uint8Array, depth: number, inheritedFont: string | undefined): void => {
     if (depth > MAX_DEPTH) throw new ResourceUsageUnknown('Content nesting is too deep to determine which resources it draws');
     let ops: ContentOp[];
     try {
@@ -121,7 +138,8 @@ export function collectResourceUse(context: PDFContext, content: Uint8Array, res
     }
     let fill: string | undefined;
     let stroke: string | undefined;
-    const stack: Array<[string | undefined, string | undefined]> = [];
+    let font: string | undefined = inheritedFont;
+    const stack: Array<[string | undefined, string | undefined, string | undefined]> = [];
     const paintWithCurrentColours = () => {
       if (fill) use.Pattern.add(fill);
       if (stroke) use.Pattern.add(stroke);
@@ -129,20 +147,31 @@ export function collectResourceUse(context: PDFContext, content: Uint8Array, res
 
     for (const op of ops) {
       switch (op.op) {
-        case 'q': stack.push([fill, stroke]); break;
-        case 'Q': if (stack.length) [fill, stroke] = stack.pop()!; break;
+        case 'q': stack.push([fill, stroke, font]); break;
+        case 'Q': if (stack.length) [fill, stroke, font] = stack.pop()!; break;
         case 'cs': case 'g': case 'rg': case 'k': case 'sc': fill = undefined; break;
         case 'CS': case 'G': case 'RG': case 'K': case 'SC': stroke = undefined; break;
-        case 'scn': fill = lastName(op); break;
-        case 'SCN': stroke = lastName(op); break;
+        case 'scn': fill = lastName(op); if (fill) use.PatternSelected.add(fill); break;
+        case 'SCN': stroke = lastName(op); if (stroke) use.PatternSelected.add(stroke); break;
         case 'BI': paintWithCurrentColours(); break; // stencil masks paint with the fill colour
         case 'Tf': {
           const name = op.operands[0]?.type === 'name' ? op.operands[0].value : undefined;
-          if (name) type3(subDict(context, resources, 'Font')?.get(PDFName.of(name)), depth);
+          if (name) {
+            use.FontSelected.add(name);
+            font = name;
+            type3(subDict(context, resources, 'Font')?.get(PDFName.of(name)), depth);
+          }
+          break;
+        }
+        case 'BDC': case 'DP': {
+          // Named property list: `/Tag /Name BDC` (an inline dict binds nothing).
+          const props = op.operands[1];
+          if (props?.type === 'name') use.Properties.add(props.value);
           break;
         }
         case 'gs': {
           const name = op.operands[0]?.type === 'name' ? op.operands[0].value : undefined;
+          if (name) use.ExtGState.add(name);
           const egs = name ? getDict(context, subDict(context, resources, 'ExtGState')?.get(PDFName.of(name))) : undefined;
           const fontArr = getArray(context, dictGet(egs, 'Font'));
           if (fontArr && fontArr.size() >= 1) type3(fontArr.get(0), depth);
@@ -162,18 +191,19 @@ export function collectResourceUse(context: PDFContext, content: Uint8Array, res
             addChild({ label: `Form XObject /${name}`, identity, streams: [stream], resources: own });
           } else if (!visitedInherited.has(identity)) {
             visitedInherited.add(identity);
-            walk(decodeOrThrow(stream, `Form XObject /${name}`), depth + 1);
+            walk(decodeOrThrow(stream, `Form XObject /${name}`), depth + 1, font);
           }
           break;
         }
         default:
           if (PAINT_OPS.has(op.op) || TEXT_SHOW_OPS.has(op.op)) paintWithCurrentColours();
+          if (TEXT_SHOW_OPS.has(op.op) && font && showsGlyphs(op)) use.Font.add(font);
           break;
       }
     }
   };
 
-  walk(content, 0);
+  walk(content, 0, undefined);
 
   // Tiling patterns carry their own content and resources.
   const patterns = subDict(context, resources, 'Pattern');
@@ -191,46 +221,139 @@ export function collectResourceUse(context: PDFContext, content: Uint8Array, res
   return use;
 }
 
-/** Entries of a prunable sub-dictionary that `use` does not draw. */
+/** True when a show operator carries at least one byte of string data. */
+function showsGlyphs(op: ContentOp): boolean {
+  const hasBytes = (o: Operand | undefined): boolean =>
+    !!o && ((o.type === 'str' && o.bytes.length > 0) || (o.type === 'arr' && o.items.some((it) => it.type === 'str' && it.bytes.length > 0)));
+  return op.operands.some(hasBytes);
+}
+
+/**
+ * Neutral stand-ins. A font only SELECTED by a `Tf` whose text was all
+ * removed, and a pattern only SELECTED by `scn` whose painting was all
+ * removed, stay bound (the operators remain valid) but to objects that carry
+ * nothing. The predicates below accept ONLY exactly what neutralFont() and
+ * neutralPattern() mint: the exact key set, each value a DIRECT scalar of the
+ * exact expected value, no indirect reference anywhere inside, no content. A
+ * dictionary from the input file passes only if it is byte-for-byte that
+ * stub, in which case it carries nothing either.
+ */
+const NEUTRAL_FONT_ENTRIES: ReadonlyArray<[string, string]> = [['Type', 'Font'], ['Subtype', 'Type1'], ['BaseFont', 'Helvetica']];
+
+const isName = (v: PDFObject | undefined, expected: string) => v instanceof PDFName && v.decodeText() === expected;
+const isNum = (v: PDFObject | undefined, expected: number) => v instanceof PDFNumber && v.asNumber() === expected;
+
+/** Exactly the direct dictionary neutralFont() mints. An indirect reference is never neutral. */
+export function isNeutralFont(_context: PDFContext, value: PDFObject | undefined): boolean {
+  if (!(value instanceof PDFDict)) return false;
+  const entries = value.entries();
+  if (entries.length !== NEUTRAL_FONT_ENTRIES.length) return false;
+  return NEUTRAL_FONT_ENTRIES.every(([k, v]) => isName(value.get(PDFName.of(k)), v));
+}
+
+/** The data-free stand-in for a font that is selected but shows nothing. */
+export function neutralFont(context: PDFContext): PDFDict {
+  return context.obj({ Type: 'Font', Subtype: 'Type1', BaseFont: 'Helvetica' });
+}
+
+/**
+ * Exactly the stream neutralPattern() mints: a reference to a tiling pattern
+ * stream with exactly these direct scalar entries (plus a direct /Length 0),
+ * an empty direct /Resources, no /Filter, and no content.
+ */
+export function isNeutralPattern(context: PDFContext, value: PDFObject | undefined): boolean {
+  if (!(value instanceof PDFRef)) return false;
+  const s = context.lookup(value);
+  if (!(s instanceof PDFStream)) return false;
+  const d = s.dict;
+  const allowed = new Set(['Type', 'PatternType', 'PaintType', 'TilingType', 'BBox', 'XStep', 'YStep', 'Resources', 'Length']);
+  for (const [k] of d.entries()) if (!allowed.has(k.decodeText())) return false;
+  const bbox = d.get(PDFName.of('BBox'));
+  const res = d.get(PDFName.of('Resources'));
+  const len = d.get(PDFName.of('Length'));
+  return (
+    isName(d.get(PDFName.of('Type')), 'Pattern') &&
+    isNum(d.get(PDFName.of('PatternType')), 1) &&
+    isNum(d.get(PDFName.of('PaintType')), 1) &&
+    isNum(d.get(PDFName.of('TilingType')), 1) &&
+    isNum(d.get(PDFName.of('XStep')), 1) &&
+    isNum(d.get(PDFName.of('YStep')), 1) &&
+    bbox instanceof PDFArray && bbox.size() === 4 && [0, 0, 1, 1].every((n, i) => isNum(bbox.get(i), n)) &&
+    res instanceof PDFDict && res.entries().length === 0 &&
+    (len === undefined || isNum(len, 0)) &&
+    s.getContents().length === 0
+  );
+}
+
+/** The data-free stand-in for a pattern that is selected but paints nothing. */
+export function neutralPattern(context: PDFContext): PDFRef {
+  return context.register(
+    context.stream(new Uint8Array(0), { Type: 'Pattern', PatternType: 1, PaintType: 1, TilingType: 1, BBox: [0, 0, 1, 1], XStep: 1, YStep: 1, Resources: {} })
+  );
+}
+
+/**
+ * Whether binding `name` -> `value` in `category` is justified by `use`:
+ * used names are kept; a font only selected (its text all removed) is
+ * acceptable only as a neutral stub.
+ */
+export function bindingUse(context: PDFContext, category: PrunableCategory, name: string, value: PDFObject | undefined, use: ResourceUse): 'keep' | 'neutralise' | 'drop' {
+  if (use[category].has(name)) return 'keep';
+  if (category === 'Font' && use.FontSelected.has(name)) return isNeutralFont(context, value) ? 'keep' : 'neutralise';
+  // A pattern still selected by scn/SCN whose painting was all removed: the
+  // name must stay bound (an unbound name is an invalid page) but not to data.
+  if (category === 'Pattern' && use.PatternSelected.has(name)) return isNeutralPattern(context, value) ? 'keep' : 'neutralise';
+  return 'drop';
+}
+
+/** Entries of a prunable sub-dictionary that `use` does not justify. */
 export function undrawnNames(context: PDFContext, resources: PDFDict | undefined, use: ResourceUse): Array<{ category: PrunableCategory; name: string }> {
   const out: Array<{ category: PrunableCategory; name: string }> = [];
   for (const category of PRUNABLE_CATEGORIES) {
     const sub = subDict(context, resources, category);
     if (!sub) continue;
-    for (const [key] of sub.entries()) {
+    for (const [key, value] of sub.entries()) {
       const name = key.decodeText();
-      if (!use[category].has(name)) out.push({ category, name });
+      if (bindingUse(context, category, name, value, use) !== 'keep') out.push({ category, name });
     }
   }
   return out;
 }
 
 /**
- * Verifier check: every /XObject and /Pattern binding reachable from
+ * Verifier check: every prunable binding (/XObject, /Pattern, /Font,
+ * /ExtGState, /Properties) reachable from
  * `resources` (and, recursively, from the resources of every form, tiling
- * pattern and Type3 font the content draws) must be drawn by some content op.
- * Returns violation messages; an empty list means the check ran and found
- * nothing. Content that cannot be examined is itself a violation.
+ * pattern and Type3 font the content draws) must be used by some content op.
+ * Returns findings; an empty list means the check ran and found nothing.
+ * Content that cannot be examined is returned as `not-examined`, never
+ * dropped.
  */
-export function auditResourceUse(context: PDFContext, content: Uint8Array, resources: PDFDict | undefined, where: string): string[] {
-  const violations: string[] = [];
+export interface ResourceAuditFinding {
+  kind: 'unused-binding' | 'not-examined';
+  message: string;
+}
+
+export function auditResourceUse(context: PDFContext, content: Uint8Array, resources: PDFDict | undefined, where: string): ResourceAuditFinding[] {
+  const violations: ResourceAuditFinding[] = [];
+  const unknown = (message: string) => violations.push({ kind: 'not-examined', message });
   const visited = new Set<PDFObject>();
 
   const audit = (data: Uint8Array, res: PDFDict | undefined, label: string, depth: number) => {
     if (violations.length >= 20) return;
     if (depth > MAX_DEPTH) {
-      violations.push(`${label}: nesting too deep to verify which resources are drawn`);
+      unknown(`${label}: nesting too deep to verify which resources are drawn`);
       return;
     }
     let use: ResourceUse;
     try {
       use = collectResourceUse(context, data, res);
     } catch (e) {
-      violations.push(`${label}: could not determine which resources are drawn (${(e as Error).message})`);
+      unknown(`${label}: could not determine which resources are drawn (${(e as Error).message})`);
       return;
     }
     for (const { category, name } of undrawnNames(context, res, use)) {
-      violations.push(`${label}: /${category} /${name} is in the resources but nothing draws it`);
+      violations.push({ kind: 'unused-binding', message: `${label}: /${category} /${name} is in the resources but nothing draws it` });
     }
     for (const child of use.children) {
       if (visited.has(child.identity)) continue;
@@ -239,7 +362,7 @@ export function auditResourceUse(context: PDFContext, content: Uint8Array, resou
       try {
         for (const s of child.streams) parts.push(decodeStreamStrict(s));
       } catch (e) {
-        violations.push(`${label} > ${child.label}: could not be decoded (${(e as Error).message})`);
+        unknown(`${label} > ${child.label}: could not be decoded (${(e as Error).message})`);
         continue;
       }
       // Each glyph procedure / form is a separate stream; join with newlines.

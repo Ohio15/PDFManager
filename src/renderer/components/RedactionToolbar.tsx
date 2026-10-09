@@ -163,12 +163,6 @@ const RedactionToolbar: React.FC<RedactionToolbarProps> = ({ style, onStyleChang
                 {[...new Set(report.rasterized.map((r) => r.reason))].join('; ')}
               </p>
             )}
-            {report.residualLocations.length > 0 && (
-              <p className="redaction-warning">
-                The searched text still appears outside the page content (e.g. bookmarks, form values or metadata):{' '}
-                {report.residualLocations.slice(0, 3).join('; ')}
-              </p>
-            )}
             <p className="redaction-note">Save the document to make the redaction permanent on disk.</p>
             <div className="redaction-dialog-actions">
               <button className="dialog-btn save" onClick={closeDialog}>Done</button>

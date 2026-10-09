@@ -3,16 +3,33 @@
  *
  * pdf.js decodes fonts (encodings, CMaps, widths, Type3) independently of our
  * fontModel, so walking its operator list gives an independent view of where
- * every glyph, path point and image actually lands on the page. It is used:
+ * every glyph, path segment and image actually lands on the page. It is used:
  *   - as the verification oracle after redaction (redactionVerifier.ts), and
  *   - to locate search terms precisely for search-and-redact (textSearch.ts).
  *
  * Geometry mirrors pdf.js's CanvasGraphics (src/display/canvas.js) so the
  * positions match what pdf.js renders.
+ *
+ * Fail closed: whatever the scan cannot place exactly (text in a font pdf.js
+ * could not load, fonts set through an ExtGState, Type3 glyph procedures,
+ * zero-size text, unbounded shadings) is reported in `unexamined` with a
+ * named reason. An empty glyph list never means "nothing there" by itself.
  */
 import type { PDFPageProxy } from 'pdfjs-dist';
-import { IDENTITY, Matrix, Point, Rect, applyToPoint, boundsOfPoints, multiply, pointInAny } from './geometry';
-import { getPdfjsObject, PdfjsImageData } from './pdfjsEnv';
+import {
+  IDENTITY,
+  Matrix,
+  Point,
+  Rect,
+  applyToPoint,
+  boundsOfPoints,
+  flattenCubic,
+  intersectsAny,
+  multiply,
+  pointInAny,
+  unionRect,
+} from './geometry';
+import { getPdfjsObject, PdfjsImageData, readOperatorListStrict } from './pdfjsEnv';
 
 export interface ScannedGlyph {
   unicode: string;
@@ -36,7 +53,34 @@ export interface ScannedImage {
 }
 
 export interface ScannedPath {
-  points: Point[];
+  /**
+   * One polyline per subpath, in user space: straight segments as given,
+   * Bezier curves flattened, rectangles and closed subpaths closed. A path is
+   * under a mark when any SEGMENT enters it, not only when a vertex does.
+   */
+  subpaths: Point[][];
+  /**
+   * False only when the path is provably not painted (it ends in `n`, possibly
+   * after a clip): such a path puts no ink anywhere, so only its coordinates
+   * count. Anything else is treated as painted.
+   */
+  painted: boolean;
+}
+
+/**
+ * Why the scan could not examine something. Every value is a named FAIL
+ * reason for the verifier; none of them may ever read as "nothing found".
+ */
+export type UnexaminedReason =
+  | 'font-unloadable'
+  | 'extgstate-font'
+  | 'type3-font-under-mark'
+  | 'zero-size-text'
+  | 'shading-unbounded';
+
+export interface UnexaminedEntry {
+  reason: UnexaminedReason;
+  detail: string;
 }
 
 export interface PageScan {
@@ -44,11 +88,10 @@ export interface PageScan {
   images: ScannedImage[];
   paths: ScannedPath[];
   /**
-   * Content the scan could NOT examine (e.g. text shown in a font pdf.js failed
-   * to load). Fail closed: a verifier must treat any entry as a violation,
-   * never as "nothing found".
+   * Content the scan could NOT examine. Fail closed: a verifier must treat any
+   * entry as a failure, never as "nothing found".
    */
-  unexamined: string[];
+  unexamined: UnexaminedEntry[];
 }
 
 interface TextState {
@@ -59,6 +102,8 @@ interface TextState {
   lineX: number;
   lineY: number;
   font: PdfjsFont | null;
+  /** Where the current font came from: a Tf operator or an ExtGState /Font entry. */
+  fontSource: 'Tf' | 'ExtGState' | null;
   fontSize: number;
   fontDirection: number;
   charSpacing: number;
@@ -73,6 +118,9 @@ interface PdfjsFont {
   ascent?: number;
   descent?: number;
   vertical?: boolean;
+  isType3Font?: boolean;
+  /** FontBBox in glyph space. */
+  bbox?: number[];
 }
 
 interface PdfjsGlyph {
@@ -87,34 +135,58 @@ function cloneState(s: TextState): TextState {
   return { ...s, ctm: [...s.ctm] as Matrix, textMatrix: [...s.textMatrix] as Matrix };
 }
 
+function hasGlyphs(items: Array<PdfjsGlyph | number | null | undefined>): boolean {
+  return items.some((g) => g !== null && g !== undefined && typeof g !== 'number');
+}
+
 export interface ScanOptions {
   /**
    * Redaction marks (user space). Zero-size text has no glyph box to test, so
    * when marks are given a zero-size run whose glyph ORIGIN lies under a mark
    * is reported as unexamined (the verifier then fails closed); without marks
-   * every zero-size run is reported.
+   * every zero-size run is reported. Type3 text is reported only when it
+   * intersects a mark, so it is never reported without marks.
    */
   marks?: Rect[];
+  /**
+   * Verification mode: read the operator list so that a pdf.js evaluator
+   * error REJECTS (see readOperatorListStrict) instead of yielding a
+   * truncated list that reads as clean. Use with a document opened strict.
+   */
+  strict?: boolean;
 }
 
 export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, number>, options: ScanOptions = {}): Promise<PageScan> {
   // DISABLE (0): annotation appearances are checked separately via getAnnotations.
-  const opList = await page.getOperatorList({ annotationMode: 0 } as never);
+  const opList = options.strict ? await readOperatorListStrict(page, 0) : await page.getOperatorList({ annotationMode: 0 } as never);
   const fontCache = new Map<string, PdfjsFont | null>();
 
   const glyphs: ScannedGlyph[] = [];
   const images: ScannedImage[] = [];
   const paths: ScannedPath[] = [];
-  const unexamined: string[] = [];
+  const unexamined: UnexaminedEntry[] = [];
+  const flag = (reason: UnexaminedReason, detail: string) => unexamined.push({ reason, detail });
+  const marks = options.marks;
+
+  // Union of the glyph boxes of the current text object (BT..ET) and whether
+  // it showed any Type3 glyph: Type3 ink is drawn by glyph procedures this
+  // scan does not model, so the whole text object must stay clear of marks.
+  let textObjectBox: Rect | null = null;
+  let textObjectType3 = false;
+  let textObjectType3Flagged = false;
 
   let st: TextState = {
     ctm: [...IDENTITY] as Matrix,
     textMatrix: [...IDENTITY] as Matrix,
     x: 0, y: 0, lineX: 0, lineY: 0,
-    font: null, fontSize: 0, fontDirection: 1,
+    font: null, fontSource: null, fontSize: 0, fontDirection: 1,
     charSpacing: 0, wordSpacing: 0, textHScale: 1, leading: 0, textRise: 0,
   };
   const stack: TextState[] = [];
+  // Path cursor in the coordinates pdf.js passes, before the CTM (it persists
+  // across constructPath operations, as in pdf.js's canvas).
+  let pathX = 0;
+  let pathY = 0;
 
   const op = (name: string) => OPS[name];
 
@@ -122,8 +194,11 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     if (fontCache.has(name)) return fontCache.get(name)!;
     let font: PdfjsFont | null = null;
     try {
-      // Fonts always live in commonObjs.
-      font = await getPdfjsObject<PdfjsFont>(page as never, name, true);
+      // Fonts always live in commonObjs. A font pdf.js failed to load (its
+      // worker-side ErrorFont) resolves to the error STRING, not an object,
+      // and shows no glyphs at all; it must read as unloadable, not as empty.
+      const data = await getPdfjsObject<unknown>(page as never, name, true);
+      font = data !== null && typeof data === 'object' ? (data as PdfjsFont) : null;
     } catch {
       font = null;
     }
@@ -138,18 +213,31 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     st.y = st.lineY;
   };
 
-  const showGlyphs = (items: Array<PdfjsGlyph | number | null>) => {
+  const flagType3 = () => {
+    if (textObjectType3Flagged) return;
+    textObjectType3Flagged = true;
+    flag('type3-font-under-mark', 'Type3 font text (glyph procedures are not modelled) intersects a mark');
+  };
+
+  const showGlyphs = (raw: Array<PdfjsGlyph | number | null> | null | undefined) => {
     const font = st.font;
     const fontSize = st.fontSize;
-    if (fontSize === 0) {
-      zeroSizeRun(items);
+    if (!font) {
+      // An unloadable font (pdf.js ErrorFont) yields NO glyph entries at all,
+      // so the run's content and position are unknowable: any show operator
+      // in such a font is unexamined, whatever its argument looks like.
+      flag('font-unloadable', 'Text drawn with a font that could not be loaded');
       return;
     }
-    if (!font) {
-      // Glyph positions are unknowable without the font; the run is unexamined.
-      if (items.some((g) => g !== null && g !== undefined && typeof g !== 'number')) {
-        unexamined.push('Text drawn with a font that could not be loaded');
-      }
+    const items = Array.isArray(raw) ? raw : [];
+    if (st.fontSource === 'ExtGState' && hasGlyphs(items)) {
+      // A font selected by an ExtGState /Font entry bypasses Tf; the redactor
+      // and this oracle would share any modelling gap there, so it is not an
+      // independent check. Located (for search) but never passed as clean.
+      flag('extgstate-font', 'Text drawn with a font set by an ExtGState /Font entry');
+    }
+    if (fontSize === 0) {
+      zeroSizeRun(items);
       return;
     }
     const fm = font.fontMatrix ?? [0.001, 0, 0, 0.001, 0, 0];
@@ -199,6 +287,16 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
       }
       const userCorners = corners.map((p) => applyToPoint(toUser, p.x, p.y));
       const box = boundsOfPoints(userCorners)!;
+      textObjectBox = unionRect(textObjectBox, box);
+      if (font.isType3Font) {
+        textObjectType3 = true;
+        // The advance box says nothing about where a glyph procedure paints;
+        // widen it by the declared FontBBox. A FontBBox with no area bounds
+        // nothing, so on a marked page such a glyph counts as under a mark.
+        const reach = type3Reach(font, baseStart, fontSize, hScale, toUser);
+        if (reach) textObjectBox = unionRect(textObjectBox, reach);
+        if (marks && marks.length && (!reach || intersectsAny(unionRect(box, reach), marks))) flagType3();
+      }
       glyphs.push({
         unicode: g.unicode ?? '',
         isSpace: !!g.isSpace,
@@ -216,9 +314,9 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
   // extract it. Glyph boxes collapse to the origin, so locate each origin
   // (advances are zero; only Tc/Tw spacing moves the pen).
   const zeroSizeRun = (items: Array<PdfjsGlyph | number | null>) => {
-    if (!items.some((g) => g !== null && g !== undefined && typeof g !== 'number')) return;
+    if (!hasGlyphs(items)) return;
     if (!options.marks) {
-      unexamined.push('Zero-size (invisible but extractable) text');
+      flag('zero-size-text', 'Zero-size (invisible but extractable) text');
       return;
     }
     const vertical = !!st.font?.vertical;
@@ -234,7 +332,7 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     }
     if (vertical) st.y -= x;
     else st.x += x * hScale;
-    if (underMark) unexamined.push('Zero-size (invisible but extractable) text under a mark');
+    if (underMark) flag('zero-size-text', 'Zero-size (invisible but extractable) text under a mark');
   };
 
   const addImage = (kind: ScannedImage['kind'], ctm: Matrix, load: ScannedImage['load']) => {
@@ -244,10 +342,71 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
     images.push({ kind, ctm, bounds: boundsOfPoints(corners)!, load });
   };
 
+  const constructPath = (ops: number[], coords: number[], painted: boolean) => {
+    const at = (x: number, y: number) => applyToPoint(st.ctm, x, y);
+    const subpaths: Point[][] = [];
+    let current: Point[] | null = null;
+    let j = 0;
+    const lastPoint = (): Point => (current && current.length ? current[current.length - 1] : at(pathX, pathY));
+    const extend = (pts: Point[]) => {
+      if (!current) {
+        // A segment with no open subpath starts at the path cursor.
+        current = [at(pathX, pathY)];
+        subpaths.push(current);
+      }
+      current.push(...pts);
+    };
+    for (const o of ops) {
+      if (o === op('rectangle')) {
+        const x = coords[j++], y = coords[j++], w = coords[j++], h = coords[j++];
+        const first = at(x, y);
+        subpaths.push([first, at(x + w, y), at(x + w, y + h), at(x, y + h), first]);
+        current = null;
+        pathX = x;
+        pathY = y;
+      } else if (o === op('moveTo')) {
+        pathX = coords[j++];
+        pathY = coords[j++];
+        current = [at(pathX, pathY)];
+        subpaths.push(current);
+      } else if (o === op('lineTo')) {
+        const x = coords[j++], y = coords[j++];
+        extend([at(x, y)]);
+        pathX = x;
+        pathY = y;
+      } else if (o === op('curveTo')) {
+        const p0 = lastPoint();
+        extend(flattenCubic(p0, at(coords[j], coords[j + 1]), at(coords[j + 2], coords[j + 3]), at(coords[j + 4], coords[j + 5])));
+        pathX = coords[j + 4];
+        pathY = coords[j + 5];
+        j += 6;
+      } else if (o === op('curveTo2')) {
+        // `v`: the first control point is the current point.
+        const p0 = lastPoint();
+        extend(flattenCubic(p0, p0, at(coords[j], coords[j + 1]), at(coords[j + 2], coords[j + 3])));
+        pathX = coords[j + 2];
+        pathY = coords[j + 3];
+        j += 4;
+      } else if (o === op('curveTo3')) {
+        // `y`: the second control point is the end point.
+        const p0 = lastPoint();
+        const end = at(coords[j + 2], coords[j + 3]);
+        extend(flattenCubic(p0, at(coords[j], coords[j + 1]), end, end));
+        pathX = coords[j + 2];
+        pathY = coords[j + 3];
+        j += 4;
+      } else if (o === op('closePath')) {
+        const open = current as Point[] | null;
+        if (open && open.length) open.push(open[0]);
+      }
+    }
+    if (subpaths.length) paths.push({ subpaths, painted });
+  };
+
   const { fnArray, argsArray } = opList;
   for (let i = 0; i < fnArray.length; i++) {
     const fn = fnArray[i];
-    const args = argsArray[i] as unknown[];
+    const args = (argsArray[i] ?? []) as unknown[];
     switch (fn) {
       case op('save'):
         stack.push(cloneState(st));
@@ -271,11 +430,20 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
         st.textMatrix = [...IDENTITY] as Matrix;
         st.x = st.lineX = 0;
         st.y = st.lineY = 0;
+        textObjectBox = null;
+        textObjectType3 = false;
+        textObjectType3Flagged = false;
+        break;
+      case op('endText'):
+        if (textObjectType3 && textObjectBox && marks && intersectsAny(textObjectBox, marks)) flagType3();
+        textObjectBox = null;
+        textObjectType3 = false;
         break;
       case op('setFont'): {
         const name = args[0] as string;
         let size = args[1] as number;
         st.font = await getFont(name);
+        st.fontSource = 'Tf';
         if (size < 0) {
           size = -size;
           st.fontDirection = -1;
@@ -283,6 +451,21 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
           st.fontDirection = 1;
         }
         st.fontSize = size;
+        break;
+      }
+      case op('setGState'): {
+        // pdf.js resolves an ExtGState /Font entry to ["Font", [loadedName, size]].
+        for (const entry of (args[0] ?? []) as unknown[]) {
+          if (!Array.isArray(entry) || entry[0] !== 'Font') continue;
+          const value = entry[1] as unknown;
+          const loadedName = Array.isArray(value) && typeof value[0] === 'string' ? value[0] : null;
+          let size = Array.isArray(value) && typeof value[1] === 'number' ? value[1] : 0;
+          st.font = loadedName ? await getFont(loadedName) : null;
+          st.fontSource = 'ExtGState';
+          st.fontDirection = size < 0 ? -1 : 1;
+          if (size < 0) size = -size;
+          st.fontSize = size;
+        }
         break;
       }
       case op('setTextMatrix'): {
@@ -332,32 +515,10 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
         showGlyphs(args[2] as Array<PdfjsGlyph | number>);
         break;
       case op('constructPath'): {
-        const ops = args[0] as number[];
-        const coords = args[1] as number[];
-        const pts: Point[] = [];
-        let j = 0;
-        let cx = 0;
-        let cy = 0;
-        for (const o of ops) {
-          if (o === op('rectangle')) {
-            const x = coords[j++], y = coords[j++], w = coords[j++], h = coords[j++];
-            pts.push(applyToPoint(st.ctm, x, y), applyToPoint(st.ctm, x + w, y), applyToPoint(st.ctm, x + w, y + h), applyToPoint(st.ctm, x, y + h));
-            cx = x; cy = y;
-          } else if (o === op('moveTo') || o === op('lineTo')) {
-            cx = coords[j++]; cy = coords[j++];
-            pts.push(applyToPoint(st.ctm, cx, cy));
-          } else if (o === op('curveTo')) {
-            for (let k = 0; k < 3; k++) pts.push(applyToPoint(st.ctm, coords[j + 2 * k], coords[j + 2 * k + 1]));
-            cx = coords[j + 4]; cy = coords[j + 5];
-            j += 6;
-          } else if (o === op('curveTo2') || o === op('curveTo3')) {
-            pts.push(applyToPoint(st.ctm, coords[j], coords[j + 1]), applyToPoint(st.ctm, coords[j + 2], coords[j + 3]));
-            cx = coords[j + 2]; cy = coords[j + 3];
-            j += 4;
-          }
-        }
-        void cx; void cy;
-        if (pts.length) paths.push({ points: pts });
+        // Painted unless the next non-clip operator is endPath (`n`).
+        let k = i + 1;
+        while (k < fnArray.length && (fnArray[k] === op('clip') || fnArray[k] === op('eoClip'))) k++;
+        constructPath((args[0] ?? []) as number[], (args[1] ?? []) as number[], !(k < fnArray.length && fnArray[k] === op('endPath')));
         break;
       }
       case op('paintImageXObject'): {
@@ -415,7 +576,7 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
       }
       case op('shadingFill'):
         // Painted area is the current clip, which this scan does not model.
-        unexamined.push('Shading fill whose painted area cannot be bounded');
+        flag('shading-unbounded', 'Shading fill whose painted area cannot be bounded');
         break;
       case op('paintSolidColorImageMask'):
         addImage('group', [...st.ctm] as Matrix, async () => null);
@@ -426,6 +587,24 @@ export async function scanPdfjsPage(page: PDFPageProxy, OPS: Record<string, numb
   }
 
   return { glyphs, images, paths, unexamined };
+}
+
+/**
+ * User-space box a Type3 glyph's FontBBox covers when the glyph is drawn at
+ * text-space origin `origin`, or null when the FontBBox bounds nothing (absent
+ * or zero area — allowed by the spec, and then it says nothing about the ink).
+ */
+function type3Reach(font: PdfjsFont, origin: Point, fontSize: number, hScale: number, toUser: Matrix): Rect | null {
+  const bbox = font.bbox;
+  if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((n) => Number.isFinite(n))) return null;
+  const x0 = Math.min(bbox[0], bbox[2]), x1 = Math.max(bbox[0], bbox[2]);
+  const y0 = Math.min(bbox[1], bbox[3]), y1 = Math.max(bbox[1], bbox[3]);
+  if (!(x1 > x0 && y1 > y0)) return null;
+  const fm = font.fontMatrix && font.fontMatrix.length === 6 ? (font.fontMatrix as Matrix) : ([0.001, 0, 0, 0.001, 0, 0] as Matrix);
+  const corners = [applyToPoint(fm, x0, y0), applyToPoint(fm, x1, y0), applyToPoint(fm, x0, y1), applyToPoint(fm, x1, y1)].map((g) =>
+    applyToPoint(toUser, origin.x + g.x * fontSize * hScale, origin.y + g.y * fontSize)
+  );
+  return boundsOfPoints(corners);
 }
 
 export { UNIT_SQUARE };

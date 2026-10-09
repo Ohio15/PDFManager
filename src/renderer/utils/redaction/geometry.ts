@@ -155,3 +155,93 @@ export function fmt(n: number): string {
   s = s.replace(/\.?0+$/, '');
   return s === '' || s === '-' ? '0' : s;
 }
+
+/**
+ * Smallest redaction mark (in points, both width and height) the engine
+ * accepts. The verifier insets every mark by a fraction of its own size and
+ * tests glyph centres, path segments and pixels against what remains; a mark
+ * below this size has (almost) no interior, so every check would pass without
+ * testing anything. Marks this small are refused, never silently passed.
+ */
+export const MIN_MARK_SIZE = 1;
+
+export function markTooSmall(r: Rect): boolean {
+  return !(r.x1 - r.x0 >= MIN_MARK_SIZE && r.y1 - r.y0 >= MIN_MARK_SIZE);
+}
+
+/** Grow `r` about its centre so each side is at least `min` long (never shrinks). */
+export function padToMinSize(r: Rect, min: number = MIN_MARK_SIZE): Rect {
+  const w = r.x1 - r.x0;
+  const h = r.y1 - r.y0;
+  const dx = w < min ? (min - w) / 2 : 0;
+  const dy = h < min ? (min - h) / 2 : 0;
+  return { x0: r.x0 - dx, y0: r.y0 - dy, x1: r.x1 + dx, y1: r.y1 + dy };
+}
+
+/**
+ * Tolerance-shrunk copy of a mark for verification: the inset is capped at a
+ * quarter of the mark's smaller side, so the result always keeps a non-empty
+ * interior (a fixed inset would invert any mark narrower than twice it).
+ */
+export function verificationCore(r: Rect, inset = 0.5): Rect {
+  const d = Math.min(inset, Math.min(r.x1 - r.x0, r.y1 - r.y0) / 4);
+  return insetRect(r, Math.max(0, d));
+}
+
+/** Number of line segments a cubic Bezier is flattened into for intersection tests. */
+export const BEZIER_STEPS = 16;
+
+/**
+ * Points of a cubic Bezier p0..p3 (excluding p0), flattened to BEZIER_STEPS
+ * segments. Affine maps preserve Beziers, so flattening after the CTM is exact
+ * up to the flattening error, which is far below a point for page-sized curves.
+ */
+export function flattenCubic(p0: Point, p1: Point, p2: Point, p3: Point, steps = BEZIER_STEPS): Point[] {
+  const out: Point[] = [];
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const u = 1 - t;
+    const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    out.push({ x: a * p0.x + b * p1.x + c * p2.x + d * p3.x, y: a * p0.y + b * p1.y + c * p2.y + d * p3.y });
+  }
+  return out;
+}
+
+/**
+ * True when segment a-b has any point strictly inside `r` (Liang-Barsky
+ * clipping against the open rectangle). A segment that only runs along the
+ * boundary is outside, matching pointInRect.
+ */
+export function segmentIntersectsRect(a: Point, b: Point, r: Rect): boolean {
+  if (!(r.x1 > r.x0 && r.y1 > r.y0)) return false;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  let t0 = 0;
+  let t1 = 1;
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q > 0;
+    const t = q / p;
+    if (p < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+    return true;
+  };
+  if (!clip(-dx, a.x - r.x0) || !clip(dx, r.x1 - a.x) || !clip(-dy, a.y - r.y0) || !clip(dy, r.y1 - a.y)) return false;
+  if (t0 > t1) return false;
+  // The clipped piece may be a single boundary point; test its midpoint strictly.
+  const mid = (t0 + t1) / 2;
+  return pointInRect({ x: a.x + dx * mid, y: a.y + dy * mid }, r);
+}
+
+/** True when the polyline (consecutive points; a single point is tested as a point) enters any rect. */
+export function polylineIntersectsAny(points: Point[], rects: Rect[]): boolean {
+  if (points.length === 1) return pointInAny(points[0], rects);
+  for (let i = 1; i < points.length; i++) {
+    for (const r of rects) if (segmentIntersectsRect(points[i - 1], points[i], r)) return true;
+  }
+  return false;
+}

@@ -59,6 +59,7 @@ import {
   drawObject,
   endMarkedContent,
 } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 import { Encodings } from '@pdf-lib/standard-fonts';
 import fontkit from '@pdf-lib/fontkit';
 import { getContentStreams, decodeStream, updateStream } from './pdfStreamUtils';
@@ -859,7 +860,7 @@ function textOps(
 async function loadForStamping(pdfData: Uint8Array): Promise<PDFLib> {
   // pdfData in memory is decrypted plaintext; ignoreEncryption mirrors
   // pageStructure.ts for robustness against a residual /Encrypt entry.
-  return PDFLib.load(pdfData, { ignoreEncryption: true, updateMetadata: false });
+  return loadPdf(pdfData, { ignoreEncryption: true, updateMetadata: false });
 }
 
 function sniffImage(bytes: Uint8Array): 'png' | 'jpeg' | null {

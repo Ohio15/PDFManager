@@ -14,6 +14,7 @@ import {
   BlessedFileRegistry,
 } from './security';
 import { handleConvertToPdf } from './convertToPdf';
+import { libreOfficeInstallRoots, resolveTrustedLibreOffice } from './libreOffice';
 import { pathConfinementMode, readEnv, shouldLoadDevServer, type EnvVarName } from './environment';
 
 /** Environment reads go through the packaged allow-list in environment.ts. */
@@ -304,8 +305,7 @@ function createWindow(): void {
 
   // Send LibreOffice status when DOM is ready
   mainWindow.webContents.on('dom-ready', () => {
-    const loPath = store.get('libreOfficePath');
-    mainWindow?.webContents.send('libreoffice-status', loPath);
+    mainWindow?.webContents.send('libreoffice-status', trustedLibreOffice());
   });
 
   createMenu();
@@ -1066,119 +1066,21 @@ ipcMain.handle('clear-recent-files', () => {
   return [];
 });
 
-// LibreOffice detection and conversion
-function detectLibreOffice(): string | null {
-  const possiblePaths: string[] = [];
-
-  // Always check hardcoded common Windows paths first (most reliable)
-  const hardcodedWindowsPaths = [
-    'C:/Program Files/LibreOffice/program/soffice.exe',
-    'C:/Program Files (x86)/LibreOffice/program/soffice.exe',
-    'C:/Program Files/LibreOffice 7/program/soffice.exe',
-    'C:/Program Files/LibreOffice 24/program/soffice.exe',
-    'C:/Program Files/LibreOffice 25/program/soffice.exe',
-  ];
-
-  for (const p of hardcodedWindowsPaths) {
-    if (fs.existsSync(p)) {
-      return p;
-    }
-  }
-
-  if (process.platform === 'win32') {
-    const programDirs = [
-      env('ProgramFiles') || 'C:\\Program Files',
-      env('ProgramFiles(x86)') || 'C:\\Program Files (x86)',
-      env('LOCALAPPDATA'),
-      env('APPDATA'),
-    ].filter(Boolean) as string[];
-
-    const libreOfficeFolders = ['LibreOffice', 'LibreOffice 7', 'LibreOffice 24', 'LibreOffice 25'];
-
-    for (const base of programDirs) {
-      for (const folder of libreOfficeFolders) {
-        const directPath = path.join(base, folder, 'program', 'soffice.exe');
-        if (fs.existsSync(directPath)) {
-          possiblePaths.push(directPath);
-        }
-
-        const libreOfficePath = path.join(base, folder);
-        if (fs.existsSync(libreOfficePath)) {
-          try {
-            const items = fs.readdirSync(libreOfficePath);
-            for (const item of items) {
-              if (item !== 'program') {
-                const versionPath = path.join(libreOfficePath, item, 'program', 'soffice.exe');
-                if (fs.existsSync(versionPath)) {
-                  possiblePaths.push(versionPath);
-                }
-              }
-            }
-          } catch (e) {
-            // Ignore errors reading directory
-          }
-        }
-      }
-    }
-
-    if (possiblePaths.length === 0) {
-      try {
-        const { execSync } = require('child_process');
-        const result = execSync(
-          'powershell -Command "Get-ItemProperty HKLM:\\\\SOFTWARE\\\\LibreOffice\\\\* -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path"',
-          { encoding: 'utf8', timeout: 5000 }
-        ).trim();
-        if (result) {
-          const regPath = path.join(result, 'program', 'soffice.exe');
-          if (fs.existsSync(regPath)) {
-            possiblePaths.push(regPath);
-          }
-        }
-      } catch (e) {
-        // Registry lookup failed, continue with other methods
-      }
-    }
-  } else if (process.platform === 'darwin') {
-    const macPaths = [
-      '/Applications/LibreOffice.app/Contents/MacOS/soffice',
-      path.join(env('HOME') || '', 'Applications/LibreOffice.app/Contents/MacOS/soffice'),
-    ];
-    for (const p of macPaths) {
-      if (fs.existsSync(p)) {
-        possiblePaths.push(p);
-      }
-    }
-  } else {
-    const linuxPaths = [
-      '/usr/bin/libreoffice',
-      '/usr/bin/soffice',
-      '/usr/local/bin/libreoffice',
-      '/usr/local/bin/soffice',
-      '/opt/libreoffice/program/soffice',
-      '/opt/libreoffice7.0/program/soffice',
-      '/snap/bin/libreoffice',
-    ];
-    for (const p of linuxPaths) {
-      if (fs.existsSync(p)) {
-        possiblePaths.push(p);
-      }
-    }
-  }
-
-  return possiblePaths.length > 0 ? possiblePaths[0] : null;
+// LibreOffice detection: only a launcher inside fixed install roots (never
+// located through the environment) is ever run. See libreOffice.ts.
+function libreOfficeRoots(): string[] {
+  return libreOfficeInstallRoots({ platform: process.platform, appData: app.getPath('appData') });
 }
 
-ipcMain.handle('detect-libreoffice', () => {
-  const storedPath = store.get('libreOfficePath');
-  if (storedPath && typeof storedPath === 'string' && storedPath.length > 0) {
-    return storedPath;
-  }
-  const detected = detectLibreOffice();
-  if (detected) {
-    store.set('libreOfficePath', detected);
-  }
-  return detected;
-});
+/** The trusted launcher (remembered or freshly detected); keeps the store in step. */
+function trustedLibreOffice(): string | null {
+  const stored = store.get('libreOfficePath');
+  const resolved = resolveTrustedLibreOffice(stored, process.platform, libreOfficeRoots());
+  if (resolved !== stored) store.set('libreOfficePath', resolved);
+  return resolved;
+}
+
+ipcMain.handle('detect-libreoffice', () => trustedLibreOffice());
 
 ipcMain.handle('convert-to-pdf', (_event, payload: unknown) =>
   handleConvertToPdf(payload, {
@@ -1186,7 +1088,7 @@ ipcMain.handle('convert-to-pdf', (_event, payload: unknown) =>
     isDirBlessed: isPathBlessed,
     isInputFileBlessed: (p) => blessedFiles.has(p, 'read'),
     blessDerivedPdf: (p) => blessedFiles.addDerivedPdf(p),
-    converterPath: () => store.get('libreOfficePath') || detectLibreOffice(),
+    converterPath: trustedLibreOffice,
   })
 );
 
@@ -1376,11 +1278,8 @@ ipcMain.handle('clear-auto-recovery', () => {
 });
 
 app.whenReady().then(() => {
-  // Run LibreOffice detection at startup
-  const detectedPath = detectLibreOffice();
-  if (detectedPath) {
-    store.set('libreOfficePath', detectedPath);
-  }
+  // Run LibreOffice detection at startup (also drops an untrusted remembered path)
+  trustedLibreOffice();
   createWindow();
 });
 

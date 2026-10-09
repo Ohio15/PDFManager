@@ -82,6 +82,33 @@ describe('decodeRawStreamBounded: every filter chain is capped while it runs', (
   });
 });
 
+describe('predictor row geometry cannot drive allocation', () => {
+  it('a 2-byte stream claiming 1 GiB rows (/Colors 32 /BitsPerComponent 16 /Columns 16777216) allocates at most its input', async () => {
+    const doc = await PDFDocument.create();
+    const dict = doc.context.obj({
+      Filter: 'FlateDecode',
+      DecodeParms: { Predictor: 12, Colors: 32, BitsPerComponent: 16, Columns: 16777216 },
+    });
+    const stream = PDFRawStream.of(dict, pako.deflate(Uint8Array.of(0, 7))); // decodes to 2 bytes
+    const out = decodeRawStreamBounded(stream);
+    expect(Array.from(out)).toEqual([7]);
+    // The backing allocation, not just the view, is bounded by the input.
+    expect(out.buffer.byteLength).toBeLessThanOrEqual(2);
+    // Inflate (2 bytes) + predictor output (1 byte) charged; nothing near 1 GiB.
+    expect(decodeBudgetFor(doc.context).consumed).toBe(3);
+  });
+
+  it('TIFF predictor output stays the size of its input', async () => {
+    const doc = await PDFDocument.create();
+    const dict = doc.context.obj({
+      Filter: 'FlateDecode',
+      DecodeParms: { Predictor: 2, Colors: 32, BitsPerComponent: 16, Columns: 16777216 },
+    });
+    const out = decodeRawStreamBounded(PDFRawStream.of(dict, pako.deflate(Uint8Array.of(1, 2))));
+    expect(out.buffer.byteLength).toBeLessThanOrEqual(2);
+  });
+});
+
 describe('per-document decode budget', () => {
   it('is shared by every decode of one document: the same stream decoded repeatedly runs it out', async () => {
     const doc = await PDFDocument.create();

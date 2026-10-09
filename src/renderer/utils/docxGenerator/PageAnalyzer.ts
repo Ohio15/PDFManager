@@ -18,8 +18,11 @@
  */
 
 import pako from 'pako';
-import { PDFName, PDFNumber, PDFDict, PDFRawStream, PDFArray } from 'pdf-lib';
-import { decodeBudgetFor, inflateCapped, MAX_DECODED_STREAM_BYTES, rethrowDocumentDecodeLimit } from '../boundedDecode';
+import { PDFName, PDFNumber, PDFDict, PDFRawStream, PDFArray, PDFHexString, PDFString } from 'pdf-lib';
+import { decodeBudgetFor, decodeRawStreamBounded, inflateCapped, MAX_DECODED_STREAM_BYTES, rethrowDocumentDecodeLimit } from '../boundedDecode';
+
+/** Largest Indexed colour-space lookup table: 256 entries x 4 components. */
+const MAX_PALETTE_BYTES = 256 * 4;
 import type {
   SceneElement,
   TextElement,
@@ -560,18 +563,15 @@ function handleFlateImage(
             if (lookupObj) {
               const lookup = context.lookup(lookupObj);
               if (lookup instanceof PDFRawStream) {
-                indexedPalette = lookup.getContents();
+                // The lookup stream is usually Flate-encoded; decode it (a
+                // palette is at most 256 entries x 4 components).
+                indexedPalette = decodeRawStreamBounded(lookup, MAX_PALETTE_BYTES);
               } else if (lookup && typeof (lookup as any).getContents === 'function') {
                 // Another stream type
                 indexedPalette = (lookup as any).getContents();
-              } else if (lookup && typeof (lookup as any).asString === 'function') {
-                // PDFHexString or PDFString — convert to bytes
-                const str = (lookup as any).asString() as string;
-                const bytes = new Uint8Array(str.length);
-                for (let h = 0; h < str.length; h++) {
-                  bytes[h] = str.charCodeAt(h) & 0xFF;
-                }
-                indexedPalette = bytes;
+              } else if (lookup instanceof PDFHexString || lookup instanceof PDFString) {
+                // The string's bytes are the palette (asString() would give hex digits).
+                indexedPalette = lookup.asBytes();
               } else if (lookup instanceof Uint8Array) {
                 indexedPalette = lookup;
               }
@@ -579,7 +579,11 @@ function handleFlateImage(
           }
         }
       }
-    } catch { /* palette extraction failed — will fall through to pdfjs fallback */ }
+    } catch (e) {
+      // A spent document budget stops the conversion; otherwise palette
+      // extraction failed and this falls through to the pdfjs fallback.
+      rethrowDocumentDecodeLimit(e);
+    }
     if (!indexedPalette) return null; // Can't decode Indexed without palette
   }
 
@@ -2134,6 +2138,7 @@ export const _testExports = {
   classifyImage,
   isBoldFont,
   isItalicFont,
+  extractImageData,
 };
 
 /**

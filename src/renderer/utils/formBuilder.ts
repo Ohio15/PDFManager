@@ -41,6 +41,7 @@ import {
   StandardFonts,
   degrees,
 } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 import { removeUnreachableObjects } from './pdfObjectGraph';
 
 export type FormFieldKind = 'text' | 'checkbox' | 'radio' | 'dropdown' | 'listbox' | 'signature' | 'button';
@@ -326,7 +327,7 @@ function pageGeometry(page: PDFPage): PageGeometry {
 }
 
 export async function readFormModel(bytes: Uint8Array): Promise<FormModel> {
-  const doc = await PDFDocument.load(bytes, LOAD_OPTIONS);
+  const doc = await loadPdf(bytes, LOAD_OPTIONS);
   const pages = doc.getPages().map(pageGeometry);
   if (!hasAcroForm(doc)) return { fields: [], pages };
 
@@ -639,7 +640,7 @@ export async function createFormField(
   bytes: Uint8Array,
   spec: NewFieldSpec
 ): Promise<{ bytes: Uint8Array; name: string }> {
-  const doc = await PDFDocument.load(bytes, LOAD_OPTIONS);
+  const doc = await loadPdf(bytes, LOAD_OPTIONS);
   const name = await createInDoc(doc, spec);
   return { bytes: await finish(doc), name };
 }
@@ -714,7 +715,7 @@ export async function updateFormFieldProperties(
   fieldName: string,
   update: FieldPropertyUpdate
 ): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(bytes, LOAD_OPTIONS);
+  const doc = await loadPdf(bytes, LOAD_OPTIONS);
   const form = doc.getForm();
   let field = getFieldOrThrow(form, fieldName);
   const kind = fieldKind(field);
@@ -799,7 +800,7 @@ export async function setFormWidgetRect(
   rect: FieldRect
 ): Promise<Uint8Array> {
   validateRect(rect);
-  const doc = await PDFDocument.load(bytes, LOAD_OPTIONS);
+  const doc = await loadPdf(bytes, LOAD_OPTIONS);
   const form = doc.getForm();
   const field = getFieldOrThrow(form, fieldName);
   const widgets = field.acroField.getWidgets();
@@ -819,7 +820,7 @@ export async function setFormWidgetRect(
 }
 
 export async function deleteFormField(bytes: Uint8Array, fieldName: string): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(bytes, LOAD_OPTIONS);
+  const doc = await loadPdf(bytes, LOAD_OPTIONS);
   const form = doc.getForm();
   const field = getFieldOrThrow(form, fieldName);
   removeFieldFromDoc(doc, form, field);

@@ -1,4 +1,5 @@
 import * as pako from 'pako';
+import type { LoadOptions } from 'pdf-lib';
 import {
   decodePDFRawStream,
   PDFArray,
@@ -246,10 +247,20 @@ function parmNumber(parms: PDFDict, key: string, fallback: number): number {
 }
 
 /**
- * Undoes a /Predictor (ISO 32000-1 §7.4.4.4) after Flate or LZW. Output is
- * never larger than the input, so the stage cap already bounds it.
+ * Undoes a /Predictor (ISO 32000-1 §7.4.4.4) after Flate or LZW.
+ *
+ * The row geometry comes from the file (/Colors x /BitsPerComponent x
+ * /Columns can describe a gigabyte-wide row), so the output is sized from the
+ * bytes actually present, never from rows x rowBytes: it is at most the input
+ * (PNG drops one tag byte per row; TIFF is in place). It is checked against
+ * the stage cap and charged to the document budget like any decoded output.
  */
-export function applyPredictor(data: Uint8Array, parms: PDFDict | undefined): Uint8Array {
+export function applyPredictor(
+  data: Uint8Array,
+  parms: PDFDict | undefined,
+  maxBytes: number = MAX_DECODED_STREAM_BYTES,
+  budget?: DecodeBudget
+): Uint8Array {
   if (!parms) return data;
   const predictor = parmNumber(parms, 'Predictor', 1);
   if (predictor === 1) return data;
@@ -262,16 +273,30 @@ export function applyPredictor(data: Uint8Array, parms: PDFDict | undefined): Ui
     throw new UnsupportedStreamEncodingError('invalid predictor parameters');
   }
   const rowBytes = Math.ceil((colors * bpc * columns) / 8);
-  if (predictor === 2) return undoTiffPredictor(data, rowBytes, colors, bpc, columns);
-  if (predictor >= 10 && predictor <= 15) {
-    return undoPngPredictor(data, rowBytes, Math.max(1, Math.ceil((colors * bpc) / 8)));
+  let out: Uint8Array;
+  if (predictor === 2) {
+    out = undoTiffPredictor(data, rowBytes, colors, bpc, columns);
+  } else if (predictor >= 10 && predictor <= 15) {
+    out = undoPngPredictor(data, rowBytes, Math.max(1, Math.ceil((colors * bpc) / 8)), maxBytes);
+  } else {
+    throw new UnsupportedStreamEncodingError(`Predictor ${predictor}`);
   }
-  throw new UnsupportedStreamEncodingError(`Predictor ${predictor}`);
+  // Invariant the sizing above guarantees; asserted because the row geometry is hostile input.
+  if (out.length > data.length || out.buffer.byteLength > Math.max(data.length, 1)) {
+    throw new Error('predictor output larger than its input');
+  }
+  if (out.length > maxBytes) throw new DecodeLimitError('stream', maxBytes);
+  budget?.charge(out.length);
+  return out;
 }
 
-function undoPngPredictor(data: Uint8Array, rowBytes: number, bpp: number): Uint8Array {
+function undoPngPredictor(data: Uint8Array, rowBytes: number, bpp: number, maxBytes: number): Uint8Array {
   const rows = Math.ceil(data.length / (rowBytes + 1));
-  const out = new Uint8Array(rows * rowBytes);
+  // Every row but the last is complete; the last holds whatever bytes remain
+  // after its tag byte. So the output is exactly data.length - rows bytes.
+  const size = Math.max(0, data.length - rows);
+  if (size > maxBytes) throw new DecodeLimitError('stream', maxBytes);
+  const out = new Uint8Array(size);
   let produced = 0;
   for (let r = 0; r < rows; r++) {
     const src = r * (rowBytes + 1);
@@ -367,10 +392,10 @@ export function decodeRawStreamBounded(stream: PDFRawStream, maxBytes = MAX_DECO
   for (const stage of stages) {
     switch (stage.name) {
       case 'FlateDecode':
-        data = applyPredictor(inflateCapped(data, maxBytes, budget), stage.parms);
+        data = applyPredictor(inflateCapped(data, maxBytes, budget), stage.parms, maxBytes, budget);
         break;
       case 'LZWDecode':
-        data = applyPredictor(pullCapped(stage, data, stream.dict.context, maxBytes, budget), stage.parms);
+        data = applyPredictor(pullCapped(stage, data, stream.dict.context, maxBytes, budget), stage.parms, maxBytes, budget);
         break;
       case 'ASCII85Decode':
       case 'ASCIIHexDecode':
@@ -442,3 +467,15 @@ export function installLoadTimeDecodeBounds(): void {
 }
 
 installLoadTimeDecodeBounds();
+
+/**
+ * The renderer's one entry point for loading a PDF with pdf-lib. Calling
+ * through here guarantees the load-time decode bounds are installed whatever
+ * the import order, and a decode-limit overflow inside an object stream
+ * rejects the load with DecodeLimitError. A source-scan test
+ * (loadPdfOnly.test.ts) forbids direct PDFDocument.load elsewhere.
+ */
+export function loadPdf(pdf: string | Uint8Array | ArrayBuffer, options?: LoadOptions): Promise<PDFDocument> {
+  installLoadTimeDecodeBounds();
+  return PDFDocument.load(pdf, options);
+}

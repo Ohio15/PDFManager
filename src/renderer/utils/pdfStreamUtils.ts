@@ -16,6 +16,7 @@ import {
 } from 'pdf-lib';
 import * as pako from 'pako';
 import { decodeRawStreamBounded, rethrowDecodeLimit } from './boundedDecode';
+import { decodeStreamStrict } from './redaction/pdfObjects';
 
 export interface FontInfo {
   name: string;
@@ -69,6 +70,54 @@ export function decodeStream(stream: PDFStream): Uint8Array | null {
     rethrowDecodeLimit(e);
     return null;
   }
+}
+
+/**
+ * A text edit (delete or replace) could not examine a page's content: a
+ * content stream is encoded in a way PDF Manager cannot decode, so the text
+ * may be in it and would survive the edit. The save fails with this message
+ * rather than treating the text as "not found" and covering it with an
+ * overlay that leaves it extractable.
+ */
+export class ContentNotExaminedError extends Error {
+  readonly pageIndex: number;
+  readonly text: string;
+
+  constructor(pageIndex: number, text: string, cause: unknown) {
+    const shown = text.length > 40 ? `${text.slice(0, 40)}...` : text;
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `The text "${shown}" on page ${pageIndex + 1} could not be examined: the page has content PDF Manager cannot decode (${reason}). ` +
+        'The edit was not applied and the document was not saved.'
+    );
+    this.name = 'ContentNotExaminedError';
+    this.pageIndex = pageIndex;
+    this.text = text;
+  }
+}
+
+/**
+ * Decoded bytes of a page content stream that a text edit must examine.
+ * A stream parsed from the file is decoded strictly: if it cannot be decoded
+ * the edit cannot know whether the text is in it, so this throws
+ * ContentNotExaminedError (a decode-limit overflow throws DecodeLimitError).
+ * Returns null only for a stream pdf-lib built in memory during this save
+ * (app-generated overlay content, never file content), which edits skip.
+ */
+export function decodeContentForEdit(stream: PDFStream, pageIndex: number, text: string): Uint8Array | null {
+  if (!(stream instanceof PDFRawStream)) return null;
+  try {
+    return decodeStreamStrict(stream);
+  } catch (e) {
+    rethrowDecodeLimit(e);
+    throw new ContentNotExaminedError(pageIndex, text, e);
+  }
+}
+
+/** Rethrows failures that must fail a text edit instead of reading as "no match". */
+export function rethrowEditFailure(e: unknown): void {
+  rethrowDecodeLimit(e);
+  if (e instanceof ContentNotExaminedError) throw e;
 }
 
 /**

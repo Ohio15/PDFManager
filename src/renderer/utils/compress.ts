@@ -44,6 +44,7 @@ import {
   decodeBudgetForStream,
   decodeRawStreamBounded,
   inflateCapped,
+  loadPdf,
   MAX_DECODED_STREAM_BYTES as MAX_INFLATE_BYTES,
   rethrowDecodeLimit,
   rethrowDocumentDecodeLimit,
@@ -867,7 +868,7 @@ export async function compressPdf(
     throw new CompressError('Target resolution must be between 36 and 1200 DPI');
   }
 
-  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
+  const doc = await loadPdf(bytes, { updateMetadata: false });
   const pageCount = doc.getPageCount();
   const images: ImageReport[] = [];
 
@@ -881,7 +882,7 @@ export async function compressPdf(
   const output = new Uint8Array(await doc.save({ useObjectStreams: true, updateFieldAppearances: false }));
 
   // Never hand back something we cannot reopen with the same page count.
-  const verify = await PDFDocument.load(output, { updateMetadata: false });
+  const verify = await loadPdf(output, { updateMetadata: false });
   if (verify.getPageCount() !== pageCount) {
     throw new CompressError(`Compressed output has ${verify.getPageCount()} pages, expected ${pageCount}`);
   }

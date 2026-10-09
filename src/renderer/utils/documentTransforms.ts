@@ -24,6 +24,7 @@
  */
 
 import { PDFDocument as PDFLib, PDFName, PDFArray, PDFRef } from 'pdf-lib';
+import { loadPdf } from './boundedDecode';
 import type { PDFPage, PDFSourceAnnotation } from '../types';
 import { saveFormFieldValues, FormFieldMapping } from './formFieldSaver';
 import { applyEditsAndAnnotations } from './pdfSavePipeline';
@@ -48,7 +49,7 @@ export async function bakeFormValues(
   const values = storage.getAll();
   if (!values || Object.keys(values).length === 0) return pdfData;
 
-  const doc = await PDFLib.load(pdfData, { updateMetadata: false });
+  const doc = await loadPdf(pdfData, { updateMetadata: false });
   const wrote = await saveFormFieldValues(doc, storage, mappings);
   if (!wrote) return pdfData;
   return new Uint8Array(await doc.save({ updateFieldAppearances: false }));
@@ -91,7 +92,7 @@ export async function flattenDocument(input: FlattenDocumentInput): Promise<Flat
 
   const pending = pages.reduce((n, p) => n + p.annotations.length, 0);
   if (scope !== 'forms' && pending > 0) {
-    const before = annotationRefs(await PDFLib.load(bytes, { updateMetadata: false }));
+    const before = annotationRefs(await loadPdf(bytes, { updateMetadata: false }));
     // Annotations only: text edits/deletions stay pending in the model and are
     // applied by the next save against the same content streams.
     bytes = await applyEditsAndAnnotations({
@@ -103,7 +104,7 @@ export async function flattenDocument(input: FlattenDocumentInput): Promise<Flat
     // The pipeline draws sticky-note markers into content and adds an
     // appearance-less /Text annotation only to carry the note text; those new
     // annotations are already "burned", so they are removed, not skipped.
-    for (const ref of annotationRefs(await PDFLib.load(bytes, { updateMetadata: false }))) {
+    for (const ref of annotationRefs(await loadPdf(bytes, { updateMetadata: false }))) {
       if (!before.has(ref)) removeWithoutDrawing.add(ref);
     }
     pages = pages.map((p) => ({ ...p, annotations: [] }));

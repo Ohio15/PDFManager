@@ -4,7 +4,8 @@ import {
   FontInfo,
   fontCache,
   getContentStreams,
-  decodeStream,
+  decodeContentForEdit,
+  rethrowEditFailure,
   updateStream,
   buildFontCache,
   escapePDFString,
@@ -13,7 +14,6 @@ import {
   hexToString,
   stringToHex,
 } from './pdfStreamUtils';
-import { rethrowDecodeLimit } from './boundedDecode';
 
 /**
  * Blank out text in content stream by replacing with spaces.
@@ -48,7 +48,7 @@ export async function blankTextInContentStream(
     let blanked = false;
 
     for (const stream of contentStreams) {
-      const contentBytes = decodeStream(stream);
+      const contentBytes = decodeContentForEdit(stream, pageIndex, originalText);
       if (!contentBytes) continue;
 
       let contentStr = new TextDecoder('latin1').decode(contentBytes);
@@ -86,8 +86,8 @@ export async function blankTextInContentStream(
 
     return blanked;
   } catch (error) {
-    // A decode-limit overflow fails the save; it is not a missed match.
-    rethrowDecodeLimit(error);
+    // An overflow or unexaminable content fails the save; it is not a missed match.
+    rethrowEditFailure(error);
     console.error('[blankText] Error blanking text:', error);
     return false;
   }

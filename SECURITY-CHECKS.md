@@ -641,6 +641,20 @@ github.repository`), which is exactly what the canonical predicate admits.
 policy `68d983a4`). Before this, any variable-selected runner on a
 PR-reachable job was a finding. A same-repo `pull_request` in a private,
 registrar-served repository is now CLEAR under conditions 1 to 3 above.
+**Amended (approved by Ron 2026-11-01; audit-dev-standards-2026-10-27,
+PR #62).** The guarded literal toggle is ALSO canonical, and is THE canonical
+text for dev-standards fleet templates (which install.sh may copy into any
+repository). Token for token (whitespace aside), Linux:
+`(github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' || github.event_name == 'merge_group' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && github.event.repository.private && vars.CI_RUNNER == 'nexus-ci' && 'nexus-ci' || 'ubuntu-latest'`.
+Windows: the same allow-list, then
+`&& github.event.repository.private && vars.CI_RUNNER == 'nexus-ci' && 'nexus-ci-windows' || 'windows-latest'`.
+It meets condition 1. It is stricter than the variable form: the variable
+can only toggle between two literal labels (never name another runner, e.g. a
+persistent deploy runner), and a public repository always resolves to the
+hosted literal. Condition 2 still applies to any repository that actually sets
+`CI_RUNNER`; in a public repository the guarded form is still a hit under the
+"stay FINDINGs" list unless the copy is the hosted literal (install.sh writes
+the hosted literal into any repository it cannot confirm is private).
 **Origin.** audit-pdfmanager-2026-10-08, proposed there as SC-34
 (MEDIUM, latent; approved by Ron 2026-10-09).
 
@@ -895,6 +909,99 @@ agent (ssh-agent, op) so the key never reaches a file at all.
 **Origin.** audit-infra-2026-10-29 (LOW latent; proposed there as SC-46;
 approved by Ron 2026-10-29).
 
+### SC-51 · A dependency change validator that checks the SHAPE of a version but not its direction, range or release status
+**Shape.** A gate that admits an automated dependency bump when the new version
+merely matches a version grammar (`PLAIN_VERSION`, `GO_VERSION`, a range
+regex) without requiring that it be greater than the base version, satisfy the
+base range or specifier, and name a RELEASED artifact (no Go pseudo-version or
+`+incompatible`, no removed `integrity`/`resolved` pin) unless the base already
+had that form. The PR or doc meanwhile calls the result "safe", "non-major" or
+"patch/minor". dev-standards 2026-10-30: dep-auto-apply `publish` (MEDIUM, 3/3
+reviewers; Go pseudo-versions MEDIUM, 1/3).
+**Check.** For every validator that compares a changed dependency version to
+the base: `grep -nE "PLAIN_VERSION|GO_VERSION|REQ_SPEC|DEP_SPEC|fullmatch\(.*version"`
+and confirm each hit is followed by a comparison against the base version and
+range (semver compare, not regex) and a refusal of pseudo-version /
+`+incompatible` / removed-pin forms. Any claim of "safe", "non-major",
+"patch/minor" in the PR body or docs without such a comparison is a sibling.
+**Fix form.** Monotonic version check against the base plus range
+satisfaction; treat a removed pin as a change; refuse unreleased version forms
+unless pre-existing; or drop the safety wording.
+**Since.** approved 2026-11-01.
+**Origin.** audit-dev-standards-2026-10-30 (MEDIUM; approved by Ron 2026-11-01;
+fix form shipped in dev-standards PR #62).
+
+### SC-52 · A control stated as a rule for consumers but enforced only in the producer repository
+**Shape.** A shared workflow, template or hook documents that its safety
+depends on a property of the CONSUMING repository (for example "never restore
+an Actions cache in a release workflow", "the repo must be private", "the
+registrar must be >= X"), the producer's own tests enforce that property on the
+producer's files, and the install/enrolment path copies the artifact into
+consumers without checking the property there. dev-standards 2026-10-30:
+dep-auto-apply's "never restore an Actions cache" control is tested only on
+dev-standards' workflows while `install.sh` enrols any repo; n3xus-notify (enrolled)
+still has `cache: true` (MEDIUM, 2/3 reviewers).
+**Check.** For every "MUST"/"never"/"the control is" statement in a template or
+shared-workflow header that names a property of the consumer, find the
+install/enrolment code path (`install.sh`, a preflight step, a fleet scan) and
+confirm it probes that property in the TARGET and refuses or reports when it
+is absent. A statement with no target-side probe is a FINDING; each enrolled
+consumer lacking the property is a sibling.
+**Fix form.** Enrolment-time or preflight check in the target repository that
+fails closed, plus a fleet scan that reports drift.
+**Since.** approved 2026-11-01.
+**Origin.** audit-dev-standards-2026-10-30 (MEDIUM; approved by Ron 2026-11-01;
+enrolment-time check is dev-standards PR fix/enrol-cache-restore-check, in flight).
+
+### SC-53 · A user-facing message or doc names an enforcement point that has no consumer
+**Shape.** A notice, page, README or module doc asserts that another component
+(a hook, PEP, gate, verifier) will act on this output, and no reader of that
+output exists in any repo. The operator then trusts a control that is not
+there, and a missing output reads the same as a clean one. steward-sessionwatch
+2026-11-10: the PEP claim in the operator notice has no consumer (M10).
+**Check.** For every string or doc line naming a consumer (`Stop hook`, `PEP`,
+`gate will`, `verifier`, a DR id), grep the named consumer's repo (and
+`git log --all -S`) for a reader of the produced artifact (file name, JSON key
+or topic). No hit = FINDING.
+**Fix form.** Build the reader, or remove the claim and say the output is
+advisory until a consumer exists.
+**Since.** approved 2026-11-10.
+**Origin.** audit-steward-sessionwatch-2026-11-10 (MEDIUM M10; approved by Ron
+2026-11-10, shared-brain b37ab3ef).
+
+### SC-54 · A text sanitizer for trusted display strips control characters but not Unicode format characters
+**Shape.** A clean or sanitize function used on attacker- or session-authored
+text that ends up in a trusted notification, board or log removes C0/C1 only,
+leaving bidi overrides, isolates, zero-width characters and line or paragraph
+separators, which reorder, hide or forge lines. steward-sessionwatch
+2026-11-10: the notifier's sanitizer (M13).
+**Check.** For each sanitizer feeding a trusted sink, assert it removes or
+escapes U+200B-U+200D, U+2028-U+2029, U+202A-U+202E, U+2066-U+2069 and U+FEFF
+(grep the function for these ranges, or a unit test with each code point).
+Absent = FINDING.
+**Fix form.** Strip or escape the Unicode format (Cf) and line/paragraph
+separator (Zl/Zp) classes alongside C0/C1, with a unit test per code point.
+**Since.** approved 2026-11-10.
+**Origin.** audit-steward-sessionwatch-2026-11-10 (MEDIUM M13; approved by Ron
+2026-11-10, shared-brain b37ab3ef).
+
+### SC-55 · A finding is marked resolved on absence rather than on a satisfied predicate
+**Shape.** A monitor clears an open finding (and its retry or undelivered
+state) because it was not re-observed this cycle, so aging out, a skipped
+subject or a changed fingerprint is recorded the same as remediation. Refines
+SC-07 for state machines. steward-sessionwatch 2026-11-10: findings resolved on
+absence (M2) and the mtime pre-filter drop (M3).
+**Check.** Grep for removal from the open-findings map inside a loop over keys
+not in the current `seen` set; FINDING unless the removal is conditioned on an
+explicit satisfied-evidence predicate, and an undelivered page is never
+cleared by any other branch.
+**Fix form.** Resolve only on positive evidence that the predicate is
+satisfied; an unseen subject stays open (or becomes unexamined), and an
+undelivered page survives every other transition.
+**Since.** approved 2026-11-10.
+**Origin.** audit-steward-sessionwatch-2026-11-10 (MEDIUM M2, M3; approved by Ron
+2026-11-10, shared-brain b37ab3ef).
+
 ---
 
 ## Proposed additions (from the routine audit; operator approval required)
@@ -911,7 +1018,9 @@ and renumbered because those numbers were already graduated), approved
 2026-10-10. SC-43..SC-46 (audit-sentinel-2026-10-26), approved
 2026-10-26. SC-47..SC-50 (audit-infra-2026-10-29, proposed there as
 SC-43..SC-46 and renumbered because those numbers were already graduated),
-approved 2026-10-29. SC-37 amended 2026-10-27 (same-repo pull requests on
+approved 2026-10-29. SC-51..SC-52 (audit-dev-standards-2026-10-30),
+approved 2026-11-01. SC-53..SC-55 (audit-steward-sessionwatch-2026-11-10),
+approved 2026-11-10. SC-37 amended 2026-10-27 (same-repo pull requests on
 nexus-ci; approved by Ron). SC-26..SC-28 were numbered by
 audit-openos-2026-09-16 but never written as proposals; the numbers stay
 reserved.

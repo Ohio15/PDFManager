@@ -1,6 +1,6 @@
 {
   "name": "pdf-manager",
-  "version": "2.15.5",
+  "version": "2.15.6",
   "description": "A comprehensive PDF manager: view, edit, merge, split, convert documents to PDF",
   "author": "Ron <ohio_15@hotmail.com>",
   "main": "dist/main/main.js",
@@ -44,14 +44,14 @@
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^8.2.2",
     "electron": "^44.5.1",
-    "electron-builder": "^26.15.3",
+    "electron-builder": "^26.18.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tsx": "^4.23.15",
     "typescript": "^5.3.3",
     "vite": "^8.3.2",
     "vitest": "^4.1.12",
-    "wait-on": "^9.0.3"
+    "wait-on": "^9.5.1"
   },
   "build": {
     "appId": "com.pdfmanager.app",
@@ -117,5 +117,13 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Ohio15/PDFManager.git"
+  },
+  "overrides": {
+    "@electron/universal": {
+      "minimatch": "^11.0.8"
+    },
+    "app-builder-lib": {
+      "minimatch": "^11.0.8"
+    }
   }
 }
